@@ -444,4 +444,113 @@ mod tests {
             );
         }
     }
+
+    // §5: `build()` never silently defaults a missing tenant identifier.
+    #[test]
+    fn build_without_base_url_fails() {
+        match AxiamClient::builder().tenant_slug("acme").build() {
+            Ok(_) => panic!("build() without a base_url must fail"),
+            Err(AxiamError::Network { message, .. }) => {
+                assert!(message.contains("base_url"), "message: {message}");
+            }
+            Err(other) => panic!("expected Network error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn build_without_tenant_fails() {
+        match AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .build()
+        {
+            Ok(_) => panic!("build() without a tenant identifier must fail (§5)"),
+            Err(AxiamError::Auth { message }) => {
+                assert!(message.contains("tenant"), "message: {message}");
+            }
+            Err(other) => panic!("expected Auth error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn build_with_tenant_id_succeeds() {
+        let client = AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .tenant_id(Uuid::new_v4())
+            .org_slug("acme-corp")
+            .connect_timeout(Duration::from_secs(3))
+            .request_timeout(Duration::from_secs(9))
+            .build()
+            .expect("a base_url + tenant_id is sufficient to build");
+        assert_eq!(client.base_url().as_str(), "https://iam.example.com/");
+    }
+
+    // §6: the only TLS escape hatch is a custom CA PEM. The doc comment on
+    // `with_custom_ca` claims eager construction-time validation, but under
+    // this crate's `rustls-tls` build (no `default-tls`/native-tls),
+    // `reqwest::Certificate::from_pem` never actually parses/validates the
+    // bytes — it just stores them (`Cert::Pem(buf)`), deferring real PEM
+    // parsing to `ClientBuilder::build()` (confirmed against
+    // `reqwest-0.12.28/src/tls.rs::{from_pem, add_to_rustls}`). So a byte
+    // string with no `-----BEGIN CERTIFICATE-----` armor at all is NOT
+    // rejected by `with_custom_ca()` — it is silently treated as "zero
+    // certificates" and only a PEM block that IS armored but has corrupt
+    // content inside fails, and only once `.build()` actually runs.
+    #[test]
+    fn with_custom_ca_accepts_pem_shaped_bytes_regardless_of_content() {
+        let result = AxiamClient::builder().with_custom_ca(b"not a valid PEM at all");
+        assert!(
+            result.is_ok(),
+            "with_custom_ca() does not itself validate PEM content under rustls-tls"
+        );
+    }
+
+    #[test]
+    fn build_fails_when_custom_ca_has_pem_armor_but_corrupt_content() {
+        let armored_but_corrupt =
+            b"-----BEGIN CERTIFICATE-----\nnot-valid-base64-!!!\n-----END CERTIFICATE-----\n";
+        let result = AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .tenant_slug("acme")
+            .with_custom_ca(armored_but_corrupt)
+            .expect("with_custom_ca itself does not validate")
+            .build();
+        assert!(
+            result.is_err(),
+            "a PEM-armored but corrupt custom CA must fail at build() time"
+        );
+    }
+
+    #[test]
+    fn with_custom_ca_accepts_a_well_formed_pem_and_build_succeeds() {
+        // A real self-signed Ed25519 certificate (generated once via
+        // `openssl req -x509 -newkey ed25519 ... -days 36500`, test-only, no
+        // corresponding private key is shipped anywhere in this repo). Its
+        // cryptographic validity beyond "a well-formed X.509 DER
+        // certificate" is irrelevant here — this test exercises the `Ok` arm
+        // of `reqwest::Certificate::from_pem` and `build()`'s
+        // `add_root_certificate` branch, distinct from the malformed-PEM
+        // `Err` arm covered by `with_custom_ca_rejects_malformed_pem` above.
+        let pem = b"-----BEGIN CERTIFICATE-----\n\
+MIIBTzCCAQGgAwIBAgIUDR1ws2GiNbcb4OA2Lwi1txF7ej4wBQYDK2VwMBwxGjAY\n\
+BgNVBAMMEWF4aWFtLXNkay10ZXN0LWNhMCAXDTI2MDcxMjE5MDkzNVoYDzIxMjYw\n\
+NjE4MTkwOTM1WjAcMRowGAYDVQQDDBFheGlhbS1zZGstdGVzdC1jYTAqMAUGAytl\n\
+cAMhALONss49Zo5XLA7afp7IqEjAZOuwOOeJFguUGAgFKiqOo1MwUTAdBgNVHQ4E\n\
+FgQUIP+1NWh0QysH58QJrLhf3tQB5vYwHwYDVR0jBBgwFoAUIP+1NWh0QysH58QJ\n\
+rLhf3tQB5vYwDwYDVR0TAQH/BAUwAwEB/zAFBgMrZXADQQDdqXRycg8FEUCfoSPD\n\
+Vvc+22jEDDqLIztrKVMpUZZshflOEFzxYPMjEreJE7nnndY6+Of+l1I6+/xsR9qs\n\
+W10C\n\
+-----END CERTIFICATE-----\n";
+        let client = AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .tenant_slug("acme")
+            .with_custom_ca(pem)
+            .expect("well-formed CA PEM must be accepted")
+            .build()
+            .expect("build() must succeed with a valid custom CA configured");
+        assert_eq!(client.base_url().as_str(), "https://iam.example.com/");
+    }
 }

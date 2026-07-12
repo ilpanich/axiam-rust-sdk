@@ -462,3 +462,160 @@ async fn local_verification_makes_no_outbound_axiam_server_request() {
     assert_eq!(user.user_id, user_id);
     assert_eq!(user.tenant_id, tenant_id);
 }
+
+/// Missing `app_data::<web::Data<JwksVerifier>>()` — the extractor is
+/// misconfigured (the caller forgot to register the verifier), not the
+/// caller's request that's malformed. Must fail closed with 401, never
+/// panic on the `.ok_or_else(...)?`.
+#[tokio::test]
+async fn missing_jwks_verifier_app_data_yields_401() {
+    let tenant_id = Uuid::new_v4();
+    let token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    // No `.app_data(web::Data::new(verifier))` at all.
+    let req = TestRequest::default()
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("a misconfigured extractor (no JwksVerifier registered) must fail");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+}
+
+/// An `Authorization` header present but using a scheme other than
+/// `Bearer` must be rejected distinctly from "missing credentials".
+#[tokio::test]
+async fn non_bearer_authorization_scheme_yields_401() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let req = TestRequest::default()
+        .app_data(web::Data::new(verifier))
+        .insert_header(("Authorization", "Basic dXNlcjpwYXNz"))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("a non-Bearer Authorization scheme must be rejected");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+}
+
+/// `Authorization: Bearer` with no credentials after the scheme is the same
+/// invalid-scheme rejection as a wrong scheme entirely.
+#[tokio::test]
+async fn bearer_scheme_with_empty_credentials_yields_401() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let req = TestRequest::default()
+        .app_data(web::Data::new(verifier))
+        .insert_header(("Authorization", "Bearer "))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("Bearer with no credentials must be rejected");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+}
+
+/// A verified token whose `sub` claim is not a valid UUID must be rejected
+/// via `invalid_claim`, not panic on `Uuid::parse_str(...).unwrap()`.
+#[tokio::test]
+async fn non_uuid_sub_claim_yields_401() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    #[derive(Debug, Serialize)]
+    struct BadSubClaims {
+        sub: String,
+        tenant_id: String,
+        org_id: String,
+        iss: String,
+        iat: i64,
+        exp: i64,
+        jti: String,
+        scope: Option<String>,
+    }
+    let claims = BadSubClaims {
+        sub: "not-a-uuid".to_string(),
+        tenant_id: Uuid::new_v4().to_string(),
+        org_id: Uuid::new_v4().to_string(),
+        iss: "axiam-test".to_string(),
+        iat: 0,
+        exp: 9_999_999_999,
+        jti: Uuid::new_v4().to_string(),
+        scope: None,
+    };
+    let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    der.extend_from_slice(&TEST_ED25519_SEED);
+    let key = EncodingKey::from_ed_der(&der);
+    let token = jsonwebtoken::encode(&header, &claims, &key).expect("encode token");
+
+    let req = TestRequest::default()
+        .app_data(web::Data::new(verifier))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("a non-UUID sub claim must be rejected, not panic");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+}
+
+/// §3 CSRF double-submit: a cookie-sourced credential on a state-changing
+/// request with a `X-CSRF-Token` header present but NOT equal to the
+/// `axiam_csrf` cookie must be rejected with 403.
+#[tokio::test]
+async fn cookie_auth_state_changing_with_mismatched_csrf_token_yields_403() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let token = issue_test_access_token(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    let req = TestRequest::post()
+        .app_data(web::Data::new(verifier))
+        .cookie(actix_web::cookie::Cookie::new("axiam_access", token))
+        .cookie(actix_web::cookie::Cookie::new(
+            "axiam_csrf",
+            "the-real-csrf-token",
+        ))
+        .insert_header(("X-CSRF-Token", "a-different-csrf-token"))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("a mismatched X-CSRF-Token header must be rejected");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::FORBIDDEN);
+}
