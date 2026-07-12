@@ -1107,4 +1107,106 @@ mod tests {
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
         assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 0);
     }
+
+    // --- `consume()` pre-connect validation (X-2) --------------------------
+    //
+    // `consume()` runs the X-2 plaintext-scheme guard BEFORE attempting the
+    // AMQP broker connection, so its rejection path is reachable without a
+    // live RabbitMQ instance — unlike the rest of `consume()` (the actual
+    // `Connection::connect`/consume loop), which needs one and is therefore
+    // exercised by CI's integration environment, not this unit test binary.
+
+    #[tokio::test]
+    async fn consume_rejects_plaintext_amqp_url_against_a_routable_host() {
+        let err = consume(
+            "amqp://rabbitmq.example.com:5672",
+            "test-queue",
+            Sensitive::new(b"irrelevant-signing-key".to_vec()),
+            None,
+            |_value: serde_json::Value| async {},
+        )
+        .await
+        .expect_err(
+            "plaintext amqp:// against a routable host must be rejected before connecting (X-2)",
+        );
+
+        match err {
+            AxiamError::Network { message, .. } => {
+                assert!(message.contains("amqps"), "message: {message}");
+            }
+            other => panic!("expected Network error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_attempts_to_connect_when_loopback_amqp_url_passes_the_guard() {
+        // No broker is listening on this freshly-bound-then-dropped
+        // ephemeral loopback port, so `Connection::connect` itself fails —
+        // proving the X-2 guard's loopback exception let control through to
+        // the connection attempt (a routable-host plaintext URL would have
+        // been rejected earlier, before ever reaching this error).
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+        let addr = listener.local_addr().expect("resolve bound local_addr");
+        drop(listener);
+
+        let err = consume(
+            &format!("amqp://{addr}"),
+            "test-queue",
+            Sensitive::new(b"irrelevant-signing-key".to_vec()),
+            None,
+            |_value: serde_json::Value| async {},
+        )
+        .await
+        .expect_err("a closed loopback port must fail to connect");
+
+        assert!(
+            matches!(err, AxiamError::Network { .. }),
+            "connection failure must map to Network, got {err:?}"
+        );
+    }
+
+    // --- v2 replay-protection field extraction/validation ------------------
+
+    #[test]
+    fn extract_replay_fields_none_when_key_version_missing() {
+        let body = serde_json::json!({
+            "nonce": "some-nonce",
+            "issued_at": Utc::now().to_rfc3339(),
+        });
+        assert!(extract_replay_fields(&body).is_none());
+    }
+
+    #[test]
+    fn extract_replay_fields_none_when_issued_at_is_not_rfc3339() {
+        let body = serde_json::json!({
+            "key_version": 2,
+            "nonce": "some-nonce",
+            "issued_at": "not-a-timestamp",
+        });
+        assert!(extract_replay_fields(&body).is_none());
+    }
+
+    #[test]
+    fn validate_v2_replay_protection_rejects_missing_replay_fields() {
+        // A body with a valid signature (irrelevant here — this validates
+        // the acceptance-policy layer directly) but missing the mandatory
+        // NEW-4 fields must be rejected with the "missing or malformed"
+        // reason, not panic or silently pass.
+        let body = serde_json::json!({ "action": "read" });
+        let replay = ReplayGuard::with_default_skew();
+        let result = validate_v2_replay_protection(&body, &replay);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing or malformed"));
+    }
+
+    #[test]
+    fn replay_guard_ttl_does_not_panic_on_an_extreme_skew() {
+        // `chrono::Duration::MAX * 2` overflows `std::time::Duration`; the
+        // fallback branch in `ReplayGuard::ttl()` must be taken instead of
+        // panicking.
+        let guard = ReplayGuard::new(chrono::Duration::MAX);
+        let ttl = guard.ttl();
+        assert!(ttl.as_secs() > 0);
+    }
 }
