@@ -19,7 +19,7 @@
 //! carries two additional mandatory fields, `nonce` and `issued_at`, used for
 //! replay protection (CONTRACT.md §8 "v2 — Replay Protection"). Both fields
 //! are ALWAYS emitted (no `skip_serializing_if`) so they sit inside the HMAC
-//! coverage. See `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json`
+//! coverage. See `testdata/v2_reference_vectors.json`
 //! for server-generated canonical bytes + expected HMAC this SDK must
 //! reproduce byte-for-byte.
 
