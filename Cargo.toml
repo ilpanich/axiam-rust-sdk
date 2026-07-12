@@ -114,7 +114,7 @@ tokio-test = "0.4"
 # enabled for the published library build — Cargo unifies dev-dependency
 # features only for `cargo test`/`cargo build --tests`, not for downstream
 # consumers of the published crate.
-tonic = { version = "0.14", default-features = false, features = ["router"] }
+tonic = { version = "0.14", default-features = false, features = ["router", "gzip"] }
 
 [package.metadata.docs.rs]
 all-features = true
