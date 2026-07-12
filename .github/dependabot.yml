@@ -1,0 +1,22 @@
+# .github/dependabot.yml
+# Automated dependency updates — D-16.
+# Mirrors the AXIAM server repo's policy: weekly, minor+patch batched into one
+# PR so routine bumps do not flood review, majors raised individually.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

@@ -1,0 +1,57 @@
+name: Coverage
+
+# Line coverage for the SDK test suite, reported to Coveralls.
+#
+# Runs on every PR and on every push to main. The main-branch runs are what
+# establish the baseline Coveralls diffs a PR against, so both triggers are
+# required — a PR-only workflow would have nothing to compare to.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: cargo-llvm-cov -> Coveralls
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9  # stable (2026-03-27)
+        with:
+          toolchain: stable
+          # cargo-llvm-cov reads the profraw files the instrumented binaries
+          # emit; llvm-tools ships the llvm-profdata/llvm-cov it shells out to.
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6  # v2.7.8
+
+      # build.rs shells out to protoc for the gRPC codegen pulled in by
+      # --all-features; without it the crate does not compile here either.
+      - name: Install protoc (build.rs gRPC codegen)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2.83.2
+        with:
+          tool: cargo-llvm-cov
+
+      # --all-features so the grpc/amqp/actix code paths are instrumented too;
+      # with the default feature set, `actix` (and its §10 route guard, CSRF
+      # check included) would silently count as zero-coverage dead code.
+      - name: Collect coverage
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Upload to Coveralls
+        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: lcov.info
+          format: lcov
