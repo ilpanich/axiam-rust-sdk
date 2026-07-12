@@ -14,7 +14,7 @@ pub mod client;
 pub mod interceptor;
 
 /// Generated stubs from `build.rs` (`tonic-prost-build`) / the repository's
-/// `buf generate` pipeline (`sdks/buf.gen.yaml`) — both target `src/gen/`
+/// `buf generate` pipeline (`buf.gen.yaml`) — both target `src/gen/`
 /// with the same `neoeinstein-prost`/`neoeinstein-tonic`-equivalent output,
 /// producing a single `axiam.v1` module (matches the proto package name in
 /// `proto/axiam/v1/*.proto`).

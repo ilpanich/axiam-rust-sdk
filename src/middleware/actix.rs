@@ -41,7 +41,7 @@
 //! deployment where `axiam_access` reaches this app, the non-`HttpOnly`
 //! `axiam_csrf` cookie does too, so this mirrors, locally, the same
 //! double-submit check the AXIAM server performs on its own endpoints (§3;
-//! see also `sdks/CONTRACT.md` §3 and the equivalent check in
+//! see also `CONTRACT.md` §3 and the equivalent check in
 //! `AxiamAuthenticationFilter` on the Java SDK).
 
 use std::future::Future;

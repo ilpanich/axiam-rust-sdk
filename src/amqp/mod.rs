@@ -8,7 +8,7 @@
 //! external crates (`hmac`, `sha2`, `hex`, `serde`, `uuid`, `serde_json`,
 //! `lapin`) — this crate never depends on any `axiam-*` workspace crate.
 //!
-//! See `sdks/CONTRACT.md` §8 for the full HMAC verification protocol this
+//! See `CONTRACT.md` §8 for the full HMAC verification protocol this
 //! module implements.
 
 pub mod consumer;

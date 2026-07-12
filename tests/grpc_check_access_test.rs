@@ -1,8 +1,8 @@
 //! In-process tonic 0.14 test server proving `CheckAccess`/`BatchCheckAccess`
 //! round-trip through the generated stubs (SC#4, gRPC half).
 //!
-//! New test infrastructure — no shared gRPC test harness exists yet in
-//! `sdks/rust/` (16-VALIDATION.md). A stub `AuthorizationService`
+//! New test infrastructure — no shared gRPC test harness exists yet in this
+//! crate. A stub `AuthorizationService`
 //! implementation returns canned `AccessDecision`s driven by the test's
 //! `subject_id`/`action` inputs, letting each test assert a specific
 //! outcome (allow, deny → `PERMISSION_DENIED`, `UNAVAILABLE`, and a

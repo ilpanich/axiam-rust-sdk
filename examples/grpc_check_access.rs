@@ -7,7 +7,7 @@
 //! `POST /api/v1/auth/refresh` HTTP call. This example shows the
 //! `grpc`-only-friendly shape of that wiring: a minimal `reqwest`-based
 //! login (holding its own `Arc<reqwest::cookie::Jar>`, mirroring
-//! `sdks/rust/src/client.rs`'s own pattern) populates the shared
+//! `src/client.rs`'s own pattern) populates the shared
 //! `TokenManager` once, then `AuthzGrpcClient` drives the same instance's
 //! single-flight refresh guard (§9) via the closure on any
 //! `UNAUTHENTICATED` response.
@@ -34,7 +34,7 @@ struct LoginBody {
 }
 
 /// Extract a named cookie value directly out of `jar` for `base_url` —
-/// mirrors `sdks/rust/src/token/manager.rs::extract_cookie_from_jar`
+/// mirrors `src/token/manager.rs::extract_cookie_from_jar`
 /// (crate-private), reproduced here since a `grpc`-only consumer does not
 /// go through a `rest`-feature `AxiamClient`.
 fn extract_cookie(jar: &reqwest::cookie::Jar, base_url: &url::Url, name: &str) -> Option<String> {
