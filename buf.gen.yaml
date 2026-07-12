@@ -1,0 +1,24 @@
+version: v2
+plugins:
+  # Rust: prost (message codegen) + tonic (service codegen).
+  #
+  # `managed` mode is deliberately absent: it existed in the monorepo's
+  # buf.gen.yaml only to inject a `go_package` prefix for protoc-gen-go. The
+  # Rust plugins derive their module path from the proto package (axiam.v1)
+  # and need no file-option overrides.
+  #
+  # build.rs runs the equivalent tonic-prost-build pipeline over the same
+  # `proto/` inputs into the same `src/gen` output, so a plain
+  # `cargo build --features grpc` (no buf CLI, no network) produces an
+  # equivalent `axiam.v1` module. `src/gen/` is gitignored (D-09): the stubs
+  # are generated on demand and bundled into the crates.io tarball at publish
+  # time, never committed.
+  - remote: buf.build/community/neoeinstein-prost
+    out: src/gen
+    opt:
+      - compile_well_known_types=true
+  - remote: buf.build/community/neoeinstein-tonic
+    out: src/gen
+    opt:
+      - compile_well_known_types=true
+      - no_include=true
