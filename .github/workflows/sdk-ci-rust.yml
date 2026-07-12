@@ -8,6 +8,9 @@ on:
       - 'tests/**'
       - 'examples/**'
       - 'proto/**'
+      # The server-generated HMAC reference vectors (CONTRACT.md §8): a
+      # re-vendored fixture must re-run the byte-parity tests.
+      - 'testdata/**'
       - 'Cargo.toml'
       - 'build.rs'
       - 'buf.yaml'
