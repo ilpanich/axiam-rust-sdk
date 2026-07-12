@@ -1,11 +1,11 @@
 //! Build-time gRPC codegen shim.
 //!
 //! When the `grpc` feature is enabled, compiles the AXIAM protobuf service
-//! definitions into `src/gen/` via `tonic-prost-build`. This is the local
-//! codegen fallback to the repository's `buf generate` pipeline (D-09,
-//! `sdks/buf.gen.yaml` targets the same `rust/src/gen` output directory);
-//! plan 16-03 wires the generated module into the crate, and plan 16-06's
-//! publish job swaps in the buf-bundled stubs for the published crate.
+//! definitions in `proto/` into `src/gen/` via `tonic-prost-build`. This is
+//! the local codegen fallback to this repository's `buf generate` pipeline
+//! (D-09, `buf.gen.yaml` targets the same `src/gen` output directory); the
+//! CI publish job pre-generates the stubs so the crates.io tarball is
+//! self-contained.
 //!
 //! When the `grpc` feature is off, this build script is a no-op.
 
@@ -19,17 +19,18 @@ fn main() {
         return;
     }
 
-    let proto_dir = Path::new("../../proto/axiam/v1");
+    let proto_dir = Path::new("proto/axiam/v1");
     let protos = [
         proto_dir.join("authorization.proto"),
         proto_dir.join("token.proto"),
         proto_dir.join("user.proto"),
     ];
 
-    // Guard against missing proto inputs: warn (do not fail) so a partial
-    // checkout or non-monorepo build of this crate does not hard-fail just
-    // because the `grpc` feature was requested. The buf-bundled stubs
-    // (D-09) are the publish-time fallback for exactly this situation.
+    // Guard against missing proto inputs: warn (do not fail). `proto/` is
+    // deliberately absent from the published crate's `include` list, so a
+    // crates.io consumer building with the `grpc` feature has no protos and
+    // no protoc — they compile against the stubs bundled into `src/gen/` at
+    // publish time (D-09). Only a git checkout regenerates them here.
     let missing: Vec<&Path> = protos
         .iter()
         .map(|p| p.as_path())

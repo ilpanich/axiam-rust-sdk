@@ -1,6 +1,7 @@
-# This crate is standalone — deliberately NOT a member of the root AXIAM
-# Cargo workspace (edition 2021 here vs workspace edition 2024). The empty
-# [workspace] table below opts it out of ancestor workspace discovery.
+# Single-crate workspace: this crate lives at the root of its own repository
+# (github.com/ilpanich/axiam-rust-sdk). The explicit [workspace] table also
+# stops Cargo from discovering an ancestor workspace if the repo is ever
+# checked out inside one.
 [workspace]
 
 [package]
@@ -11,25 +12,29 @@ rust-version = "1.88"
 description = "Official Rust client SDK for AXIAM IAM"
 license = "Apache-2.0"
 publish = true
-repository = "https://github.com/ilpanich/axiam"
+repository = "https://github.com/ilpanich/axiam-rust-sdk"
+homepage = "https://github.com/ilpanich/axiam-rust-sdk"
 documentation = "https://docs.rs/axiam-sdk"
 readme = "README.md"
-# `cargo package`/`cargo publish` follow this `include` list, NOT
-# `.gitignore` — the default (VCS-only) file set would otherwise exclude
-# `src/gen/**`, since it is gitignored (16-01/D-09: generated gRPC stubs are
-# never committed to the repo). This crate is not published `default-run`
-# from a git worktree that regenerates `src/gen/` first (either via `cargo
-# build --features grpc`, which runs `build.rs`, or via the CI publish job's
-# buf-bundle step), the bundled stub file MUST ship inside the package
-# tarball so crates.io consumers (who cannot run buf) get a self-contained,
-# compilable crate (D-09). This list is additive to Cargo's built-in
-# defaults for a package with no `exclude`, so ordinary source/doc/license
-# files are still included automatically.
+keywords = ["iam", "authorization", "oauth2", "rbac", "sdk"]
+categories = ["api-bindings", "authentication"]
+# `cargo package`/`cargo publish` follow this `include` list, NOT `.gitignore`
+# — the default (VCS-only) file set would otherwise exclude `src/gen/**`,
+# since it is gitignored (D-09: generated gRPC stubs are never committed).
+# Publishing always happens from a worktree that regenerates `src/gen/` first
+# (via `cargo build --features grpc`, which runs `build.rs`, or via `buf
+# generate`), and the resulting stubs MUST ship inside the package tarball:
+# `proto/` is NOT included, so crates.io consumers — who have neither the
+# protos nor protoc — need the pre-generated module to get a self-contained,
+# compilable crate. This list is additive to Cargo's built-in defaults for a
+# package with no `exclude`, so ordinary source/doc/license files are still
+# included automatically.
 include = [
   "src/**",
   "build.rs",
   "Cargo.toml",
   "README.md",
+  "CONTRACT.md",
   "LICENSE",
 ]
 
