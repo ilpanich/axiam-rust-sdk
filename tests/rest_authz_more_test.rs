@@ -31,7 +31,7 @@ async fn batch_check_forwards_scope_and_subject_from_the_request_builder() {
         .and(path("/api/v1/authz/check/batch"))
         .and(wiremock::matchers::body_string_contains("child-scope"))
         .and(wiremock::matchers::body_string_contains(
-            &subject.to_string(),
+            subject.to_string(),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [{ "allowed": true, "reason": null }]

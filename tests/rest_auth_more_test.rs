@@ -108,8 +108,8 @@ async fn login_with_tenant_id_and_org_id_sends_uuid_identifiers_and_then_logs_ou
     // arms.
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/login"))
-        .and(body_string_contains(&tenant_id.to_string()))
-        .and(body_string_contains(&org_id.to_string()))
+        .and(body_string_contains(tenant_id.to_string()))
+        .and(body_string_contains(org_id.to_string()))
         .respond_with(login_ok_response(&access))
         .mount(&mock_server)
         .await;
