@@ -6,7 +6,7 @@
 //! wire-compatible with the AXIAM server for the same key + canonical JSON
 //! payload bytes. This crate does NOT depend on the `axiam-amqp` crate.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -19,7 +19,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// impossible. This matches the server's `sign_payload` doc comment
 /// (`crates/axiam-amqp/src/messages.rs:31-34`).
 pub fn sign_payload(key: &[u8], payload_json: &[u8]) -> String {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(payload_json);
     hex::encode(mac.finalize().into_bytes())
 }
@@ -29,7 +30,8 @@ pub fn sign_payload(key: &[u8], payload_json: &[u8]) -> String {
 /// Returns `true` if the signature matches. Uses constant-time comparison
 /// internally (via the `hmac` crate's `verify_slice`).
 pub fn verify_payload(key: &[u8], payload_json: &[u8], signature_hex: &str) -> bool {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(payload_json);
     let expected = hex::decode(signature_hex).unwrap_or_default();
     mac.verify_slice(&expected).is_ok()
