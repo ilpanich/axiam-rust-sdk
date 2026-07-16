@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name = "axiam-sdk"
-version = "1.0.0-alpha2"
+version = "1.0.0-alpha4"
 edition = "2021"
 rust-version = "1.88"
 description = "Official Rust client SDK for AXIAM IAM"
