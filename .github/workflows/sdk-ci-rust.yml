@@ -175,8 +175,14 @@ jobs:
       # compile-from-tarball verification are unaffected; only cargo's
       # git-cleanliness pre-check is bypassed for this one known-generated,
       # intentionally-gitignored path.
+      # --workspace publishes/verifies both members (axiam-sdk and its
+      # companion proc-macro crate axiam-sdk-macros) in dependency order.
+      # axiam-sdk has a `path`+`=version` dependency on the unpublished
+      # axiam-sdk-macros; a plain `cargo publish --dry-run` of axiam-sdk would
+      # fail to resolve it from the registry, whereas the workspace dry-run
+      # treats the sibling member as available and verifies them together.
       - name: Dry-run publish gate (SC#5)
-        run: cargo publish --dry-run --all-features --allow-dirty
+        run: cargo publish --workspace --dry-run --all-features --allow-dirty
 
   # Publishing to crates.io is IRREVERSIBLE — a version number can never be
   # reclaimed. Git tags are NOT branch-scoped, so without this gate a release
@@ -223,13 +229,24 @@ jobs:
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
+          # Both workspace members (axiam-sdk and the version-locked companion
+          # axiam-sdk-macros) are published together and MUST carry the tagged
+          # version — axiam-sdk depends on axiam-sdk-macros with `=<version>`,
+          # so a mismatched pair would fail to resolve at publish time anyway;
+          # this check surfaces the mistake up front with a clear message.
           manifest_version="$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+            | python3 -c 'import json,sys; pkgs=json.load(sys.stdin)["packages"]; print(next(p["version"] for p in pkgs if p["name"]=="axiam-sdk"))')"
+          macros_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; pkgs=json.load(sys.stdin)["packages"]; print(next(p["version"] for p in pkgs if p["name"]=="axiam-sdk-macros"))')"
           if [ "${tag_version}" != "${manifest_version}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} implies version ${tag_version}, but Cargo.toml declares ${manifest_version}."
+            echo "::error::Tag ${GITHUB_REF_NAME} implies version ${tag_version}, but axiam-sdk Cargo.toml declares ${manifest_version}."
             exit 1
           fi
-          echo "OK: tag ${GITHUB_REF_NAME} matches Cargo.toml version ${manifest_version}."
+          if [ "${tag_version}" != "${macros_version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} implies version ${tag_version}, but axiam-sdk-macros Cargo.toml declares ${macros_version}."
+            exit 1
+          fi
+          echo "OK: tag ${GITHUB_REF_NAME} matches both axiam-sdk and axiam-sdk-macros version ${manifest_version}."
 
       - name: Install protoc (build.rs gRPC codegen)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -247,9 +264,12 @@ jobs:
       # required solely because the gitignored, build.rs-generated src/gen/ is
       # present-but-uncommitted by design (D-09).
       - name: Verify package before publish (SC#5)
-        run: cargo publish --dry-run --all-features --allow-dirty
+        run: cargo publish --workspace --dry-run --all-features --allow-dirty
 
+      # --workspace publishes both members in dependency order: axiam-sdk-macros
+      # first, then axiam-sdk (which `=`-depends on it). cargo waits for each
+      # published crate to appear in the index before publishing its dependents.
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish --all-features --allow-dirty
+        run: cargo publish --workspace --all-features --allow-dirty
