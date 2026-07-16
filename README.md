@@ -19,7 +19,7 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1-§10.
+This SDK conforms to CONTRACT.md §1–§11.
 
 See [`CONTRACT.md`](CONTRACT.md) for the full cross-language behavioral contract. It is shared
 verbatim across all seven AXIAM SDKs; the copy in this repository is the authority for this
@@ -37,6 +37,7 @@ dependencies for the transports/integrations it actually uses:
 | `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
 | `actix` | off | The `AxiamUser` Actix-Web `FromRequest` extractor (CONTRACT.md §10 route guard). Implies `rest` (shares the same `JwksVerifier`) |
+| `macros` | off | The `#[require_access]` / `#[require_auth]` / `#[require_role]` declarative authorization attribute macros (CONTRACT.md §11), plus the programmatic `middleware::RequireAccess` guard. Implies `actix` |
 
 To build a REST-only client (no gRPC, no AMQP), disable the default feature set and opt back
 into just `rest`:
@@ -135,6 +136,67 @@ use axiam_sdk::middleware::AxiamUser;
 async fn protected(user: AxiamUser) -> String {
     format!("hello {}", user.user_id)
 }
+```
+
+See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).
+
+### Declarative authorization helpers (`macros`)
+
+The `macros` feature adds the CONTRACT.md §11 *declarative authorization
+helpers* — attribute macros that place a per-endpoint AXIAM permission check
+directly on an Actix-Web handler, layered on top of the §10 `AxiamUser`
+extractor. They run strictly **after** authentication and issue the check for
+the **request's** authenticated user (`subject_id = user.user_id`), so the
+app's own (usually service-account) `AxiamClient` session is never mistaken for
+the end user.
+
+Register a `web::Data<AxiamClient>` (used to issue the check) and a
+`web::Data<JwksVerifier>` (used by the extractor) as app data, then annotate
+handlers:
+
+```rust,ignore
+use axiam_sdk::{require_access, require_auth, require_role};
+use axiam_sdk::middleware::AxiamUser;
+
+// Require a `read` check on the `{id}` path resource. The handler may still
+// take its own `AxiamUser` to use the identity in the body.
+#[require_access(action = "read", resource_param = "id")]
+async fn get_document(user: AxiamUser) -> String {
+    format!("user {} may read this document", user.user_id)
+}
+
+// Require an authenticated identity (no resource check).
+#[require_auth]
+async fn whoami() -> &'static str {
+    "authenticated"
+}
+
+// Local, no-round-trip role check (not a substitute for require_access).
+#[require_role("admin")]
+async fn admin_panel() -> &'static str {
+    "welcome, admin"
+}
+```
+
+`#[require_access]` also accepts `resource_id = "<uuid>"` (a static singleton
+resource), `resolver = path::to::fn` (a
+`fn(&HttpRequest) -> Result<Uuid, AuthzGuardError>` for body/header/composite
+lookups), and an optional `scope = "…"` passed through verbatim. Errors map to
+the standardized `{ "error", "message" }` JSON body: 401 `authentication_failed`
+(unauthenticated), 403 `authorization_denied` (denied), 400 `invalid_request`
+(unresolvable resource id), and 503 `authz_unavailable` (transport failure —
+**fail closed**, never allow on error). No decision is cached.
+
+For handlers that don't fit the attribute shape, the same logic is available
+programmatically via `middleware::RequireAccess`:
+
+```rust,ignore
+use axiam_sdk::middleware::RequireAccess;
+
+RequireAccess::new("read")
+    .scope("confidential")
+    .check(&client, &user, resource_id)
+    .await?;
 ```
 
 See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).

@@ -3,7 +3,7 @@
 //! This crate provides the official Rust client SDK for AXIAM
 //! (Access eXtended Identity and Authorization Management), a multi-tenant
 //! IAM solution. It conforms to the cross-language SDK behavioral contract
-//! in `../CONTRACT.md` §1–§10, and offers three interchangeable transports
+//! in `../CONTRACT.md` §1–§11, and offers three interchangeable transports
 //! behind Cargo features:
 //!
 //! - `rest` — [`client::AxiamClient`], built on `reqwest`; cookie-based
@@ -15,8 +15,11 @@
 //!
 //! An additional `actix` feature provides [`middleware::AxiamUser`], an
 //! Actix-Web extractor that verifies sessions locally against a cached JWKS
-//! (§10). All access/refresh tokens are wrapped in [`Sensitive`] so they are
-//! never accidentally logged or displayed.
+//! (§10). The `macros` feature adds the §11 *declarative authorization
+//! helpers* — the [`macro@require_access`], [`macro@require_auth`] and
+//! [`macro@require_role`] attribute macros — layered on top of that extractor.
+//! All access/refresh tokens are wrapped in [`Sensitive`] so they are never
+//! accidentally logged or displayed.
 //!
 //! # Example: login then check access (REST transport)
 //!
@@ -68,3 +71,10 @@ pub mod amqp;
 
 #[cfg(feature = "actix")]
 pub mod middleware;
+
+// §11 declarative authorization helpers: re-export the proc-macro attributes
+// from the companion `axiam-sdk-macros` crate so consumers write
+// `use axiam_sdk::require_access;` and never name the macro crate directly.
+// The macros expand to the runtime helpers in [`middleware::authz`].
+#[cfg(feature = "macros")]
+pub use axiam_sdk_macros::{require_access, require_auth, require_role};

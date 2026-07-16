@@ -1,8 +1,12 @@
-# Single-crate workspace: this crate lives at the root of its own repository
+# Workspace root: this crate lives at the root of its own repository
 # (github.com/ilpanich/axiam-rust-sdk). The explicit [workspace] table also
 # stops Cargo from discovering an ancestor workspace if the repo is ever
-# checked out inside one.
+# checked out inside one. The root package (`axiam-sdk`) is always a member;
+# `members` additionally pulls in the proc-macro companion crate, which cannot
+# live in a normal library crate (§11 declarative authorization helpers).
 [workspace]
+members = ["axiam-sdk-macros"]
+resolver = "2"
 
 [package]
 name = "axiam-sdk"
@@ -59,8 +63,17 @@ observability = ["dep:tracing"]
 # here adds no new supply-chain surface; it only makes an already-vendored
 # crate a direct dep for the code path that needs it.
 actix = ["dep:actix-web", "dep:subtle", "rest"]
+# §11 declarative authorization helpers: the `#[require_access]` /
+# `#[require_auth]` / `#[require_role]` Actix-Web attribute macros, re-exported
+# from `axiam_sdk` so users write `use axiam_sdk::require_access;`. Implies
+# `actix` (the macros expand to the §10 `AxiamUser` extractor and the runtime
+# guard in `middleware::authz`). The proc-macro crate is version-locked (`=`)
+# to this crate: the expansion references `::axiam_sdk` runtime helpers, so the
+# two must always ship together.
+macros = ["dep:axiam-sdk-macros", "actix"]
 
 [dependencies]
+axiam-sdk-macros = { version = "=1.0.0-alpha", path = "axiam-sdk-macros", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies"], optional = true }
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "tls-ring", "tls-native-roots"], optional = true }
@@ -115,6 +128,10 @@ tokio-test = "0.4"
 # features only for `cargo test`/`cargo build --tests`, not for downstream
 # consumers of the published crate.
 tonic = { version = "0.14", default-features = false, features = ["router", "gzip"] }
+# `trybuild` drives the compile-fail UI tests for the §11 attribute macros
+# (tests/ui/*.rs): asserts that macro misuse (missing `action`, conflicting
+# resource selectors, non-async fn) fails to compile with a clear message.
+trybuild = "1"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -141,4 +158,4 @@ required-features = ["amqp"]
 
 [[example]]
 name = "actix_route_guard"
-required-features = ["actix"]
+required-features = ["actix", "macros"]

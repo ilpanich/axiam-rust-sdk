@@ -105,6 +105,32 @@ impl AxiamClient {
         self.check_access_request(&request).await
     }
 
+    /// `POST /api/v1/authz/check` — evaluate a single authorization check on
+    /// behalf of an explicit `subject_id` rather than the authenticated
+    /// caller (CONTRACT.md §11.2.2).
+    ///
+    /// This is the subject-aware form used by the §11 declarative
+    /// authorization helpers ([`crate::middleware::RequireAccess`]): the
+    /// application's `AxiamClient` typically holds a service-account session,
+    /// so the request's end-user id must be sent explicitly as `subject_id`,
+    /// otherwise the service account's permissions would be checked instead.
+    /// Same bounded read-only retry policy as [`Self::check_access`].
+    pub async fn check_access_as(
+        &self,
+        subject_id: Uuid,
+        action: &str,
+        resource_id: Uuid,
+        scope: Option<&str>,
+    ) -> Result<AccessDecision, AxiamError> {
+        let request = AccessCheckRequest {
+            action: action.to_string(),
+            resource_id,
+            scope: scope.map(str::to_string),
+            subject_id: Some(subject_id),
+        };
+        self.check_access_request(&request).await
+    }
+
     /// `can` — alias for [`Self::check_access`] targeting browser/UI
     /// scenarios (CONTRACT.md §1 note).
     pub async fn can(
