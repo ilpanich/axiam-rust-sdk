@@ -175,14 +175,20 @@ jobs:
       # compile-from-tarball verification are unaffected; only cargo's
       # git-cleanliness pre-check is bypassed for this one known-generated,
       # intentionally-gitignored path.
-      # --workspace publishes/verifies both members (axiam-sdk and its
-      # companion proc-macro crate axiam-sdk-macros) in dependency order.
-      # axiam-sdk has a `path`+`=version` dependency on the unpublished
-      # axiam-sdk-macros; a plain `cargo publish --dry-run` of axiam-sdk would
-      # fail to resolve it from the registry, whereas the workspace dry-run
-      # treats the sibling member as available and verifies them together.
+      # `cargo publish --workspace` is nightly-only (rust-lang/cargo#10948), so on the
+      # stable/MSRV toolchains this gate verifies the two members separately:
+      #   1. the new proc-macro crate gets a FULL publish dry-run (package + verify-build);
+      #   2. axiam-sdk depends on it with an unpublished `=`-version path dep, so cargo
+      #      cannot verify-publish it against the registry until the macros crate is live.
+      #      `cargo package --workspace` (a stable flag, unlike `publish --workspace`)
+      #      packages both members together, treating the sibling as local, which confirms
+      #      the umbrella manifest is publishable. axiam-sdk's build is already covered by
+      #      the build/test jobs above, and its full publish-verify runs in the release job
+      #      after the macros crate has been published.
       - name: Dry-run publish gate (SC#5)
-        run: cargo publish --workspace --dry-run --all-features --allow-dirty
+        run: |
+          (cd axiam-sdk-macros && cargo publish --dry-run --all-features --allow-dirty)
+          cargo package --workspace --allow-dirty --no-verify
 
   # Publishing to crates.io is IRREVERSIBLE — a version number can never be
   # reclaimed. Git tags are NOT branch-scoped, so without this gate a release
@@ -263,13 +269,22 @@ jobs:
       # See the test job's Dry-run publish gate comment: --allow-dirty is
       # required solely because the gitignored, build.rs-generated src/gen/ is
       # present-but-uncommitted by design (D-09).
-      - name: Verify package before publish (SC#5)
-        run: cargo publish --workspace --dry-run --all-features --allow-dirty
+      - name: Verify packages before publish (SC#5)
+        run: |
+          (cd axiam-sdk-macros && cargo publish --dry-run --all-features --allow-dirty)
+          cargo package --workspace --allow-dirty --no-verify
 
-      # --workspace publishes both members in dependency order: axiam-sdk-macros
-      # first, then axiam-sdk (which `=`-depends on it). cargo waits for each
-      # published crate to appear in the index before publishing its dependents.
-      - name: Publish to crates.io
+      # Publish both members in dependency order on stable cargo (`cargo publish
+      # --workspace` is nightly-only, #10948): the companion proc-macro crate first,
+      # then axiam-sdk, which `=`-depends on it. `cargo publish` waits for each newly
+      # published crate to appear in the registry index before returning, so axiam-sdk's
+      # dependency on axiam-sdk-macros resolves by the time it publishes.
+      - name: Publish axiam-sdk-macros to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish --workspace --all-features --allow-dirty
+        run: cd axiam-sdk-macros && cargo publish --all-features --allow-dirty
+
+      - name: Publish axiam-sdk to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish --all-features --allow-dirty
