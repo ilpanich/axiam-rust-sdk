@@ -1,0 +1,34 @@
+# Proc-macro companion crate for `axiam-sdk`. Proc macros cannot live in a
+# normal library crate, so the `#[require_access]` / `#[require_auth]` /
+# `#[require_role]` Actix-Web attribute macros live here and are re-exported
+# from `axiam-sdk` behind its `macros` feature (users write
+# `use axiam_sdk::require_access;`, never depend on this crate directly).
+#
+# Version-locked to `axiam-sdk` (the parent depends on `=<this version>`): the
+# expansion references `::axiam_sdk` runtime helpers, so the two crates must
+# always ship together.
+[package]
+name = "axiam-sdk-macros"
+version = "1.0.0-alpha"
+edition = "2021"
+rust-version = "1.88"
+description = "Proc-macro Actix-Web authorization attributes for the AXIAM Rust SDK (axiam-sdk)"
+license = "Apache-2.0"
+publish = true
+repository = "https://github.com/ilpanich/axiam-rust-sdk"
+homepage = "https://github.com/ilpanich/axiam-rust-sdk"
+documentation = "https://docs.rs/axiam-sdk-macros"
+readme = "README.md"
+keywords = ["iam", "authorization", "actix", "macro", "sdk"]
+categories = ["api-bindings", "authentication"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[package.metadata.docs.rs]
+all-features = true

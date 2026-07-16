@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Declarative authorization helpers (CONTRACT.md §11), behind the new `macros`
+  feature: the `#[require_access]`, `#[require_auth]` and `#[require_role]`
+  Actix-Web attribute macros (from the new companion `axiam-sdk-macros` crate,
+  re-exported as `axiam_sdk::…`), plus the programmatic `middleware::RequireAccess`
+  guard and the `middleware::AuthzGuardError` / `resource_from_path` /
+  `resource_from_static` / `require_role_check` building blocks. Checks are
+  issued for the request's authenticated user (`subject_id`), fail closed on
+  transport error (503), and cache no decisions.
+- `AxiamClient::check_access_as(subject_id, action, resource_id, scope)` — the
+  subject-aware access-check form used by the §11 helpers.
+- Contract conformance statement raised to CONTRACT.md §1–§11.
+
 ## [1.0.0-alpha] - 2026-07-15
 
 First alpha release of the official Rust client SDK for AXIAM. This is an

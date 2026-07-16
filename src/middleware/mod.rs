@@ -11,5 +11,9 @@
 //! unconditionally (D-02 modularity).
 
 pub mod actix;
+pub mod authz;
 
 pub use actix::AxiamUser;
+pub use authz::{
+    require_role_check, resource_from_path, resource_from_static, AuthzGuardError, RequireAccess,
+};

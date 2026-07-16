@@ -1,36 +1,68 @@
-//! Actix-Web route guard using the `AxiamUser` `FromRequest` extractor
-//! (CONTRACT.md §10).
+//! Actix-Web route guards: the `AxiamUser` `FromRequest` extractor (§10) plus
+//! the declarative authorization attribute macros (§11).
 //!
-//! Demonstrates registering a shared [`axiam_sdk::token::JwksVerifier`] as
-//! `app_data` and using [`axiam_sdk::middleware::AxiamUser`] as a handler
-//! parameter to guard a route: the extractor reads the session from the
-//! `axiam_access` cookie (falling back to `Authorization: Bearer`), verifies
-//! it locally against the cached JWKS (no AXIAM-server round-trip), and
-//! injects `{ user_id, tenant_id, roles }` — verification failures surface
-//! as HTTP 401/403 automatically via `AxiamExtractorError`'s
-//! `ResponseError` impl, before the handler body ever runs.
+//! Demonstrates, in one app:
 //!
-//! This example is illustrative/compilable — it starts a real Actix-Web
-//! server bound to `AXIAM_LISTEN_ADDR` (default `127.0.0.1:8080`) and does
-//! not require a live AXIAM server to `cargo build --example
-//! actix_route_guard --features actix`. Serving real traffic requires the
-//! configured `AXIAM_BASE_URL` to be a reachable AXIAM server (for the
-//! extractor's JWKS fetch).
+//! - registering a shared [`axiam_sdk::token::JwksVerifier`] and an
+//!   [`axiam_sdk::client::AxiamClient`] as `app_data`;
+//! - [`axiam_sdk::middleware::AxiamUser`] as a plain handler parameter (§10):
+//!   the extractor reads the session from the `axiam_access` cookie (falling
+//!   back to `Authorization: Bearer`), verifies it locally against the cached
+//!   JWKS (no AXIAM-server round-trip), and injects
+//!   `{ user_id, tenant_id, roles }` — 401/403 automatically on failure;
+//! - `#[require_auth]` (§11): require an authenticated identity;
+//! - `#[require_access(action = "read", resource_param = "id")]` (§11):
+//!   additionally require the authenticated caller to pass an AXIAM
+//!   authorization check for `read` on the `{id}` path resource — the check is
+//!   issued with `subject_id = <the request user's id>`, and maps deny → 403,
+//!   bad/absent UUID → 400, authz transport failure → 503 (fail closed);
+//! - `#[require_role("admin")]` (§11): a local, no-round-trip role check.
 //!
-//! Run: `cargo run --example actix_route_guard --features actix`
+//! This example is illustrative/compilable — it starts a real Actix-Web server
+//! bound to `AXIAM_LISTEN_ADDR` (default `127.0.0.1:8080`) and does not require
+//! a live AXIAM server to `cargo build --example actix_route_guard --features
+//! actix,macros`. Serving real traffic requires a reachable `AXIAM_BASE_URL`
+//! (for the extractor's JWKS fetch and the `require_access` check).
+//!
+//! Run: `cargo run --example actix_route_guard --features actix,macros`
 
 use actix_web::{web, App, HttpServer};
+use axiam_sdk::client::AxiamClient;
 use axiam_sdk::middleware::AxiamUser;
 use axiam_sdk::token::JwksVerifier;
+use axiam_sdk::{require_access, require_auth, require_role};
 
-/// A route guarded by the `AxiamUser` extractor — Actix rejects the request
-/// with 401/403 automatically if extraction fails, before this handler body
-/// ever runs (CONTRACT.md §10 closing requirement).
+/// §10: a route guarded only by the `AxiamUser` extractor — Actix rejects the
+/// request with 401/403 automatically if extraction fails.
 async fn protected_resource(user: AxiamUser) -> String {
     format!(
         "Hello, user {} (tenant {}) — roles: {:?}",
         user.user_id, user.tenant_id, user.roles
     )
+}
+
+/// §11 `require_auth`: identical guarantee to `protected_resource`, expressed
+/// declaratively. The handler needs no `AxiamUser` parameter of its own.
+#[require_auth]
+async fn whoami() -> &'static str {
+    "you are authenticated"
+}
+
+/// §11 `require_access`: requires the authenticated caller to pass a `read`
+/// check on the resource named by the `{id}` path parameter. The handler may
+/// still declare its own `AxiamUser` to use the identity in its body — the
+/// macro injects an independent extractor for the guard.
+#[require_access(action = "read", resource_param = "id")]
+async fn get_document(user: AxiamUser) -> String {
+    format!("user {} is authorized to read this document", user.user_id)
+}
+
+/// §11 `require_role`: a local check against the verified token's roles claim
+/// (no server round-trip). Not a substitute for a resource-level
+/// `require_access` check.
+#[require_role("admin")]
+async fn admin_panel() -> &'static str {
+    "welcome to the admin panel"
 }
 
 #[actix_web::main]
@@ -45,18 +77,36 @@ async fn main() -> std::io::Result<()> {
     let jwks_verifier =
         JwksVerifier::new(http, &base_url_parsed).expect("failed to construct JwksVerifier");
 
-    // `web::Data<T>` is `Arc`-backed: build the verifier once here, then
-    // `.clone()` the cheap `web::Data` handle into every worker's factory
-    // closure below — all workers share the same underlying JWKS cache and
-    // `reqwest::Client` connection pool.
-    let jwks_data = web::Data::new(jwks_verifier);
+    // The `AxiamClient` the `#[require_access]` guard uses to issue checks. In
+    // production this typically holds a service-account session; the guard
+    // sends the request user's id as `subject_id` so the check is made for the
+    // end user, not the service account (§11.2).
+    let client = AxiamClient::builder()
+        .base_url(&base_url)
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("failed to build AxiamClient");
 
-    println!("Listening on http://{listen_addr} — GET /protected requires an AXIAM session");
+    // `web::Data<T>` is `Arc`-backed: build each once here, then `.clone()` the
+    // cheap handles into every worker's factory closure below.
+    let jwks_data = web::Data::new(jwks_verifier);
+    let client_data = web::Data::new(client);
+
+    println!("Listening on http://{listen_addr}");
+    println!("  GET /protected          requires an AXIAM session (§10 extractor)");
+    println!("  GET /whoami             requires an AXIAM session (#[require_auth])");
+    println!("  GET /documents/{{id}}     requires `read` on {{id}} (#[require_access])");
+    println!("  GET /admin              requires the `admin` role (#[require_role])");
 
     HttpServer::new(move || {
         App::new()
             .app_data(jwks_data.clone())
+            .app_data(client_data.clone())
             .route("/protected", web::get().to(protected_resource))
+            .route("/whoami", web::get().to(whoami))
+            .route("/documents/{id}", web::get().to(get_document))
+            .route("/admin", web::get().to(admin_panel))
     })
     .bind(&listen_addr)?
     .run()

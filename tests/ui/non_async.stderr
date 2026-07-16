@@ -1,0 +1,5 @@
+error: require_access requires an `async fn`
+ --> tests/ui/non_async.rs:4:1
+  |
+4 | fn handler() -> &'static str {
+  | ^^

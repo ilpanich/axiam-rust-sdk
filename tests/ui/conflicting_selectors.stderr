@@ -1,0 +1,5 @@
+error: require_access accepts only one resource selector: specify exactly one of `resource_param`, `resource_id`, or `resolver`
+ --> tests/ui/conflicting_selectors.rs:4:1
+  |
+4 | async fn handler() -> &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
