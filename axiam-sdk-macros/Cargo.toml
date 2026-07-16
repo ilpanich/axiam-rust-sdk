@@ -9,8 +9,8 @@
 # always ship together.
 [package]
 name = "axiam-sdk-macros"
-version = "1.0.0-alpha2"
-edition = "2021"
+version = "1.0.0-alpha5"
+edition = "2024"
 rust-version = "1.88"
 description = "Proc-macro Actix-Web authorization attributes for the AXIAM Rust SDK (axiam-sdk)"
 license = "Apache-2.0"
@@ -32,3 +32,12 @@ proc-macro2 = "1"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[profile.release]
+opt-level = 3         # Maximum optimization for speed.
+lto = "fat"           # Whole-program LTO across all crates (== `true`); best
+                      # runtime throughput, slowest link.
+codegen-units = 1     # One codegen unit per crate — lets the optimizer see the
+                      # whole crate at the cost of parallelism during compile.
+strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
+                      # runtime cost (release already builds with debug = 0).

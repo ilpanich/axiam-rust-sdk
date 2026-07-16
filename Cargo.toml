@@ -10,8 +10,8 @@ resolver = "2"
 
 [package]
 name = "axiam-sdk"
-version = "1.0.0-alpha4"
-edition = "2021"
+version = "1.0.0-alpha5"
+edition = "2024"
 rust-version = "1.88"
 description = "Official Rust client SDK for AXIAM IAM"
 license = "Apache-2.0"
@@ -135,6 +135,15 @@ trybuild = "1"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[profile.release]
+opt-level = 3         # Maximum optimization for speed.
+lto = "fat"           # Whole-program LTO across all crates (== `true`); best
+                      # runtime throughput, slowest link.
+codegen-units = 1     # One codegen unit per crate — lets the optimizer see the
+                      # whole crate at the cost of parallelism during compile.
+strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
+                      # runtime cost (release already builds with debug = 0).
 
 # Five per-capability examples (D-08) — the §1-§10 conformance demonstration
 # referenced by the README. Each declares only the feature(s) it actually
