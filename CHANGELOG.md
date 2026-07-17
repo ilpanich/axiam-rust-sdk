@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha7] - 2026-07-17
+
+### Fixed
+
+- Build failure under Rust edition 2024 that broke the crates.io publish job:
+  the generated gRPC stub module was declared `pub mod gen`, but `gen` is a
+  reserved keyword in edition 2024, so the crate (and every `grpc`-feature
+  consumer) failed to compile with "expected identifier, found reserved
+  keyword `gen`". The module is now declared and referenced as the raw
+  identifier `r#gen` (`axiam_sdk::grpc::r#gen`); the on-disk `src/gen/`
+  generated-code path is unchanged.
+- Clippy `collapsible_if` failure (denied by the CI clippy gate) surfaced by
+  edition 2024 stabilising `let_chains`: the refresh-guard double-check now
+  uses a single `if let … && …` let-chain. No behavioural change.
+
+### Changed
+
+- Reformatted the workspace with edition-2024 `rustfmt` style (import ordering)
+  so `cargo fmt --check` passes under the crate's declared edition. Formatting
+  only — no code or API changes.
+
 ## [1.0.0-alpha2] - 2026-07-16
 
 ### Added

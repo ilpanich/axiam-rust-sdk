@@ -9,7 +9,7 @@
 
 #![cfg(feature = "macros")]
 
-use actix_web::{test, web, App, HttpResponse};
+use actix_web::{App, HttpResponse, test, web};
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::token::JwksVerifier;
 use axiam_sdk::{require_access, require_auth, require_role};

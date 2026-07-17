@@ -9,9 +9,9 @@ use backon::{ExponentialBuilder, Retryable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AxiamError;
 use crate::client::AxiamClient;
 use crate::rest::auth::CsrfHeaderExt;
-use crate::AxiamError;
 
 const CHECK_PATH: &str = "/api/v1/authz/check";
 const BATCH_CHECK_PATH: &str = "/api/v1/authz/check/batch";

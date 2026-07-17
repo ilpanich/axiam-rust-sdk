@@ -6,8 +6,8 @@
 
 #![cfg(feature = "rest")]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axiam_sdk::token::JwksVerifier;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};

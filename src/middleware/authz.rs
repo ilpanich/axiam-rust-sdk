@@ -37,9 +37,9 @@ use actix_web::{HttpRequest, HttpResponse};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::AxiamError;
 use crate::client::AxiamClient;
 use crate::middleware::AxiamUser;
-use crate::AxiamError;
 
 /// The error type for the CONTRACT.md §11 declarative authorization helpers.
 ///
@@ -308,8 +308,8 @@ impl RequireAccess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::body::to_bytes;
     use actix_web::ResponseError;
+    use actix_web::body::to_bytes;
 
     fn user_with_roles(roles: &[&str]) -> AxiamUser {
         AxiamUser {

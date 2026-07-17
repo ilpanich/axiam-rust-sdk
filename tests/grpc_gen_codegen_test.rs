@@ -17,27 +17,27 @@
 
 use std::net::SocketAddr;
 
-use axiam_sdk::grpc::gen::authorization_service_client::AuthorizationServiceClient;
-use axiam_sdk::grpc::gen::authorization_service_server::{
+use axiam_sdk::grpc::r#gen::authorization_service_client::AuthorizationServiceClient;
+use axiam_sdk::grpc::r#gen::authorization_service_server::{
     AuthorizationService, AuthorizationServiceServer, SERVICE_NAME as AUTHZ_SERVICE_NAME,
 };
-use axiam_sdk::grpc::gen::token_service_client::TokenServiceClient;
-use axiam_sdk::grpc::gen::token_service_server::{
-    TokenService, TokenServiceServer, SERVICE_NAME as TOKEN_SERVICE_NAME,
+use axiam_sdk::grpc::r#gen::token_service_client::TokenServiceClient;
+use axiam_sdk::grpc::r#gen::token_service_server::{
+    SERVICE_NAME as TOKEN_SERVICE_NAME, TokenService, TokenServiceServer,
 };
-use axiam_sdk::grpc::gen::user_service_client::UserServiceClient;
-use axiam_sdk::grpc::gen::user_service_server::{
-    UserService, UserServiceServer, SERVICE_NAME as USER_SERVICE_NAME,
+use axiam_sdk::grpc::r#gen::user_service_client::UserServiceClient;
+use axiam_sdk::grpc::r#gen::user_service_server::{
+    SERVICE_NAME as USER_SERVICE_NAME, UserService, UserServiceServer,
 };
-use axiam_sdk::grpc::gen::{
+use axiam_sdk::grpc::r#gen::{
     BatchCheckAccessRequest, BatchCheckAccessResponse, CheckAccessRequest, CheckAccessResponse,
     GetUserRequest, IntrospectTokenRequest, IntrospectTokenResponse, UserResponse,
     ValidateCredentialsRequest, ValidateCredentialsResponse, ValidateTokenRequest,
     ValidateTokenResponse,
 };
-use tonic::codegen::http;
 use tonic::codegen::CompressionEncoding;
 use tonic::codegen::Service;
+use tonic::codegen::http;
 use tonic::server::NamedService;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Channel, Server};
@@ -320,10 +320,10 @@ fn generated_named_service_constants_match_proto_package() {
 async fn assert_unimplemented_on_unknown_path<S>(mut server: S, path: &str)
 where
     S: Service<
-        http::Request<tonic::body::Body>,
-        Response = http::Response<tonic::body::Body>,
-        Error = std::convert::Infallible,
-    >,
+            http::Request<tonic::body::Body>,
+            Response = http::Response<tonic::body::Body>,
+            Error = std::convert::Infallible,
+        >,
 {
     let req = http::Request::builder()
         .method("POST")
@@ -421,7 +421,9 @@ fn message_types_encode_decode_round_trip() {
     // `Debug` on a representative set of the generated types.
     assert!(format!("{with_scope:?}").contains("CheckAccessRequest"));
     assert!(format!("{batch_resp:?}").contains("BatchCheckAccessResponse"));
-    assert!(format!("{:?}", IntrospectTokenResponse::default()).contains("IntrospectTokenResponse"));
+    assert!(
+        format!("{:?}", IntrospectTokenResponse::default()).contains("IntrospectTokenResponse")
+    );
     assert!(format!("{:?}", UserResponse::default()).contains("UserResponse"));
 }
 

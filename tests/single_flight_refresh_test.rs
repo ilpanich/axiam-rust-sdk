@@ -4,12 +4,12 @@
 
 #![cfg(feature = "rest")]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use axiam_sdk::token::refresh_guard::RefreshedTokens;
-use axiam_sdk::token::TokenManager;
 use axiam_sdk::Sensitive;
+use axiam_sdk::token::TokenManager;
+use axiam_sdk::token::refresh_guard::RefreshedTokens;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

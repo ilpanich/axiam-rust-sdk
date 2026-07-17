@@ -13,8 +13,8 @@
 //!
 //! Run: `cargo run --example amqp_consumer --features amqp`
 
-use axiam_sdk::amqp::consume;
 use axiam_sdk::Sensitive;
+use axiam_sdk::amqp::consume;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

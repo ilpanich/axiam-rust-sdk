@@ -10,9 +10,9 @@
 //! A 401 on the refresh call itself is `AxiamError::Auth` with **no** retry
 //! loop (§9.3) — the caller must re-authenticate from scratch.
 
-use crate::token::manager::TokenManager;
 use crate::AxiamError;
 use crate::Sensitive;
+use crate::token::manager::TokenManager;
 
 /// The shape of a successful `POST /api/v1/auth/refresh` outcome, decoupled
 /// from any particular transport response type so this module has no
@@ -58,10 +58,10 @@ impl TokenManager {
         // we waited for the lock, the current access token differs from what
         // this caller observed failing — just return the new one, no
         // refresh call needed.
-        if let Some(current) = &guard.access {
-            if current.expose() != observed_access_token {
-                return Ok(current.clone_inner());
-            }
+        if let Some(current) = &guard.access
+            && current.expose() != observed_access_token
+        {
+            return Ok(current.clone_inner());
         }
 
         // We are the single in-flight refresher.

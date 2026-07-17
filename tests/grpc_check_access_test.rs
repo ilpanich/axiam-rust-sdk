@@ -14,25 +14,25 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use axiam_sdk::grpc::gen::authorization_service_server::{
+use axiam_sdk::grpc::r#gen::authorization_service_server::{
     AuthorizationService, AuthorizationServiceServer,
 };
-use axiam_sdk::grpc::gen::{
+use axiam_sdk::grpc::r#gen::{
     BatchCheckAccessRequest as WireBatchCheckAccessRequest,
     BatchCheckAccessResponse as WireBatchCheckAccessResponse,
     CheckAccessRequest as WireCheckAccessRequest, CheckAccessResponse as WireCheckAccessResponse,
 };
 use axiam_sdk::grpc::{
-    build_channel, AccessDecision, AuthzGrpcClient, CheckAccessRequest, GrpcChannelConfig,
+    AccessDecision, AuthzGrpcClient, CheckAccessRequest, GrpcChannelConfig, build_channel,
 };
-use axiam_sdk::token::refresh_guard::RefreshedTokens;
 use axiam_sdk::token::TokenManager;
+use axiam_sdk::token::refresh_guard::RefreshedTokens;
 use axiam_sdk::{AxiamError, Sensitive};
-use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
