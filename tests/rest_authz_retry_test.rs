@@ -5,12 +5,12 @@
 
 #![cfg(feature = "rest")]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use axiam_sdk::AxiamError;
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::rest::authz::AccessCheckRequest;
-use axiam_sdk::AxiamError;
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};

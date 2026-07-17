@@ -28,7 +28,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Expr, ExprLit, ExprPath, ItemFn, Lit, Meta, Pat, Token};
+use syn::{Expr, ExprLit, ExprPath, ItemFn, Lit, Meta, Pat, Token, parse_macro_input};
 
 /// Require an authenticated AXIAM identity on an Actix-Web handler
 /// (CONTRACT.md §11 `require_auth`).
@@ -142,14 +142,14 @@ pub fn require_access(args: TokenStream, item: TokenStream) -> TokenStream {
                 return compile_error_spanned(
                     &other,
                     "require_access arguments must be `name = value` pairs",
-                )
+                );
             }
         };
         if nv.path.is_ident("action") {
             match lit_string(&nv.value) {
                 Some(s) => action = Some(s),
                 None => {
-                    return compile_error_spanned(&nv.value, "`action` must be a string literal")
+                    return compile_error_spanned(&nv.value, "`action` must be a string literal");
                 }
             }
         } else if nv.path.is_ident("resource_param") {
@@ -159,7 +159,7 @@ pub fn require_access(args: TokenStream, item: TokenStream) -> TokenStream {
                     return compile_error_spanned(
                         &nv.value,
                         "`resource_param` must be a string literal",
-                    )
+                    );
                 }
             }
         } else if nv.path.is_ident("resource_id") {
@@ -169,21 +169,21 @@ pub fn require_access(args: TokenStream, item: TokenStream) -> TokenStream {
                     return compile_error_spanned(
                         &nv.value,
                         "`resource_id` must be a string literal (a UUID)",
-                    )
+                    );
                 }
             }
         } else if nv.path.is_ident("scope") {
             match lit_string(&nv.value) {
                 Some(s) => scope = Some(s),
                 None => {
-                    return compile_error_spanned(&nv.value, "`scope` must be a string literal")
+                    return compile_error_spanned(&nv.value, "`scope` must be a string literal");
                 }
             }
         } else if nv.path.is_ident("resolver") {
             match &nv.value {
                 Expr::Path(p) => resolver = Some(p.clone()),
                 other => {
-                    return compile_error_spanned(other, "`resolver` must be a path to a function")
+                    return compile_error_spanned(other, "`resolver` must be a path to a function");
                 }
             }
         } else {
@@ -200,7 +200,7 @@ pub fn require_access(args: TokenStream, item: TokenStream) -> TokenStream {
             return compile_error_spanned(
                 &func.sig,
                 "require_access requires an `action`, e.g. #[require_access(action = \"read\", resource_param = \"id\")]",
-            )
+            );
         }
     };
 
@@ -297,7 +297,7 @@ pub fn require_role(args: TokenStream, item: TokenStream) -> TokenStream {
                 return compile_error_spanned(
                     expr,
                     "require_role arguments must be string literals",
-                )
+                );
             }
         }
     }
@@ -365,7 +365,7 @@ fn expand_wrapper(
                     return compile_error_spanned(
                         other,
                         "require_* handler parameters must be simple identifiers",
-                    )
+                    );
                 }
             },
         }

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 #[cfg(any(feature = "rest", feature = "actix"))]
 use jsonwebtoken::jwk::JwkSet;
 #[cfg(any(feature = "rest", feature = "actix"))]
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -287,7 +287,7 @@ fn find_jwk(jwks: &JwkSet, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> 
 #[cfg(all(test, any(feature = "rest", feature = "actix")))]
 mod tests {
     use super::*;
-    use jsonwebtoken::{jwk::*, EncodingKey, Header};
+    use jsonwebtoken::{EncodingKey, Header, jwk::*};
 
     /// A fixed, valid Ed25519 public key `x` coordinate (base64url, no
     /// padding) used only to exercise `find_jwk`'s selection logic in these

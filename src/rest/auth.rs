@@ -8,12 +8,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AxiamError;
+use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
 use crate::token::jwks::Claims;
 use crate::token::manager::{extract_access_token_from_jar, extract_refresh_token_from_jar};
 use crate::token::refresh_guard::RefreshedTokens;
-use crate::AxiamError;
-use crate::Sensitive;
 
 const LOGIN_PATH: &str = "/api/v1/auth/login";
 const MFA_VERIFY_PATH: &str = "/api/v1/auth/mfa/verify";

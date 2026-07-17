@@ -26,20 +26,20 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tonic::Code;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
-use tonic::Code;
 use uuid::Uuid;
 
-use crate::grpc::interceptor::AuthInterceptor;
+use crate::AxiamError;
 use crate::grpc::r#gen::authorization_service_client::AuthorizationServiceClient;
 use crate::grpc::r#gen::{
     BatchCheckAccessRequest as WireBatchCheckAccessRequest,
     CheckAccessRequest as WireCheckAccessRequest, CheckAccessResponse as WireCheckAccessResponse,
 };
-use crate::token::refresh_guard::RefreshedTokens;
+use crate::grpc::interceptor::AuthInterceptor;
 use crate::token::TokenManager;
-use crate::AxiamError;
+use crate::token::refresh_guard::RefreshedTokens;
 
 /// A single access check request (CONTRACT.md §1) — the gRPC-transport
 /// equivalent of `crate::rest::authz::AccessCheckRequest`, matching the

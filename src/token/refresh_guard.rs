@@ -10,9 +10,9 @@
 //! A 401 on the refresh call itself is `AxiamError::Auth` with **no** retry
 //! loop (§9.3) — the caller must re-authenticate from scratch.
 
-use crate::token::manager::TokenManager;
 use crate::AxiamError;
 use crate::Sensitive;
+use crate::token::manager::TokenManager;
 
 /// The shape of a successful `POST /api/v1/auth/refresh` outcome, decoupled
 /// from any particular transport response type so this module has no

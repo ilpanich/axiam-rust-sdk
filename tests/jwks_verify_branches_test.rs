@@ -6,8 +6,8 @@
 
 #![cfg(feature = "rest")]
 
-use axiam_sdk::token::JwksVerifier;
 use axiam_sdk::AxiamError;
+use axiam_sdk::token::JwksVerifier;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::json;

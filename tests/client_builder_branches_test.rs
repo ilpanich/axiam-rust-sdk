@@ -5,8 +5,8 @@
 
 #![cfg(feature = "rest")]
 
-use axiam_sdk::client::AxiamClient;
 use axiam_sdk::AxiamError;
+use axiam_sdk::client::AxiamClient;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -20,9 +20,9 @@
 
 use std::sync::Arc;
 
-use axiam_sdk::grpc::{build_channel, AuthzGrpcClient, CheckAccessRequest, GrpcChannelConfig};
-use axiam_sdk::token::{Claims, JwksVerifier, TokenManager};
 use axiam_sdk::Sensitive;
+use axiam_sdk::grpc::{AuthzGrpcClient, CheckAccessRequest, GrpcChannelConfig, build_channel};
+use axiam_sdk::token::{Claims, JwksVerifier, TokenManager};
 use reqwest::cookie::CookieStore;
 use serde::Deserialize;
 use uuid::Uuid;

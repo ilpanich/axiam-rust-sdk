@@ -26,7 +26,7 @@
 //!
 //! Run: `cargo run --example actix_route_guard --features actix,macros`
 
-use actix_web::{web, App, HttpServer};
+use actix_web::{App, HttpServer, web};
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::middleware::AxiamUser;
 use axiam_sdk::token::JwksVerifier;

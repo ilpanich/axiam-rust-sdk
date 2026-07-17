@@ -8,7 +8,7 @@
 
 #![cfg(feature = "actix")]
 
-use actix_web::{test::TestRequest, web, FromRequest};
+use actix_web::{FromRequest, test::TestRequest, web};
 use axiam_sdk::middleware::AxiamUser;
 use axiam_sdk::token::JwksVerifier;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};

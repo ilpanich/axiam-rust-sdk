@@ -9,8 +9,8 @@
 
 #![cfg(feature = "grpc")]
 
-use axiam_sdk::grpc::{build_channel, GrpcChannelConfig};
 use axiam_sdk::AxiamError;
+use axiam_sdk::grpc::{GrpcChannelConfig, build_channel};
 
 #[test]
 fn plaintext_non_loopback_base_url_is_rejected() {

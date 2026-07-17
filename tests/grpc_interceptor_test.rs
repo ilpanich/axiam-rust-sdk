@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
+use axiam_sdk::Sensitive;
 use axiam_sdk::grpc::AuthInterceptor;
 use axiam_sdk::token::TokenManager;
-use axiam_sdk::Sensitive;
-use tonic::service::Interceptor;
 use tonic::Request;
+use tonic::service::Interceptor;
 use uuid::Uuid;
 
 #[test]

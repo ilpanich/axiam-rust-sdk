@@ -48,13 +48,13 @@ use std::future::Future;
 use std::pin::Pin;
 
 use actix_web::http::Method;
-use actix_web::{dev::Payload, web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, dev::Payload, web};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::token::JwksVerifier;
 use crate::AxiamError;
+use crate::token::JwksVerifier;
 
 /// Name of the (non-`HttpOnly`) CSRF cookie set by AXIAM alongside
 /// `axiam_access` (CONTRACT.md §3) — reuses the same public constant the

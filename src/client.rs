@@ -27,9 +27,9 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::token::jwks::JwksVerifier;
-use crate::token::TokenManager;
 use crate::AxiamError;
+use crate::token::TokenManager;
+use crate::token::jwks::JwksVerifier;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
