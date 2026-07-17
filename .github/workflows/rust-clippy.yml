@@ -41,6 +41,15 @@ jobs:
       - name: Install required cargo
         run: cargo install clippy-sarif sarif-fmt
 
+      # build.rs runs tonic-prost-build gRPC codegen (grpc feature, pulled in
+      # by --all-features), which shells out to protoc. Without it, build.rs
+      # skips codegen and the crate's #[path]-included gen module
+      # (src/gen/axiam.v1.rs) is missing, so clippy fails with
+      # "couldn't read src/grpc/../gen/axiam.v1.rs (os error 2)". Mirrors the
+      # protoc step in sdk-ci-rust.yml.
+      - name: Install protoc (build.rs gRPC codegen)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Run rust-clippy
         run:
           cargo clippy
