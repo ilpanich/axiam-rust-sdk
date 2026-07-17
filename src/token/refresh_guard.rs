@@ -58,10 +58,10 @@ impl TokenManager {
         // we waited for the lock, the current access token differs from what
         // this caller observed failing — just return the new one, no
         // refresh call needed.
-        if let Some(current) = &guard.access {
-            if current.expose() != observed_access_token {
-                return Ok(current.clone_inner());
-            }
+        if let Some(current) = &guard.access
+            && current.expose() != observed_access_token
+        {
+            return Ok(current.clone_inner());
         }
 
         // We are the single in-flight refresher.
