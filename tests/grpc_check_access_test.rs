@@ -17,10 +17,10 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use axiam_sdk::grpc::gen::authorization_service_server::{
+use axiam_sdk::grpc::r#gen::authorization_service_server::{
     AuthorizationService, AuthorizationServiceServer,
 };
-use axiam_sdk::grpc::gen::{
+use axiam_sdk::grpc::r#gen::{
     BatchCheckAccessRequest as WireBatchCheckAccessRequest,
     BatchCheckAccessResponse as WireBatchCheckAccessResponse,
     CheckAccessRequest as WireCheckAccessRequest, CheckAccessResponse as WireCheckAccessResponse,

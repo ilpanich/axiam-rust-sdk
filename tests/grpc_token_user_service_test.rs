@@ -7,8 +7,8 @@
 //! `AuthorizationServiceClient`. The two generated client/server pairs
 //! exercised here are still `pub mod gen` and therefore part of the crate's
 //! public API surface (reachable as
-//! `axiam_sdk::grpc::gen::token_service_client::TokenServiceClient` /
-//! `axiam_sdk::grpc::gen::user_service_client::UserServiceClient`), so a
+//! `axiam_sdk::grpc::r#gen::token_service_client::TokenServiceClient` /
+//! `axiam_sdk::grpc::r#gen::user_service_client::UserServiceClient`), so a
 //! consumer that needs raw JWT introspection or a server-side credential
 //! check can already use them directly. These tests exercise that surface
 //! the same way `grpc_check_access_test.rs` exercises `AuthorizationService`:
@@ -22,11 +22,11 @@
 
 use std::net::SocketAddr;
 
-use axiam_sdk::grpc::gen::token_service_client::TokenServiceClient;
-use axiam_sdk::grpc::gen::token_service_server::{TokenService, TokenServiceServer};
-use axiam_sdk::grpc::gen::user_service_client::UserServiceClient;
-use axiam_sdk::grpc::gen::user_service_server::{UserService, UserServiceServer};
-use axiam_sdk::grpc::gen::{
+use axiam_sdk::grpc::r#gen::token_service_client::TokenServiceClient;
+use axiam_sdk::grpc::r#gen::token_service_server::{TokenService, TokenServiceServer};
+use axiam_sdk::grpc::r#gen::user_service_client::UserServiceClient;
+use axiam_sdk::grpc::r#gen::user_service_server::{UserService, UserServiceServer};
+use axiam_sdk::grpc::r#gen::{
     GetUserRequest, IntrospectTokenRequest, IntrospectTokenResponse, UserResponse,
     ValidateCredentialsRequest, ValidateCredentialsResponse, ValidateTokenRequest,
     ValidateTokenResponse,

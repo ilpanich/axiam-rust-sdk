@@ -17,19 +17,19 @@
 
 use std::net::SocketAddr;
 
-use axiam_sdk::grpc::gen::authorization_service_client::AuthorizationServiceClient;
-use axiam_sdk::grpc::gen::authorization_service_server::{
+use axiam_sdk::grpc::r#gen::authorization_service_client::AuthorizationServiceClient;
+use axiam_sdk::grpc::r#gen::authorization_service_server::{
     AuthorizationService, AuthorizationServiceServer, SERVICE_NAME as AUTHZ_SERVICE_NAME,
 };
-use axiam_sdk::grpc::gen::token_service_client::TokenServiceClient;
-use axiam_sdk::grpc::gen::token_service_server::{
+use axiam_sdk::grpc::r#gen::token_service_client::TokenServiceClient;
+use axiam_sdk::grpc::r#gen::token_service_server::{
     TokenService, TokenServiceServer, SERVICE_NAME as TOKEN_SERVICE_NAME,
 };
-use axiam_sdk::grpc::gen::user_service_client::UserServiceClient;
-use axiam_sdk::grpc::gen::user_service_server::{
+use axiam_sdk::grpc::r#gen::user_service_client::UserServiceClient;
+use axiam_sdk::grpc::r#gen::user_service_server::{
     UserService, UserServiceServer, SERVICE_NAME as USER_SERVICE_NAME,
 };
-use axiam_sdk::grpc::gen::{
+use axiam_sdk::grpc::r#gen::{
     BatchCheckAccessRequest, BatchCheckAccessResponse, CheckAccessRequest, CheckAccessResponse,
     GetUserRequest, IntrospectTokenRequest, IntrospectTokenResponse, UserResponse,
     ValidateCredentialsRequest, ValidateCredentialsResponse, ValidateTokenRequest,

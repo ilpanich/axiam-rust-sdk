@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha7] - 2026-07-17
+
+### Fixed
+
+- Build failure under Rust edition 2024: the generated gRPC stub module was
+  declared `pub mod gen`, but `gen` is a reserved keyword in edition 2024, so
+  the crate (and every `grpc`-feature consumer) failed to compile with
+  "expected identifier, found reserved keyword `gen`". The module is now
+  declared and referenced as the raw identifier `r#gen`
+  (`axiam_sdk::grpc::r#gen`); the on-disk `src/gen/` generated-code path is
+  unchanged.
+
 ## [1.0.0-alpha2] - 2026-07-16
 
 ### Added

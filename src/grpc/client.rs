@@ -31,12 +31,12 @@ use tonic::transport::Channel;
 use tonic::Code;
 use uuid::Uuid;
 
-use crate::grpc::gen::authorization_service_client::AuthorizationServiceClient;
-use crate::grpc::gen::{
+use crate::grpc::interceptor::AuthInterceptor;
+use crate::grpc::r#gen::authorization_service_client::AuthorizationServiceClient;
+use crate::grpc::r#gen::{
     BatchCheckAccessRequest as WireBatchCheckAccessRequest,
     CheckAccessRequest as WireCheckAccessRequest, CheckAccessResponse as WireCheckAccessResponse,
 };
-use crate::grpc::interceptor::AuthInterceptor;
 use crate::token::refresh_guard::RefreshedTokens;
 use crate::token::TokenManager;
 use crate::AxiamError;

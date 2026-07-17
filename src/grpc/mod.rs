@@ -32,7 +32,7 @@ pub mod interceptor;
 #[rustfmt::skip]
 #[allow(missing_docs)]
 #[path = "../gen/axiam.v1.rs"]
-pub mod gen;
+pub mod r#gen;
 
 pub use channel::{build_channel, GrpcChannelConfig};
 pub use client::{AccessDecision, AuthzGrpcClient, CheckAccessRequest, RefreshFn};
