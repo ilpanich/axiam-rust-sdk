@@ -96,6 +96,7 @@ async fn custom_connect_and_request_timeouts_are_accepted() {
         connect_timeout: Some(std::time::Duration::from_secs(5)),
         request_timeout: Some(std::time::Duration::from_secs(15)),
         custom_ca_pem: None,
+        ..Default::default()
     };
     build_channel("https://grpc.example.com:9090", &config)
         .expect("custom timeouts must not affect lazy channel construction");

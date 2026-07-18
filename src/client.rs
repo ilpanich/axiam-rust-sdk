@@ -91,6 +91,8 @@ pub struct AxiamClientBuilder {
     connect_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
     custom_ca_pem: Option<Vec<u8>>,
+    client_cert_pem: Option<Vec<u8>>,
+    client_key: Option<crate::Sensitive<Vec<u8>>>,
 }
 
 impl AxiamClientBuilder {
@@ -177,6 +179,59 @@ impl AxiamClientBuilder {
         Ok(self)
     }
 
+    /// Configure a **client certificate** for mutual TLS (mTLS), per
+    /// CONTRACT.md §6.1. AXIAM authenticates IoT devices and service accounts
+    /// by mTLS: the client presents an X.509 identity certificate (signed by
+    /// the tenant's organization CA) that the server binds to a service
+    /// account. The configured identity is applied to **both** the REST
+    /// transport (this client's `reqwest::Client`) and to any gRPC channel
+    /// built from this client via [`AxiamClient::grpc_channel_config`].
+    ///
+    /// # Arguments
+    /// * `cert_pem` — the PEM-encoded client certificate **chain**.
+    /// * `key_pem` — the PEM-encoded private key (PKCS#8 or PKCS#1). It is
+    ///   retained behind [`crate::Sensitive`] and is never exposed via any
+    ///   public getter, `Debug`, or log output (§6.1 rule 3, §7).
+    ///
+    /// mTLS is opt-in; omitting this leaves the default bearer/cookie
+    /// behavior unchanged (§6.1 rule 5). Presenting a client certificate
+    /// **never** relaxes server verification (§6.1 rule 2) — strict TLS stays
+    /// on and this is a separate code path from [`Self::with_custom_ca`].
+    ///
+    /// Returns a construction-time [`AxiamError`] if `cert_pem`/`key_pem` do
+    /// not parse as a valid PEM certificate + private key (§6.1 rule 1).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use axiam_sdk::client::AxiamClient;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let cert_pem = std::fs::read("device-cert.pem")?;
+    /// let key_pem = std::fs::read("device-key.pem")?;
+    /// let client = AxiamClient::builder()
+    ///     .base_url("https://iam.example.com")?
+    ///     .tenant_slug("acme")
+    ///     .with_client_cert(&cert_pem, &key_pem)?
+    ///     .build()?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_client_cert(mut self, cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, AxiamError> {
+        // Validate eagerly so a malformed cert/key is caught here rather than
+        // at first-request time. `reqwest::Identity::from_pem` (rustls backend)
+        // takes a single buffer holding the cert chain followed by the PKCS#8
+        // private key — build it once to surface parse errors now, then store
+        // the two PEMs separately (the key behind `Sensitive`, §7).
+        let combined = concat_cert_and_key(cert_pem, key_pem);
+        reqwest::Identity::from_pem(&combined).map_err(|e| AxiamError::Network {
+            message: format!("invalid client certificate / key PEM: {e}"),
+            source: None,
+        })?;
+        self.client_cert_pem = Some(cert_pem.to_vec());
+        self.client_key = Some(crate::Sensitive::new(key_pem.to_vec()));
+        Ok(self)
+    }
+
     /// Finalize the client. Fails if `base_url` or a tenant identifier is
     /// missing (§5 — never a silent default).
     pub fn build(self) -> Result<AxiamClient, AxiamError> {
@@ -239,6 +294,20 @@ impl AxiamClientBuilder {
             client_builder = client_builder.add_root_certificate(cert);
         }
 
+        // §6.1: apply the client-certificate identity (mTLS) to the REST
+        // transport. `reqwest::Identity::from_pem` takes ONE buffer with the
+        // cert chain followed by the private key. This never weakens server
+        // verification — it only adds the client identity we present.
+        if let (Some(cert), Some(key)) = (&self.client_cert_pem, &self.client_key) {
+            let combined = concat_cert_and_key(cert, key.expose());
+            let identity =
+                reqwest::Identity::from_pem(&combined).map_err(|e| AxiamError::Network {
+                    message: format!("invalid client certificate / key PEM: {e}"),
+                    source: None,
+                })?;
+            client_builder = client_builder.identity(identity);
+        }
+
         let http = client_builder.build().map_err(|e| AxiamError::Network {
             message: format!("failed to construct HTTP client: {e}"),
             source: Some(Box::new(e)),
@@ -258,9 +327,26 @@ impl AxiamClientBuilder {
                 csrf_token: std::sync::RwLock::new(None),
                 resolved_org_id: std::sync::RwLock::new(None),
                 pending_mfa_challenge: std::sync::RwLock::new(None),
+                custom_ca_pem: self.custom_ca_pem,
+                client_cert_pem: self.client_cert_pem,
+                client_key: self.client_key,
             }),
         })
     }
+}
+
+/// Concatenate a PEM cert chain and a PEM private key into the single buffer
+/// `reqwest::Identity::from_pem` expects (cert(s) first, then key), ensuring a
+/// newline separates the two so an already-trailing-newline-less cert does not
+/// run into the key's `-----BEGIN` armor.
+fn concat_cert_and_key(cert_pem: &[u8], key_pem: &[u8]) -> Vec<u8> {
+    let mut combined = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
+    combined.extend_from_slice(cert_pem);
+    if !cert_pem.ends_with(b"\n") {
+        combined.push(b'\n');
+    }
+    combined.extend_from_slice(key_pem);
+    combined
 }
 
 pub(crate) struct AxiamClientInner {
@@ -283,6 +369,16 @@ pub(crate) struct AxiamClientInner {
     /// the two-phase flow with only a `code` argument, matching
     /// CONTRACT.md §1's exact `verify_mfa(code)` signature.
     pub(crate) pending_mfa_challenge: std::sync::RwLock<Option<crate::Sensitive<String>>>,
+    /// Custom CA PEM this client was built with, if any — retained so a gRPC
+    /// channel built from the same client can share the identical trust chain
+    /// (see [`AxiamClient::grpc_channel_config`]).
+    pub(crate) custom_ca_pem: Option<Vec<u8>>,
+    /// §6.1 client-certificate chain (PEM), if mTLS was configured — retained
+    /// so the same identity applies to the gRPC transport (§6.1 rule 4).
+    pub(crate) client_cert_pem: Option<Vec<u8>>,
+    /// §6.1 client private key (PEM), held behind [`crate::Sensitive`] so it
+    /// never leaks via `Debug`/log/getter (§6.1 rule 3, §7).
+    pub(crate) client_key: Option<crate::Sensitive<Vec<u8>>>,
 }
 
 /// The AXIAM SDK's REST/gRPC/AMQP client entry point.
@@ -381,6 +477,40 @@ impl AxiamClient {
     pub(crate) fn set_resolved_org_id(&self, org_id: Uuid) {
         if let Ok(mut guard) = self.inner.resolved_org_id.write() {
             *guard = Some(org_id);
+        }
+    }
+
+    /// Build a [`GrpcChannelConfig`](crate::grpc::GrpcChannelConfig) that
+    /// mirrors this client's TLS configuration — the custom CA (§6) **and**
+    /// the client-certificate identity (§6.1), if either was configured on the
+    /// builder. This is how the mTLS identity configured via
+    /// [`AxiamClientBuilder::with_client_cert`] is applied to the gRPC
+    /// transport of the *same* client (§6.1 rule 4: both transports).
+    ///
+    /// Combine with [`crate::grpc::build_channel`]:
+    /// ```no_run
+    /// # #[cfg(all(feature = "rest", feature = "grpc"))]
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use axiam_sdk::client::AxiamClient;
+    /// # use axiam_sdk::grpc::build_channel;
+    /// # let client = AxiamClient::builder()
+    /// #     .base_url("https://iam.example.com")?
+    /// #     .tenant_slug("acme")
+    /// #     .build()?;
+    /// let channel = build_channel("https://iam.example.com:9443", &client.grpc_channel_config())?;
+    /// # let _ = channel;
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(all(feature = "rest", feature = "grpc")))]
+    /// # fn main() {}
+    /// ```
+    #[cfg(feature = "grpc")]
+    pub fn grpc_channel_config(&self) -> crate::grpc::GrpcChannelConfig {
+        crate::grpc::GrpcChannelConfig {
+            custom_ca_pem: self.inner.custom_ca_pem.clone(),
+            client_cert_pem: self.inner.client_cert_pem.clone(),
+            client_key: self.inner.client_key.as_ref().map(|k| k.clone_inner()),
+            ..Default::default()
         }
     }
 

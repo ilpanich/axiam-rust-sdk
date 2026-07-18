@@ -132,6 +132,11 @@ tonic = { version = "0.14", default-features = false, features = ["router", "gzi
 # (tests/ui/*.rs): asserts that macro misuse (missing `action`, conflicting
 # resource selectors, non-async fn) fails to compile with a clear message.
 trybuild = "1"
+# `rcgen` generates a throwaway test CA + client certificate/key at TEST TIME
+# for the §6.1 mTLS tests (tests/mtls_client_cert_test.rs). This keeps private
+# keys OUT of the repository — nothing is committed; every key is minted in
+# the test process and dropped when it ends.
+rcgen = "0.13"
 
 [package.metadata.docs.rs]
 all-features = true
