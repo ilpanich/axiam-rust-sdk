@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Client-certificate / mutual-TLS (mTLS) support (CONTRACT.md §6.1).** New
+  builder method `AxiamClient::builder().with_client_cert(cert_pem, key_pem)`
+  configures a PEM client-certificate chain + private key, applied to **both**
+  transports: the REST client (`reqwest::Identity`) and any gRPC channel built
+  from the same client via the new `AxiamClient::grpc_channel_config()` helper
+  (`ClientTlsConfig::identity`). `GrpcChannelConfig` gains `client_cert_pem`
+  and `client_key` fields for direct `grpc`-only configuration. The private key
+  is retained behind `Sensitive<T>` and never exposed via any getter, `Debug`,
+  or log output. Presenting a client certificate never relaxes server
+  verification — strict TLS stays on (kept as a separate code path from
+  `with_custom_ca`). Malformed cert/key PEM is rejected at construction time.
+  The crate now states conformance to "§1–§10 (including §6.1 mTLS)".
+
 ## [1.0.0-alpha7] - 2026-07-17
 
 ### Fixed

@@ -26,7 +26,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `AxiamClientBuilder` (`src/client.rs`) settings relevant to gRPC: base
 /// URL, timeouts, and an optional custom CA PEM (§6's one and only TLS
 /// escape hatch — never an insecure/skip-verification surface).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct GrpcChannelConfig {
     /// Timeout for establishing the TCP+TLS connection. Defaults to 10
     /// seconds when `None`.
@@ -37,6 +37,32 @@ pub struct GrpcChannelConfig {
     /// PEM-encoded custom CA certificate bytes (§6). `None` means: verify
     /// strictly against the platform's native trust store only.
     pub custom_ca_pem: Option<Vec<u8>>,
+    /// §6.1 client-certificate **chain** (PEM), for mutual TLS. `None` leaves
+    /// the default (no client certificate presented) behavior unchanged.
+    /// Populate this together with [`Self::client_key`]; the easiest way is
+    /// [`crate::client::AxiamClient::grpc_channel_config`], which copies the identity
+    /// configured via `AxiamClientBuilder::with_client_cert`.
+    pub client_cert_pem: Option<Vec<u8>>,
+    /// §6.1 client private key (PEM, PKCS#8 or PKCS#1), held behind
+    /// [`crate::Sensitive`] so it never leaks via `Debug`/log output (§7).
+    /// Only used when [`Self::client_cert_pem`] is also set.
+    pub client_key: Option<crate::Sensitive<Vec<u8>>>,
+}
+
+// `Sensitive<T>` deliberately does not derive a public `Clone` (see
+// `src/sensitive.rs`), so `GrpcChannelConfig` cannot `#[derive(Clone)]`.
+// This manual impl clones the key via the crate-internal, still
+// redaction-safe `clone_inner`, preserving the no-public-leak invariant.
+impl Clone for GrpcChannelConfig {
+    fn clone(&self) -> Self {
+        Self {
+            connect_timeout: self.connect_timeout,
+            request_timeout: self.request_timeout,
+            custom_ca_pem: self.custom_ca_pem.clone(),
+            client_cert_pem: self.client_cert_pem.clone(),
+            client_key: self.client_key.as_ref().map(|k| k.clone_inner()),
+        }
+    }
 }
 
 /// Build the single, lazily-connected `tonic::Channel` for `base_url`.
@@ -84,6 +110,14 @@ pub fn build_channel(base_url: &str, config: &GrpcChannelConfig) -> Result<Chann
         if let Some(pem) = &config.custom_ca_pem {
             let cert = tonic::transport::Certificate::from_pem(pem);
             tls = tls.ca_certificate(cert);
+        }
+        // §6.1: present a client certificate identity for mutual TLS. tonic's
+        // `Identity::from_pem(cert, key)` takes the two PEMs separately. This
+        // only ADDS the client identity we present — server verification stays
+        // strict (the `with_enabled_roots` + optional CA chain above).
+        if let (Some(cert), Some(key)) = (&config.client_cert_pem, &config.client_key) {
+            let identity = tonic::transport::Identity::from_pem(cert, key.expose());
+            tls = tls.identity(identity);
         }
         endpoint = endpoint.tls_config(tls).map_err(|e| AxiamError::Network {
             message: format!("failed to configure gRPC TLS: {e}"),

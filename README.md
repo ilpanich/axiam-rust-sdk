@@ -19,7 +19,7 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§11.
+This SDK conforms to CONTRACT.md §1–§11 (including §6.1 mTLS).
 
 See [`CONTRACT.md`](CONTRACT.md) for the full cross-language behavioral contract. It is shared
 verbatim across all seven AXIAM SDKs; the copy in this repository is the authority for this
@@ -208,6 +208,37 @@ See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).
 - **TLS** (§6): strict TLS verification against the system trust store is always on. The only
   escape hatch is `with_custom_ca(pem)` for development environments with self-signed
   certificates — there is no API surface that disables or skips certificate verification.
+
+### mTLS / client certificates (§6.1)
+
+AXIAM can authenticate IoT devices and service accounts by **mutual TLS**: the client presents
+an X.509 identity certificate (signed by the tenant's organization CA) that the server binds to
+a service account. Configure it with `with_client_cert(cert_pem, key_pem)` — a PEM certificate
+**chain** plus a PEM private key (PKCS#8 or PKCS#1). The identity is applied to **both** the REST
+transport and any gRPC channel built from the same client. Presenting a client certificate never
+relaxes server verification — strict TLS stays on. The private key is retained behind
+`Sensitive<T>` and is never exposed via any getter, `Debug`, or log output.
+
+```rust,no_run
+use axiam_sdk::client::AxiamClient;
+use axiam_sdk::grpc::build_channel;
+
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let cert_pem = std::fs::read("device-cert.pem")?;
+let key_pem = std::fs::read("device-key.pem")?;
+
+let client = AxiamClient::builder()
+    .base_url("https://axiam.example.com")?
+    .tenant_slug("acme")
+    .with_client_cert(&cert_pem, &key_pem)? // §6.1: applies to REST + gRPC
+    .build()?;
+
+// The same identity flows to the gRPC transport of the same client:
+let channel = build_channel("https://axiam.example.com:9443", &client.grpc_channel_config())?;
+# let _ = channel;
+# Ok(())
+# }
+```
 
 ## Development
 
