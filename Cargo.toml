@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name = "axiam-sdk"
-version = "1.0.0-alpha8"
+version = "1.0.0-alpha9"
 edition = "2024"
 rust-version = "1.88"
 description = "Official Rust client SDK for AXIAM IAM"
@@ -73,7 +73,7 @@ actix = ["dep:actix-web", "dep:subtle", "rest"]
 macros = ["dep:axiam-sdk-macros", "actix"]
 
 [dependencies]
-axiam-sdk-macros = { version = "=1.0.0-alpha8", path = "axiam-sdk-macros", optional = true }
+axiam-sdk-macros = { version = "=1.0.0-alpha9", path = "axiam-sdk-macros", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies"], optional = true }
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "tls-ring", "tls-native-roots"], optional = true }
