@@ -20,12 +20,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("AXIAM_BASE_URL").unwrap_or_else(|_| "https://localhost:8443".to_string());
     let tenant_slug = std::env::var("AXIAM_TENANT_SLUG").unwrap_or_else(|_| "acme".to_string());
+    // CONTRACT.md §5.1: login requires an organization identifier alongside the
+    // tenant (a tenant slug is only unique within an organization).
+    let org_slug = std::env::var("AXIAM_ORG_SLUG").unwrap_or_else(|_| "acme".to_string());
     let email = std::env::var("AXIAM_EMAIL").unwrap_or_else(|_| "user@example.com".to_string());
     let password = std::env::var("AXIAM_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
 
     let client = AxiamClient::builder()
         .base_url(&base_url)?
         .tenant_slug(tenant_slug)
+        .org_slug(org_slug)
         .build()?;
 
     let login_result = client.login(&email, &password).await?;

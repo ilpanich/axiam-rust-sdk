@@ -69,6 +69,8 @@ async fn a_same_host_redirect_loop_is_capped_and_surfaces_as_a_network_error() {
         .base_url(mock_server.uri())
         .expect("valid base_url")
         .tenant_slug("acme")
+        // CONTRACT.md §5.1: login also requires an organization identifier.
+        .org_slug("acme")
         .build()
         .expect("client builds");
 
@@ -98,6 +100,8 @@ async fn a_cross_host_redirect_is_not_followed() {
         .base_url(mock_server.uri())
         .expect("valid base_url")
         .tenant_slug("acme")
+        // CONTRACT.md §5.1: login also requires an organization identifier.
+        .org_slug("acme")
         .build()
         .expect("client builds");
 

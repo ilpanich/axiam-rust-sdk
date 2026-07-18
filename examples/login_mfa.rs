@@ -2,7 +2,9 @@
 //!
 //! Demonstrates:
 //! - Constructing an [`axiam_sdk::client::AxiamClient`] with a non-optional
-//!   `tenant_slug` (§5 — there is no default tenant).
+//!   `tenant_slug` (§5 — there is no default tenant) plus the `org_slug`
+//!   login/refresh requires (§5.1 — a tenant slug is only unique within an
+//!   organization).
 //! - Calling `login`, branching on `LoginResult.mfa_required`, and calling
 //!   `verify_mfa` to complete the two-phase flow when the server challenges
 //!   for MFA.
@@ -23,6 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("AXIAM_BASE_URL").unwrap_or_else(|_| "https://localhost:8443".to_string());
     let tenant_slug = std::env::var("AXIAM_TENANT_SLUG").unwrap_or_else(|_| "acme".to_string());
+    // CONTRACT.md §5.1: login also requires an organization identifier — a
+    // tenant slug is only unique within an organization, so the server rejects
+    // a login body that carries no `org_id`/`org_slug`.
+    let org_slug = std::env::var("AXIAM_ORG_SLUG").unwrap_or_else(|_| "acme".to_string());
     let email = std::env::var("AXIAM_EMAIL").unwrap_or_else(|_| "user@example.com".to_string());
     let password = std::env::var("AXIAM_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
     let totp_code = std::env::var("AXIAM_TOTP_CODE").unwrap_or_else(|_| "000000".to_string());
@@ -30,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = AxiamClient::builder()
         .base_url(&base_url)?
         .tenant_slug(tenant_slug)
+        .org_slug(org_slug)
         .build()?;
 
     // POST /api/v1/auth/login (CONTRACT.md §1).

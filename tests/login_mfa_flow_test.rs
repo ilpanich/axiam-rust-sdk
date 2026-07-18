@@ -99,6 +99,9 @@ fn build_client(base_url: &str) -> AxiamClient {
         .base_url(base_url)
         .expect("valid base_url")
         .tenant_slug("acme")
+        // CONTRACT.md §5.1: login/refresh also require an organization
+        // identifier (a tenant slug is only unique within an organization).
+        .org_slug("acme")
         .build()
         .expect("client with tenant_slug builds successfully")
 }
