@@ -61,7 +61,8 @@ require a live AXIAM server to `cargo build --examples --all-features`.
 ### Login + MFA (`rest`)
 
 Construct a client with a non-optional tenant identifier (CONTRACT.md §5 — there is no default
-tenant), then complete the two-phase login/MFA flow:
+tenant) plus the organization identifier login/refresh require (CONTRACT.md §5.1 — a tenant slug
+is only unique within an organization), then complete the two-phase login/MFA flow:
 
 ```rust,no_run
 use axiam_sdk::client::AxiamClient;
@@ -70,6 +71,7 @@ use axiam_sdk::client::AxiamClient;
 let client = AxiamClient::builder()
     .base_url("https://axiam.example.com")?
     .tenant_slug("acme")
+    .org_slug("acme")
     .build()?;
 
 let login_result = client.login("user@example.com", "password").await?;
@@ -230,6 +232,7 @@ let key_pem = std::fs::read("device-key.pem")?;
 let client = AxiamClient::builder()
     .base_url("https://axiam.example.com")?
     .tenant_slug("acme")
+    .org_slug("acme") // §5.1: org context for any login/refresh this client drives
     .with_client_cert(&cert_pem, &key_pem)? // §6.1: applies to REST + gRPC
     .build()?;
 

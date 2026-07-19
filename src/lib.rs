@@ -30,6 +30,7 @@
 //! let client = AxiamClient::builder()
 //!     .base_url("https://axiam.example.com")?
 //!     .tenant_slug("acme")
+//!     .org_slug("acme")
 //!     .build()?;
 //!
 //! client.login("user@example.com", "hunter2").await?;
