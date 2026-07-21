@@ -52,8 +52,17 @@ jobs:
       # --all-features so the grpc/amqp/actix code paths are instrumented too;
       # with the default feature set, `actix` (and its §10 route guard, CSRF
       # check included) would silently count as zero-coverage dead code.
+      #
+      # --ignore-filename-regex excludes the build.rs/buf-generated gRPC stubs
+      # (`src/gen/axiam.v1.rs`) from the metric: it is machine-generated,
+      # regenerated on every build, never hand-written, and carries a large
+      # tail of protobuf/tonic boilerplate (per-service client/server builders,
+      # codec glue) that no SDK test meaningfully exercises — the same
+      # "un-coverable by design" category as the amqp `consume()` loop noted
+      # below. Counting it only makes the floor track proto surface size rather
+      # than hand-written test coverage.
       - name: Collect coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --ignore-filename-regex 'gen/axiam\.v1\.rs' --lcov --output-path lcov.info
 
       # Regression gate: fail if line coverage drops below the floor. Set below
       # the current level (~90%) so it never false-fails; ratchet upward as
@@ -61,9 +70,10 @@ jobs:
       # broker-dependent `consume()` loop (no live broker in CI) and by test
       # handler closures that are deliberately never invoked (the tests assert
       # the handler is NOT called on a rejected delivery). Reuses the profdata
-      # collected above (no re-run).
+      # collected above (no re-run). Same generated-stub exclusion as the
+      # collect step so the gate and the Coveralls report agree.
       - name: Enforce coverage floor
-        run: cargo llvm-cov report --fail-under-lines 89
+        run: cargo llvm-cov report --fail-under-lines 89 --ignore-filename-regex 'gen/axiam\.v1\.rs'
 
       - name: Upload to Coveralls
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e  # v2.3.7
