@@ -9,7 +9,7 @@
 # always ship together.
 [package]
 name = "axiam-sdk-macros"
-version = "1.0.0-alpha12"
+version = "1.0.0-alpha15"
 edition = "2024"
 rust-version = "1.88"
 description = "Proc-macro Actix-Web authorization attributes for the AXIAM Rust SDK (axiam-sdk)"
