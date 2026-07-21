@@ -262,7 +262,7 @@ impl AuthzGrpcClient {
 
 /// Map a terminal gRPC [`tonic::Status`] to an [`AxiamError`] per
 /// CONTRACT.md §2's gRPC status table, via the shared `from_grpc_code`
-/// helper (16-01).
-fn status_to_axiam_error(status: tonic::Status) -> AxiamError {
+/// helper (16-01). Shared with [`crate::grpc::userinfo`].
+pub(crate) fn status_to_axiam_error(status: tonic::Status) -> AxiamError {
     AxiamError::from_grpc_code(status.code() as i32, status.message().to_string())
 }

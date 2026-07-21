@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- gRPC `get_user_info` (`UserInfoGrpcClient`) — OIDC-style identity read over
+  `axiam.v1.UserInfoService/GetUserInfo` (CONTRACT §1.1). Returns a `UserInfo`
+  with `sub`/`tenant_id`/`org_id` and scope-gated `email`/`preferred_username`,
+  reusing the shared `tonic::Channel`, auth/tenant interceptor, and
+  single-flight refresh guard. Adopts CONTRACT.md 1.3.
+
 ## [1.0.0-alpha15] - 2026-07-21
 
 ### Changed
