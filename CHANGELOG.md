@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha16] - 2026-07-22
+
+### Added
+
+- Add get_user_info (UserInfoGrpcClient)
+
+### Changed
+
+- Exclude generated gRPC stubs from the line-coverage gate
+- Expand userinfo coverage above the 89% gate
+- Vendor userinfo.proto + CONTRACT 1.3
+
 ## [Unreleased]
 
 ### Added
