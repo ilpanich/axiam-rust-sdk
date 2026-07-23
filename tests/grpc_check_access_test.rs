@@ -308,6 +308,41 @@ async fn grpc_unavailable_maps_to_network_error() {
 }
 
 #[tokio::test]
+async fn grpc_client_exposes_tenant_id() {
+    let (addr, _call_count) = start_test_server().await;
+    let tenant_id = Uuid::new_v4();
+    let refresh_count = Arc::new(AtomicUsize::new(0));
+    let client = build_test_client(addr, tenant_id, refresh_count).await;
+    assert_eq!(client.tenant_id(), tenant_id);
+}
+
+#[tokio::test]
+async fn grpc_batch_check_unauthenticated_drives_exactly_one_refresh_then_succeeds() {
+    // `batch_check`'s own UNAUTHENTICATED -> single-flight-refresh -> retry
+    // wiring, distinct from `check_access`'s (already covered by
+    // `grpc_unauthenticated_drives_exactly_one_refresh_then_succeeds` below) —
+    // `AuthzGrpcClient::batch_check` has its own `match ... Code::Unauthenticated`
+    // arm that must be exercised independently.
+    let (addr, _call_count) = start_test_server().await;
+    let tenant_id = Uuid::new_v4();
+    let refresh_count = Arc::new(AtomicUsize::new(0));
+    let client = build_test_client(addr, tenant_id, Arc::clone(&refresh_count)).await;
+
+    let results = client
+        .batch_check(vec![sample_request("unauthenticated-once", tenant_id)])
+        .await
+        .expect("UNAUTHENTICATED-then-success batch_check should ultimately succeed");
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].allowed);
+    assert_eq!(
+        refresh_count.load(Ordering::SeqCst),
+        1,
+        "exactly one single-flight refresh must occur for batch_check too (§9.3)"
+    );
+}
+
+#[tokio::test]
 async fn grpc_unauthenticated_drives_exactly_one_refresh_then_succeeds() {
     let (addr, _call_count) = start_test_server().await;
     let tenant_id = Uuid::new_v4();
