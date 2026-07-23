@@ -233,7 +233,10 @@ async fn verify_maps_a_token_missing_the_exp_claim_to_an_auth_error() {
         .expect_err("a token with no exp claim must fail claim validation, not panic");
     match err {
         AxiamError::Auth { message } => {
-            assert!(message.contains("token claim validation failed"), "{message}")
+            assert!(
+                message.contains("token claim validation failed"),
+                "{message}"
+            )
         }
         other => panic!("expected Auth error, got {other:?}"),
     }

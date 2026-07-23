@@ -543,7 +543,11 @@ async fn logout_fails_when_access_token_has_no_jti() {
     // No `jti` claim at all: the server keys logout off the session id
     // embedded in the caller's own JWT, so `logout()` must refuse to proceed
     // rather than send a nonsensical request.
-    let access = issue_custom_token(&Uuid::new_v4().to_string(), Some(&Uuid::new_v4().to_string()), None);
+    let access = issue_custom_token(
+        &Uuid::new_v4().to_string(),
+        Some(&Uuid::new_v4().to_string()),
+        None,
+    );
 
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/login"))
