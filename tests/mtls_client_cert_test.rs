@@ -19,7 +19,7 @@ fn generate_client_identity() -> (String, String) {
     let cert = rcgen::generate_simple_self_signed(vec!["axiam-sdk-test-client".to_string()])
         .expect("rcgen must generate a self-signed cert");
     let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
+    let key_pem = cert.signing_key.serialize_pem();
     (cert_pem, key_pem)
 }
 
