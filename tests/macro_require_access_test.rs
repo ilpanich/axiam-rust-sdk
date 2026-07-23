@@ -11,6 +11,7 @@
 
 use actix_web::{App, HttpResponse, test, web};
 use axiam_sdk::client::AxiamClient;
+use axiam_sdk::middleware::{AxiamUser, RequireAccess};
 use axiam_sdk::token::JwksVerifier;
 use axiam_sdk::{require_access, require_auth, require_role};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -330,6 +331,69 @@ async fn transport_failure_returns_503_fail_closed() {
 
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["error"], "authz_unavailable");
+}
+
+/// `RequireAccess::check`'s own `Err(AxiamError::Authz {..})` mapping arm —
+/// driven directly (not through the `#[require_access]` macro/route), since
+/// the macro-level `deny_returns_403` test above only reaches `RequireAccess`'s
+/// `Ok(decision) if !decision.allowed` arm (a 200 body with `allowed: false`).
+/// This instead makes the authz endpoint itself answer 403, which
+/// `check_access_as` maps to `AxiamError::Authz`, exercising the *other* path
+/// to the same `AuthzGuardError::Denied` outcome.
+#[tokio::test]
+async fn require_access_check_maps_a_403_authz_response_to_denied() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/authz/check"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let user = AxiamUser {
+        user_id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        roles: vec![],
+    };
+
+    let err = RequireAccess::new("read")
+        .check(&client, &user, Uuid::new_v4())
+        .await
+        .expect_err("a 403 from the authz endpoint must be denied");
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+/// `RequireAccess::check`'s own `Err(AxiamError::Auth {..})` mapping arm — the
+/// authz endpoint answering 401 (distinct from the macro-level
+/// `unauthenticated_returns_401` test, which never even reaches the authz
+/// call because the §10 extractor itself rejects first).
+#[tokio::test]
+async fn require_access_check_maps_a_401_authz_response_to_unauthenticated() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/authz/check"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthenticated"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let user = AxiamUser {
+        user_id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        roles: vec![],
+    };
+
+    let err = RequireAccess::new("read")
+        .check(&client, &user, Uuid::new_v4())
+        .await
+        .expect_err("a 401 from the authz endpoint must be unauthenticated");
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
 }
 
 /// `#[require_auth]`: a valid session passes straight through to the body.
