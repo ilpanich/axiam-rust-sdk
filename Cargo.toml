@@ -136,7 +136,7 @@ trybuild = "1"
 # for the §6.1 mTLS tests (tests/mtls_client_cert_test.rs). This keeps private
 # keys OUT of the repository — nothing is committed; every key is minted in
 # the test process and dropped when it ends.
-rcgen = "0.13"
+rcgen = "0.14"
 
 [package.metadata.docs.rs]
 all-features = true
