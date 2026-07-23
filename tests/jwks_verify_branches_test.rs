@@ -136,6 +136,110 @@ async fn verify_maps_an_expired_token_to_an_auth_error() {
 }
 
 #[tokio::test]
+async fn verify_maps_a_wrong_signature_to_an_auth_error() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": TEST_KID,
+                "alg": "EdDSA",
+                "x": TEST_ED25519_PUBLIC_X,
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let verifier = build_verifier(&mock_server.uri());
+
+    // Same `kid`/claims shape as every other test here, but signed with a
+    // DIFFERENT Ed25519 key than the one the JWKS mock serves — the `kid`
+    // lookup succeeds and a `DecodingKey` builds fine, but the cryptographic
+    // signature check itself must fail, exercising `ErrorKind::InvalidSignature`
+    // specifically (distinct from `ExpiredSignature` and the unusable-JWK
+    // "can't build a decoding key at all" branch covered elsewhere).
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    let claims = TestClaims {
+        sub: Uuid::new_v4().to_string(),
+        tenant_id: Uuid::new_v4().to_string(),
+        org_id: Uuid::new_v4().to_string(),
+        iss: "axiam-test".to_string(),
+        iat: 0,
+        exp: 9_999_999_999,
+        jti: Uuid::new_v4().to_string(),
+    };
+    let mut wrong_seed = TEST_ED25519_SEED;
+    wrong_seed[0] ^= 0xFF;
+    let mut wrong_der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    wrong_der.extend_from_slice(&wrong_seed);
+    let wrong_key = EncodingKey::from_ed_der(&wrong_der);
+    let token = jsonwebtoken::encode(&header, &claims, &wrong_key)
+        .expect("encode token signed with the wrong key");
+
+    let err = verifier
+        .verify(&token)
+        .await
+        .expect_err("a token signed with the wrong key must fail signature verification");
+    match err {
+        AxiamError::Auth { message } => {
+            assert!(message.contains("signature"), "message: {message}")
+        }
+        other => panic!("expected Auth error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn verify_maps_a_token_missing_the_exp_claim_to_an_auth_error() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": TEST_KID,
+                "alg": "EdDSA",
+                "x": TEST_ED25519_PUBLIC_X,
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let verifier = build_verifier(&mock_server.uri());
+
+    // A well-signed token whose claims JSON has no `exp` key at all (unlike
+    // `Claims`, which requires it) — `jsonwebtoken`'s default `Validation`
+    // requires `exp` to be present, so this must fail with a claim-validation
+    // error distinct from `InvalidSignature`/`ExpiredSignature`, exercising the
+    // catch-all `_ => "token claim validation failed"` arm.
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    let claims_without_exp = json!({
+        "sub": Uuid::new_v4().to_string(),
+        "tenant_id": Uuid::new_v4().to_string(),
+        "org_id": Uuid::new_v4().to_string(),
+        "iss": "axiam-test",
+        "jti": Uuid::new_v4().to_string(),
+    });
+    let token = jsonwebtoken::encode(&header, &claims_without_exp, &ed25519_key())
+        .expect("encode token with no exp claim");
+
+    let err = verifier
+        .verify(&token)
+        .await
+        .expect_err("a token with no exp claim must fail claim validation, not panic");
+    match err {
+        AxiamError::Auth { message } => {
+            assert!(message.contains("token claim validation failed"), "{message}")
+        }
+        other => panic!("expected Auth error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn verify_maps_an_unusable_matching_jwk_to_an_auth_error() {
     let mock_server = MockServer::start().await;
     // A JWK carrying the requested `kid` but whose `x` is not valid
