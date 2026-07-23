@@ -9,7 +9,9 @@
 #![cfg(feature = "actix")]
 
 use actix_web::{FromRequest, test::TestRequest, web};
+use axiam_sdk::AxiamError;
 use axiam_sdk::middleware::AxiamUser;
+use axiam_sdk::middleware::actix::AxiamExtractorError;
 use axiam_sdk::token::JwksVerifier;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
@@ -582,6 +584,76 @@ async fn non_uuid_sub_claim_yields_401() {
 
     use actix_web::ResponseError;
     assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+}
+
+/// §3 CSRF double-submit: a cookie-sourced credential on a state-changing
+/// request with an `X-CSRF-Token` header present but NO `axiam_csrf` cookie
+/// at all must be rejected with 403 — exercises `csrf_valid`'s
+/// cookie-missing fallback (distinct from the header-missing fallback the
+/// other §3 tests here reach).
+#[tokio::test]
+async fn cookie_auth_state_changing_with_csrf_header_but_no_csrf_cookie_yields_403() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let token = issue_test_access_token(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        9_999_999_999,
+        None,
+    );
+
+    let req = TestRequest::post()
+        .app_data(web::Data::new(verifier))
+        .cookie(actix_web::cookie::Cookie::new("axiam_access", token))
+        .insert_header(("X-CSRF-Token", "some-token"))
+        // Deliberately no `axiam_csrf` cookie at all.
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let err = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect_err("a X-CSRF-Token header with no axiam_csrf cookie must be rejected");
+
+    use actix_web::ResponseError;
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::FORBIDDEN);
+}
+
+/// `AxiamExtractorError`'s `Display` impl delegates to the wrapped
+/// `AxiamError`'s own redacting `Display` — never independently exercised by
+/// any of the request-driven tests above (they only ever inspect the
+/// `ResponseError` JSON body, never `format!("{}", ...)` the error itself).
+#[test]
+fn axiam_extractor_error_display_delegates_to_inner_error() {
+    let err = AxiamExtractorError(AxiamError::Auth {
+        message: "custom auth failure".into(),
+    });
+    assert!(format!("{err}").contains("custom auth failure"));
+}
+
+/// `AxiamExtractorError::status_code`/`error_response` map every
+/// `AxiamError` variant, including `Network` — never produced by the
+/// extractor itself (its own error paths only ever build `Auth`/`Authz`), so
+/// this constructs one directly via the `pub` field to exercise that arm.
+#[tokio::test]
+async fn axiam_extractor_error_network_variant_maps_to_401() {
+    use actix_web::ResponseError;
+
+    let err = AxiamExtractorError(AxiamError::Network {
+        message: "transport failed".into(),
+        source: None,
+    });
+    assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
+
+    let resp = err.error_response();
+    let body_bytes = actix_web::body::to_bytes(resp.into_body())
+        .await
+        .expect("error body should be readable");
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("error body must be valid JSON");
+    assert_eq!(body["error"], "authentication_failed");
 }
 
 /// §3 CSRF double-submit: a cookie-sourced credential on a state-changing

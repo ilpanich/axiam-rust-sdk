@@ -31,6 +31,16 @@ async fn refresh_short_circuits_when_a_newer_token_already_exists() {
     .expect("double-check must return the already-rotated token without refreshing");
 }
 
+#[test]
+fn token_manager_default_is_equivalent_to_new() {
+    // `#[derive(Default)]`-style parity check for the hand-written `Default`
+    // impl (`TokenManager::default()` just delegates to `::new()`) — every
+    // other test in this suite constructs via `::new()` directly, so
+    // `default()` itself is otherwise never called.
+    let tm = TokenManager::default();
+    assert!(tm.cached_access_token().is_none());
+}
+
 #[tokio::test]
 async fn refresh_without_a_refresh_token_is_an_auth_error() {
     let tm = TokenManager::new();
