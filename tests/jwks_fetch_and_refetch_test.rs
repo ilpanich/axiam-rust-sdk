@@ -186,3 +186,96 @@ async fn verify_with_permanently_unknown_kid_fails_after_forced_refetch() {
         .expect_err("a kid absent even after a forced refetch must fail, not loop forever");
     assert!(matches!(err, AxiamError::Auth { .. }));
 }
+
+#[tokio::test]
+async fn verify_maps_a_jwks_transport_failure_to_a_network_error() {
+    // Bind then drop an ephemeral loopback port so the connection is refused
+    // deterministically — exercises `fetch_and_cache`'s `self.http_client.get(...)
+    // .send()` error branch (a transport-level failure, distinct from the
+    // non-success-status branch already covered above).
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+    let addr = listener.local_addr().expect("resolve bound local_addr");
+    drop(listener);
+
+    let verifier = build_verifier(&format!("http://{addr}"));
+    let token = issue_test_access_token(TEST_KID);
+
+    let err = verifier
+        .verify(&token)
+        .await
+        .expect_err("a refused connection to the JWKS endpoint must surface as an error");
+    assert!(matches!(err, AxiamError::Network { .. }));
+}
+
+#[tokio::test]
+async fn a_second_forced_refetch_within_the_throttle_window_reuses_the_cache_with_no_extra_fetch() {
+    // The JWKS endpoint only ever serves TEST_KID — every token here is
+    // signed with a kid it never has, so every `verify()` call misses the
+    // cache and reaches `force_refetch_if_allowed`. The FIRST such miss has
+    // no `last_forced_refetch` yet, so it is allowed and fetches (the
+    // already-covered `None => true` arm above). This test's second miss
+    // happens immediately afterward (well within `FORCED_REFETCH_MIN_INTERVAL`
+    // = 60s), so it must hit the `Some(last) => false` throttle arm and reuse
+    // the cached JWKS instead of firing a second network fetch.
+    let mock_server = MockServer::start().await;
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&call_count);
+
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(move |_req: &wiremock::Request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(jwks_body_with_kid(TEST_KID))
+        })
+        .mount(&mock_server)
+        .await;
+
+    let verifier = build_verifier(&mock_server.uri());
+
+    // First unknown-kid verify: cold-cache miss (1 fetch) + forced refetch
+    // allowed (2nd fetch) since `last_forced_refetch` is `None`.
+    let first_unknown = issue_test_access_token("unknown-kid-1");
+    let err = verifier
+        .verify(&first_unknown)
+        .await
+        .expect_err("a kid the server never serves must fail even after a forced refetch");
+    assert!(matches!(err, AxiamError::Auth { .. }));
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+    // Second unknown-kid verify, immediately after: the JWKS is still fresh
+    // (within the 300s TTL) so `get_or_fetch` itself does not refetch; the
+    // kid miss then reaches `force_refetch_if_allowed`, whose throttle must
+    // now say "not allowed" (last forced refetch was <60s ago) and reuse the
+    // cached JWKS — NO additional network fetch.
+    let second_unknown = issue_test_access_token("unknown-kid-2");
+    let err = verifier
+        .verify(&second_unknown)
+        .await
+        .expect_err("a second never-served kid must also fail, without an extra fetch");
+    assert!(matches!(err, AxiamError::Auth { .. }));
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "a forced refetch attempted within the throttle window must reuse the cache, not fetch again"
+    );
+}
+
+#[tokio::test]
+async fn jwks_verifier_new_rejects_a_base_url_that_cannot_be_a_base() {
+    // `url::Url::join` fails when the base URL "cannot be a base" (no
+    // hierarchical path segment to join onto) — exercises `JwksVerifier::new`'s
+    // own `base_url.join(JWKS_PATH)` error branch, distinct from every other
+    // test here which always constructs a valid verifier.
+    let base_url =
+        url::Url::parse("data:text/plain,hello").expect("a data: URL parses as a valid Url");
+    assert!(base_url.cannot_be_a_base());
+
+    match axiam_sdk::token::JwksVerifier::new(reqwest::Client::new(), &base_url) {
+        Ok(_) => panic!("a base_url that cannot be a base must be rejected"),
+        Err(AxiamError::Network { message, .. }) => {
+            assert!(message.contains("invalid JWKS URL"), "message: {message}");
+        }
+        Err(other) => panic!("expected Network error, got {other}"),
+    }
+}

@@ -369,6 +369,17 @@ mod tests {
     }
 
     #[test]
+    fn resource_from_path_rejects_a_missing_path_parameter() {
+        // No route registered at all, so `match_info().get("id")` is `None` —
+        // exercises the "missing path parameter" arm, distinct from
+        // `resource_from_path`'s "present but not a UUID" arm covered
+        // end-to-end by `tests/macro_require_access_test.rs::bad_uuid_returns_400`.
+        let req = actix_web::test::TestRequest::default().to_http_request();
+        let err = resource_from_path(&req, "id").expect_err("missing path parameter must fail");
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn resource_from_static_parses_and_rejects() {
         let id = Uuid::new_v4();
         assert_eq!(resource_from_static(&id.to_string()).unwrap(), id);

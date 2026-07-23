@@ -163,3 +163,19 @@ fn parse_authz_body_fields(body: &str) -> (Option<String>, Option<String>) {
 // browsing the source without expanding the derive macro.
 #[allow(dead_code)]
 fn _assert_no_token_in_display<T: fmt::Display>(_: &T) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Exercises the otherwise-uncalled `_assert_no_token_in_display` helper
+    // itself (it exists purely to document the redaction invariant at the
+    // type level — no other code path ever calls it).
+    #[test]
+    fn assert_no_token_in_display_accepts_any_display_error_variant() {
+        let auth = AxiamError::Auth {
+            message: "msg".into(),
+        };
+        _assert_no_token_in_display(&auth);
+    }
+}

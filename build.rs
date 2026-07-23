@@ -24,6 +24,7 @@ fn main() {
         proto_dir.join("authorization.proto"),
         proto_dir.join("token.proto"),
         proto_dir.join("user.proto"),
+        proto_dir.join("userinfo.proto"),
     ];
 
     // Guard against missing proto inputs: warn (do not fail). `proto/` is

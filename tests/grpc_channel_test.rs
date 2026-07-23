@@ -1,7 +1,7 @@
 //! `build_channel` (`src/grpc/channel.rs`) branch coverage: the X-2
 //! plaintext-scheme guard (with its loopback exception), the `https://`
-//! TLS-config branch (with and without a custom CA), and the
-//! `Endpoint::from_shared` error path for a malformed `base_url`.
+//! TLS-config branch (with and without a custom CA, including a corrupt one),
+//! and the `Endpoint::from_shared` error path for a malformed `base_url`.
 //!
 //! `connect_lazy()` means none of these tests perform network I/O — they
 //! only exercise `build_channel`'s own validation/construction logic
@@ -69,6 +69,35 @@ async fn https_base_url_with_custom_ca_builds_successfully() {
     };
     build_channel("https://grpc.example.com:9090", &config)
         .expect("https:// with a custom CA PEM configured must build a lazy channel");
+}
+
+#[tokio::test]
+async fn https_base_url_with_a_corrupt_custom_ca_fails_to_configure_tls() {
+    // Unlike `reqwest`'s rustls backend (which only parses a `Certificate`'s
+    // PEM bytes lazily, at `ClientBuilder::build()` time — see
+    // `src/client.rs`'s `with_custom_ca_accepts_pem_shaped_bytes_regardless_of_content`
+    // test), tonic's `Endpoint::tls_config` parses every configured CA
+    // certificate EAGERLY (`convert_certificate_to_pki_types`), so a
+    // PEM-armored-but-corrupt custom CA must fail right here, exercising
+    // `build_channel`'s "failed to configure gRPC TLS" branch.
+    let armored_but_corrupt =
+        b"-----BEGIN CERTIFICATE-----\nnot-valid-base64-!!!\n-----END CERTIFICATE-----\n";
+    let config = GrpcChannelConfig {
+        custom_ca_pem: Some(armored_but_corrupt.to_vec()),
+        ..Default::default()
+    };
+
+    let err = build_channel("https://grpc.example.com:9090", &config)
+        .expect_err("a PEM-armored but corrupt custom CA must fail gRPC TLS configuration");
+    match err {
+        AxiamError::Network { message, .. } => {
+            assert!(
+                message.contains("failed to configure gRPC TLS"),
+                "message: {message}"
+            );
+        }
+        other => panic!("expected Network error, got {other:?}"),
+    }
 }
 
 #[test]
