@@ -224,6 +224,354 @@ async fn verify_mfa_success_absorbs_the_rotated_session() {
     assert_eq!(client.resolved_tenant_id().await, Some(tenant_id));
 }
 
+// ---------------------------------------------------------------------------
+// Malformed success bodies -> `deser_err` (`src/rest/auth.rs::deser_err`)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn login_200_with_malformed_body_is_a_network_error() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    // A 200 status but a body that is not valid JSON at all: `deser_err`
+    // must map the `response.json()` failure to a Network error rather than
+    // panic.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json at all {{{"))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+
+    let err = client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect_err("a malformed 200 login body must surface as an error, not panic");
+    assert!(matches!(err, AxiamError::Network { .. }));
+}
+
+#[tokio::test]
+async fn login_202_with_malformed_body_is_a_network_error() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    // A 202 status (MFA-required shape expected) but a malformed body.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(202).set_body_string("not json at all {{{"))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+
+    let err = client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect_err("a malformed 202 login body must surface as an error, not panic");
+    assert!(matches!(err, AxiamError::Network { .. }));
+}
+
+#[tokio::test]
+async fn verify_mfa_200_with_malformed_body_is_a_network_error() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+            "mfa_required": true,
+            "challenge_token": "challenge-abc",
+            "available_methods": ["totp"],
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+
+    client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect("login should report mfa_required");
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/mfa/verify"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json at all {{{"))
+        .mount(&mock_server)
+        .await;
+
+    let err = client
+        .verify_mfa("123456")
+        .await
+        .expect_err("a malformed 200 verify_mfa body must surface as an error, not panic");
+    assert!(matches!(err, AxiamError::Network { .. }));
+}
+
+#[tokio::test]
+async fn refresh_200_with_malformed_body_is_a_network_error() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+    client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect("seed login must succeed");
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json at all {{{"))
+        .mount(&mock_server)
+        .await;
+
+    let err = client
+        .refresh()
+        .await
+        .expect_err("a malformed 200 refresh body must surface as an error, not panic");
+    assert!(matches!(err, AxiamError::Network { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// `refresh()`'s tenant_id/org_id-unresolved guards
+// ---------------------------------------------------------------------------
+
+/// A claims shape with fully caller-controlled `tenant_id`/`org_id`/`jti`
+/// fields (unlike `issue_test_access_token`, which always emits well-formed
+/// UUIDs for all three) — lets these tests craft the exact malformed/missing
+/// claim shapes `refresh()`/`logout()` must guard against.
+#[derive(Debug, Serialize)]
+struct CustomClaims {
+    sub: String,
+    tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    org_id: Option<String>,
+    iss: String,
+    iat: i64,
+    exp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
+}
+
+fn issue_custom_token(tenant_id: &str, org_id: Option<&str>, jti: Option<&str>) -> String {
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    let claims = CustomClaims {
+        sub: Uuid::new_v4().to_string(),
+        tenant_id: tenant_id.to_string(),
+        org_id: org_id.map(str::to_string),
+        iss: "axiam-test".to_string(),
+        iat: 0,
+        exp: 9_999_999_999,
+        jti: jti.map(str::to_string),
+    };
+    let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    der.extend_from_slice(&TEST_ED25519_SEED);
+    let key = EncodingKey::from_ed_der(&der);
+    jsonwebtoken::encode(&header, &claims, &key).expect("encode custom-claims token")
+}
+
+#[tokio::test]
+async fn refresh_fails_when_tenant_id_claim_is_not_a_uuid() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    // `tenant_id` is not a valid UUID: `absorb_session_cookies` leaves
+    // `TokenManager`'s `tenant_id` at `None` (login itself still succeeds —
+    // `Claims::tenant_id` is a plain `String`), and since the client was
+    // built with a *slug* (never resolvable on its own), `resolved_tenant_id()`
+    // has no fallback either, so `refresh()` must fail with "tenant_id could
+    // not be resolved" rather than panic on a bad claim.
+    let access = issue_custom_token("not-a-uuid", Some(&Uuid::new_v4().to_string()), None);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+    client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect("login succeeds even with a non-UUID tenant_id claim");
+    assert_eq!(client.resolved_tenant_id().await, None);
+
+    let err = client
+        .refresh()
+        .await
+        .expect_err("refresh() must fail when tenant_id cannot be resolved");
+    match err {
+        AxiamError::Auth { message } => assert!(message.contains("tenant_id"), "{message}"),
+        other => panic!("expected Auth error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn refresh_fails_when_org_id_claim_is_absent() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    let tenant_id = Uuid::new_v4();
+    // No `org_id` claim at all: `resolved_org_id()` stays `None` even though
+    // `tenant_id` resolves fine.
+    let access = issue_custom_token(&tenant_id.to_string(), None, None);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+    client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect("login succeeds with no org_id claim");
+    assert_eq!(client.resolved_tenant_id().await, Some(tenant_id));
+
+    let err = client
+        .refresh()
+        .await
+        .expect_err("refresh() must fail when org_id cannot be resolved");
+    match err {
+        AxiamError::Auth { message } => assert!(message.contains("org_id"), "{message}"),
+        other => panic!("expected Auth error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn refresh_success_response_without_axiam_access_cookie_is_an_auth_error() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+    client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect("seed login must succeed");
+
+    // A 200 refresh response that actively EXPIRES the `axiam_access` cookie
+    // (`Max-Age=0`) rather than rotating it — the jar removes it entirely, so
+    // `refresh()`'s post-success cookie read must reject this rather than
+    // silently keep going with no access token. (A response that simply
+    // omits `Set-Cookie` would leave the jar's *existing* cookie from login
+    // untouched, which is not the branch this test targets.)
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "expires_in": 900 }))
+                .append_header("Set-Cookie", "axiam_access=; Path=/; Max-Age=0"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let err = client
+        .refresh()
+        .await
+        .expect_err("a refresh 200 with no rotated axiam_access cookie must fail");
+    match err {
+        AxiamError::Auth { message } => assert!(message.contains("axiam_access"), "{message}"),
+        other => panic!("expected Auth error, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `logout()`'s missing-`jti` guard
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn logout_fails_when_access_token_has_no_jti() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    // No `jti` claim at all: the server keys logout off the session id
+    // embedded in the caller's own JWT, so `logout()` must refuse to proceed
+    // rather than send a nonsensical request.
+    let access = issue_custom_token(&Uuid::new_v4().to_string(), Some(&Uuid::new_v4().to_string()), None);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+    client
+        .login("alice@example.com", "correct horse battery staple")
+        .await
+        .expect("login succeeds with no jti claim");
+
+    let err = client
+        .logout()
+        .await
+        .expect_err("logout() must fail when the access token carries no jti");
+    match err {
+        AxiamError::Auth { message } => assert!(message.contains("jti"), "{message}"),
+        other => panic!("expected Auth error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn login_200_without_session_cookies_is_an_auth_error() {
     let mock_server = MockServer::start().await;
