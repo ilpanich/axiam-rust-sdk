@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha18] - 2026-07-24
+
+### Changed
+
+- Update syn requirement from 2 to 3 (#24)
+- Bump dtolnay/rust-toolchain (#20)
+- Bump taiki-e/install-action from 2.83.2 to 2.84.0 (#21)
+- Bump actions/checkout from 7.0.0 to 7.0.1 (#22)
+- Update rcgen requirement from 0.13 to 0.14 (#23)
+- Rust SDK 89.3% → ≥92% + ratchet gate 89→90 (Phase C) (#26)
+
+### Fixed
+
+- Use CertifiedKey.signing_key for rcgen 0.14 API rename (#27)
+
 ## [1.0.0-alpha17] - 2026-07-22
 
 ### Changed
