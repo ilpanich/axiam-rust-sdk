@@ -181,10 +181,17 @@ impl LoginResult {
 /// `axiam_csrf`, read them out of the jar (RESEARCH.md Pattern 1), decode
 /// the access token's claims via the JWKS verifier to populate `exp` and
 /// resolve `tenant_id`/`org_id`, and cache the CSRF token for §3 forwarding.
-async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claims, AxiamError> {
+///
+/// `pub(crate)` because CONTRACT.md §12.1's `sso_complete` establishes a
+/// session the same way (addendum judgment call 16) and must run the identical
+/// sync rather than a partial copy of it — see
+/// [`AxiamClient::sso_complete`](crate::client::AxiamClient::sso_complete).
+pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claims, AxiamError> {
     let access = extract_access_token_from_jar(&client.inner.jar, &client.inner.base_url)
         .ok_or_else(|| AxiamError::Auth {
             message: "server response did not set the axiam_access cookie".into(),
+            oauth: None,
+            reason: None,
         })?;
     let refresh = extract_refresh_token_from_jar(&client.inner.jar, &client.inner.base_url);
 
@@ -265,6 +272,8 @@ impl AxiamClient {
             .ok_or_else(|| AxiamError::Auth {
                 message: "verify_mfa called with no pending MFA challenge — call login() first"
                     .into(),
+                oauth: None,
+                reason: None,
             })?;
 
         let body = MfaVerifyRequestBody {
@@ -305,6 +314,8 @@ impl AxiamClient {
                 .cached_access_token()
                 .ok_or_else(|| AxiamError::Auth {
                     message: "no access token to refresh — call login() first".into(),
+                    oauth: None,
+                    reason: None,
                 })?;
         let observed_value = observed.expose().clone();
 
@@ -314,9 +325,13 @@ impl AxiamClient {
             .ok_or_else(|| AxiamError::Auth {
                 message: "tenant_id could not be resolved; login() must succeed before refresh()"
                     .into(),
+                oauth: None,
+                reason: None,
             })?;
         let org_id = self.resolved_org_id().ok_or_else(|| AxiamError::Auth {
             message: "org_id could not be resolved; login() must succeed before refresh()".into(),
+            oauth: None,
+            reason: None,
         })?;
 
         let client = self.clone();
@@ -355,6 +370,8 @@ impl AxiamClient {
                             )
                             .ok_or_else(|| AxiamError::Auth {
                                 message: "refresh response did not set axiam_access".into(),
+                                oauth: None,
+                                reason: None,
                             })?;
                             let refresh_token = extract_refresh_token_from_jar(
                                 &client.inner.jar,
@@ -401,11 +418,15 @@ impl AxiamClient {
                         .and_then(|s| Uuid::parse_str(s).ok())
                         .ok_or_else(|| AxiamError::Auth {
                             message: "access token has no session id (jti) to log out".into(),
+                            oauth: None,
+                            reason: None,
                         })?
                 }
                 None => {
                     return Err(AxiamError::Auth {
                         message: "no active session to log out".into(),
+                        oauth: None,
+                        reason: None,
                     });
                 }
             }

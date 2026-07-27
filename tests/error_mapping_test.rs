@@ -104,6 +104,7 @@ fn authz_body_fields_are_none_for_a_non_json_body() {
             action,
             resource_id,
             message,
+            ..
         } => {
             assert!(action.is_none());
             assert!(resource_id.is_none());
@@ -196,21 +197,12 @@ fn grpc_unrecognized_code_defaults_to_network() {
 
 #[test]
 fn display_impls_render_the_message_for_each_variant() {
-    let auth = AxiamError::Auth {
-        message: "auth msg".into(),
-    };
+    let auth = AxiamError::auth("auth msg");
     assert!(format!("{auth}").contains("auth msg"));
 
-    let authz = AxiamError::Authz {
-        message: "authz msg".into(),
-        action: None,
-        resource_id: None,
-    };
+    let authz = AxiamError::authz("authz msg", None, None);
     assert!(format!("{authz}").contains("authz msg"));
 
-    let network = AxiamError::Network {
-        message: "network msg".into(),
-        source: None,
-    };
+    let network = AxiamError::network("network msg");
     assert!(format!("{network}").contains("network msg"));
 }

@@ -89,7 +89,9 @@ async fn verify_rejects_a_non_eddsa_alg_before_any_fetch() {
         .await
         .expect_err("a non-EdDSA alg must be rejected");
     match err {
-        AxiamError::Auth { message } => assert!(message.contains("EdDSA"), "message: {message}"),
+        AxiamError::Auth { message, .. } => {
+            assert!(message.contains("EdDSA"), "message: {message}")
+        }
         other => panic!("expected Auth error, got {other:?}"),
     }
 }
@@ -130,7 +132,9 @@ async fn verify_maps_an_expired_token_to_an_auth_error() {
         .await
         .expect_err("an expired token must be rejected");
     match err {
-        AxiamError::Auth { message } => assert!(message.contains("expired"), "message: {message}"),
+        AxiamError::Auth { message, .. } => {
+            assert!(message.contains("expired"), "message: {message}")
+        }
         other => panic!("expected Auth error, got {other:?}"),
     }
 }
@@ -184,7 +188,7 @@ async fn verify_maps_a_wrong_signature_to_an_auth_error() {
         .await
         .expect_err("a token signed with the wrong key must fail signature verification");
     match err {
-        AxiamError::Auth { message } => {
+        AxiamError::Auth { message, .. } => {
             assert!(message.contains("signature"), "message: {message}")
         }
         other => panic!("expected Auth error, got {other:?}"),
@@ -232,7 +236,7 @@ async fn verify_maps_a_token_missing_the_exp_claim_to_an_auth_error() {
         .await
         .expect_err("a token with no exp claim must fail claim validation, not panic");
     match err {
-        AxiamError::Auth { message } => {
+        AxiamError::Auth { message, .. } => {
             assert!(
                 message.contains("token claim validation failed"),
                 "{message}"

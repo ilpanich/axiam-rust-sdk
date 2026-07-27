@@ -119,7 +119,7 @@ impl actix_web::ResponseError for AxiamExtractorError {
 
     fn error_response(&self) -> HttpResponse {
         let (error, message) = match &self.0 {
-            AxiamError::Auth { message } => ("authentication_failed", message.clone()),
+            AxiamError::Auth { message, .. } => ("authentication_failed", message.clone()),
             AxiamError::Authz { message, .. } => ("authorization_denied", message.clone()),
             AxiamError::Network { message, .. } => ("authentication_failed", message.clone()),
         };
@@ -134,24 +134,32 @@ impl AxiamExtractorError {
     fn missing_credentials() -> Self {
         Self(AxiamError::Auth {
             message: "missing authentication credentials".into(),
+            oauth: None,
+            reason: None,
         })
     }
 
     fn invalid_scheme() -> Self {
         Self(AxiamError::Auth {
             message: "invalid Authorization scheme, expected Bearer".into(),
+            oauth: None,
+            reason: None,
         })
     }
 
     fn misconfigured() -> Self {
         Self(AxiamError::Auth {
             message: "missing JwksVerifier app_data — extractor misconfigured".into(),
+            oauth: None,
+            reason: None,
         })
     }
 
     fn invalid_claim(name: &str) -> Self {
         Self(AxiamError::Auth {
             message: format!("invalid {name} claim"),
+            oauth: None,
+            reason: None,
         })
     }
 

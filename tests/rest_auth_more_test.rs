@@ -436,7 +436,7 @@ async fn refresh_fails_when_tenant_id_claim_is_not_a_uuid() {
         .await
         .expect_err("refresh() must fail when tenant_id cannot be resolved");
     match err {
-        AxiamError::Auth { message } => assert!(message.contains("tenant_id"), "{message}"),
+        AxiamError::Auth { message, .. } => assert!(message.contains("tenant_id"), "{message}"),
         other => panic!("expected Auth error, got {other:?}"),
     }
 }
@@ -474,7 +474,7 @@ async fn refresh_fails_when_org_id_claim_is_absent() {
         .await
         .expect_err("refresh() must fail when org_id cannot be resolved");
     match err {
-        AxiamError::Auth { message } => assert!(message.contains("org_id"), "{message}"),
+        AxiamError::Auth { message, .. } => assert!(message.contains("org_id"), "{message}"),
         other => panic!("expected Auth error, got {other:?}"),
     }
 }
@@ -526,7 +526,7 @@ async fn refresh_success_response_without_axiam_access_cookie_is_an_auth_error()
         .await
         .expect_err("a refresh 200 with no rotated axiam_access cookie must fail");
     match err {
-        AxiamError::Auth { message } => assert!(message.contains("axiam_access"), "{message}"),
+        AxiamError::Auth { message, .. } => assert!(message.contains("axiam_access"), "{message}"),
         other => panic!("expected Auth error, got {other:?}"),
     }
 }
@@ -571,7 +571,7 @@ async fn logout_fails_when_access_token_has_no_jti() {
         .await
         .expect_err("logout() must fail when the access token carries no jti");
     match err {
-        AxiamError::Auth { message } => assert!(message.contains("jti"), "{message}"),
+        AxiamError::Auth { message, .. } => assert!(message.contains("jti"), "{message}"),
         other => panic!("expected Auth error, got {other:?}"),
     }
 }

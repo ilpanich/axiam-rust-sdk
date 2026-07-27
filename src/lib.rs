@@ -51,7 +51,7 @@ mod sensitive;
 // compiled (transport modules below are feature-gated but all reuse this).
 mod url_guard;
 
-pub use error::AxiamError;
+pub use error::{AxiamError, IdTokenFailureReason, OAuthProtocolError};
 pub use sensitive::Sensitive;
 
 // Single owner of all Phase 16 module declarations (this file is final
@@ -63,6 +63,11 @@ pub mod token;
 
 #[cfg(feature = "rest")]
 pub mod rest;
+
+// CONTRACT.md §12 OIDC / SSO relying-party helpers — REST-only (built on the
+// same `reqwest`-based transport as `rest`/`client`).
+#[cfg(feature = "rest")]
+pub mod oidc;
 
 #[cfg(feature = "grpc")]
 pub mod grpc;

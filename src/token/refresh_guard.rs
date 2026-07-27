@@ -70,6 +70,8 @@ impl TokenManager {
             .as_ref()
             .ok_or_else(|| AxiamError::Auth {
                 message: "no refresh token available; re-authentication required".into(),
+                oauth: None,
+                reason: None,
             })?
             .expose()
             .clone();
