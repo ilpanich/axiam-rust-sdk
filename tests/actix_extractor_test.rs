@@ -629,6 +629,8 @@ async fn cookie_auth_state_changing_with_csrf_header_but_no_csrf_cookie_yields_4
 fn axiam_extractor_error_display_delegates_to_inner_error() {
     let err = AxiamExtractorError(AxiamError::Auth {
         message: "custom auth failure".into(),
+        oauth: None,
+        reason: None,
     });
     assert!(format!("{err}").contains("custom auth failure"));
 }

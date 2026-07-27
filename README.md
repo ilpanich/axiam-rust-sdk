@@ -19,7 +19,7 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§11 (including §6.1 mTLS).
+This SDK conforms to CONTRACT.md §1–§12 (including §6.1 mTLS).
 
 See [`CONTRACT.md`](CONTRACT.md) for the full cross-language behavioral contract. It is shared
 verbatim across all seven AXIAM SDKs; the copy in this repository is the authority for this
@@ -32,7 +32,7 @@ dependencies for the transports/integrations it actually uses:
 
 | Feature | Default | Enables |
 |---------|---------|---------|
-| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification |
+| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, and the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`) |
 | `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1) — both over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
 | `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
@@ -110,6 +110,67 @@ let channel = build_channel("https://axiam.example.com:9443", &GrpcChannelConfig
 
 See [`examples/grpc_check_access.rs`](examples/grpc_check_access.rs) for the full
 `AuthzGrpcClient` wiring, including the single-flight refresh guard (§9).
+
+### OIDC / SSO relying-party helpers (`rest`)
+
+CONTRACT.md §12 adds nine operations for "Login with AXIAM" (authorization-code + PKCE against
+AXIAM's own OIDC provider), service-account `client_credentials` login, token
+introspection/revocation, and the upstream-IdP federation pair — all as methods directly on
+[`AxiamClient`], configured with an OIDC `client_id`/`client_secret` on the same builder used for
+everything else:
+
+```rust,no_run
+use axiam_sdk::client::AxiamClient;
+use axiam_sdk::oidc::OidcBeginParams;
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let client = AxiamClient::builder()
+    .base_url("https://axiam.example.com")?
+    .tenant_id("11111111-2222-3333-4444-555555555555".parse().unwrap())
+    .oidc_client_id("my-app")
+    .oidc_client_secret("my-app-secret") // omit for a public client
+    .build()?;
+
+// 1. redirect the user agent
+let configuration = client.oidc_discover().await?;
+let request = client.oidc_begin(&configuration, OidcBeginParams::new("https://app.example.com/cb"))?;
+// …persist request.state / request.nonce / request.code_verifier in YOUR OWN session…
+
+// 2. on the callback, having checked the returned `state` matches
+// let tokens = client.oidc_exchange(OidcExchangeParams { code, code_verifier: request.code_verifier, nonce: request.nonce, redirect_uri: "https://app.example.com/cb".into(), tenant_id: None, configuration: Some(configuration) }).await?;
+# Ok(())
+# }
+```
+
+**The nine operations** (CONTRACT.md §12.2 Rust naming):
+
+| Operation | What it does |
+|-----------|--------------|
+| `oidc_discover` | `GET /.well-known/openid-configuration`, cached per origin (≥5 min TTL) with single-flight de-duplication |
+| `oidc_begin` | Pure, local PKCE (S256-only) + `state`/`nonce` generation and authorization-URL construction — **no network I/O** |
+| `oidc_exchange` | `grant_type=authorization_code` — exchanges a code for an [`oidc::OidcTokenSet`], validating any `id_token` against the full §12.4 checklist before returning it |
+| `oidc_refresh` | `grant_type=refresh_token`, under the §9 single-flight refresh guard — distinct from and never merged with the §1 `refresh()` cookie-session path |
+| `login_client_credentials` | `grant_type=client_credentials` — service-account machine-to-machine login |
+| `introspect` | `POST /oauth2/introspect` (RFC 7662) — requires a confidential client |
+| `revoke` | `POST /oauth2/revoke` (RFC 7009) — idempotent; requires a confidential client |
+| `sso_start` | `POST /api/v1/auth/federation/oidc/start` — step 1 of upstream-IdP SSO |
+| `sso_complete` | `POST /api/v1/auth/federation/oidc/callback` — step 2; the session arrives via `Set-Cookie` through the same §4 cookie jar every other REST call uses |
+
+**The caller owns the login state (§12.3 rule 1).** `oidc_begin` returns `state`, `nonce` and
+`code_verifier`; this SDK stores none of them. Persist all three yourself (your own HTTP session,
+a database row, …) between the login redirect and the callback, or use
+[`axiam_sdk::oidc::MemoryOidcStateStore`] — a ready single-process, single-use, 10-minute-TTL
+reference implementation of [`axiam_sdk::oidc::OidcStateStore`] — and pass `nonce` +
+`code_verifier` back into `oidc_exchange` when the code arrives. See
+[`examples/oidc_login.rs`](examples/oidc_login.rs) for the full two-step flow.
+
+The five §12.5 secret fields — `access_token`, `refresh_token`, `id_token`, `client_secret`,
+`code_verifier` — are all [`Sensitive<String>`](#security-notes); `state` and `nonce` are **not**
+secrets and are plain `String`s. ID-token validation is `EdDSA`-only (rejecting `alg: none` and
+every other algorithm outright) and all-or-nothing: on any failure the whole token set —
+including the access and refresh tokens from the same response — is discarded and an `AuthError`
+carrying one of `invalid_alg`/`unknown_kid`/`invalid_signature`/`invalid_issuer`/
+`invalid_audience`/`token_expired`/`nonce_mismatch` is raised.
 
 ### AMQP consumer (`amqp`)
 
@@ -206,7 +267,11 @@ See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).
 ## Security notes
 
 - **`Sensitive<T>`** (§7): all token-carrying values redact their raw contents from `Debug`
-  and `Display`. There is no public getter for the raw value.
+  and `Display`. The raw value is reachable only via the documented `expose()` accessor, which
+  exists because CONTRACT.md §12's `OidcTokenSet` (unlike the §1 cookie-only session) hands
+  tokens directly to the caller in the OAuth2 response body — a relying party must be able to
+  read them back out to use them (e.g. as a downstream `Authorization` header). Never pass its
+  return value to a log/`Debug`/serialization sink.
 - **TLS** (§6): strict TLS verification against the system trust store is always on. The only
   escape hatch is `with_custom_ca(pem)` for development environments with self-signed
   certificates — there is no API surface that disables or skips certificate verification.

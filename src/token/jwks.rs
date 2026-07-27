@@ -116,17 +116,134 @@ impl JwksVerifier {
         })
     }
 
+    /// Construct a verifier against an **already-absolute** JWKS URL
+    /// (CONTRACT.md §12.3 rule 6: "SDKs MUST read `jwks_uri` from the
+    /// document rather than hardcoding `/oauth2/jwks`"). Used by
+    /// `crate::oidc` to verify ID tokens against the `jwks_uri` the OIDC
+    /// discovery document advertises, which is not necessarily
+    /// `{base_url}/oauth2/jwks` (e.g. behind a proxy).
+    pub(crate) fn for_jwks_url(http_client: reqwest::Client, jwks_url: url::Url) -> Self {
+        Self {
+            http_client,
+            jwks_url,
+            cache: RwLock::new(None),
+            fetch_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Verify an arbitrary JWT's EdDSA signature against the cached JWKS,
+    /// returning the decoded claims — CONTRACT.md §12.4 rules 1–2 (`alg`
+    /// allowlist, `kid` lookup with a single forced re-fetch on miss,
+    /// Ed25519 signature verification).
+    ///
+    /// Reuses the SAME fetch/cache/single-flight/forced-refetch machinery as
+    /// [`Self::verify`] (`get_or_fetch`/`force_refetch_if_allowed`) — §12
+    /// forbids forking the JWKS verifier — but performs NO issuer/audience/
+    /// time/nonce checks (rules 3–6) and tags every failure with the
+    /// CONTRACT.md §12.3 rule 3 reason code, via
+    /// [`AxiamError::id_token_invalid`], rather than [`Self::verify`]'s plain
+    /// message.
+    ///
+    /// **Divergence from [`Self::verify`], required by §12.4 rule 2:** a
+    /// missing `kid` is rejected outright, with no single-key fallback. The
+    /// access-token path's [`find_jwk`] intentionally falls back to a lone
+    /// published key when `kid` is absent (D-11, AXIAM's own tokens may omit
+    /// it); an ID token from a third-party-shaped flow gets no such
+    /// convenience — CONTRACT.md §12.4 rule 2 says plainly "a token with no
+    /// `kid` … MUST be rejected".
+    pub(crate) async fn verify_id_token_signature<T>(&self, token: &str) -> Result<T, AxiamError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        use crate::error::IdTokenFailureReason;
+
+        let header = decode_header(token).map_err(|e| {
+            AxiamError::id_token_invalid(
+                IdTokenFailureReason::InvalidAlg,
+                format!("malformed token: {e}"),
+            )
+        })?;
+
+        if header.alg != Algorithm::EdDSA {
+            return Err(AxiamError::id_token_invalid(
+                IdTokenFailureReason::InvalidAlg,
+                format!("expected alg \"EdDSA\", got {:?}", header.alg),
+            ));
+        }
+
+        let kid = header.kid.as_deref().ok_or_else(|| {
+            AxiamError::id_token_invalid(
+                IdTokenFailureReason::UnknownKid,
+                "token has no kid header",
+            )
+        })?;
+
+        let jwks = self.get_or_fetch().await?;
+        let jwk = match find_jwk_by_kid(&jwks, kid) {
+            Some(jwk) => jwk,
+            None => {
+                let refreshed = self.force_refetch_if_allowed().await?;
+                find_jwk_by_kid(&refreshed, kid).ok_or_else(|| {
+                    AxiamError::id_token_invalid(
+                        IdTokenFailureReason::UnknownKid,
+                        "unknown kid after JWKS refetch",
+                    )
+                })?
+            }
+        };
+
+        let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| {
+            AxiamError::id_token_invalid(
+                IdTokenFailureReason::InvalidSignature,
+                "unable to build decoding key from JWK",
+            )
+        })?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        // Rules 3-6 (issuer/audience/time/nonce) are applied by the caller
+        // (`crate::oidc::id_token`) over the returned claims, with its own
+        // configurable clock skew — disable jsonwebtoken's own exp/nbf/aud
+        // checks and required-claims gate so they cannot fight the SDK's own
+        // checklist or double-report a single failure under two different
+        // reason codes.
+        validation.required_spec_claims.clear();
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.validate_aud = false;
+        validation.leeway = 0;
+
+        let data = decode::<T>(token, &decoding_key, &validation).map_err(|e| {
+            use jsonwebtoken::errors::ErrorKind;
+            match e.kind() {
+                ErrorKind::InvalidSignature => AxiamError::id_token_invalid(
+                    IdTokenFailureReason::InvalidSignature,
+                    "signature invalid",
+                ),
+                _ => AxiamError::id_token_invalid(
+                    IdTokenFailureReason::InvalidSignature,
+                    format!("claim decode failed: {e}"),
+                ),
+            }
+        })?;
+
+        Ok(data.claims)
+    }
+
     /// Verify `token`'s EdDSA signature and standard claims (`exp`) against
     /// the cached JWKS, fetching/refetching as needed. Rejects any
     /// non-EdDSA `alg` header.
     pub async fn verify(&self, token: &str) -> Result<Claims, AxiamError> {
         let header = decode_header(token).map_err(|e| AxiamError::Auth {
             message: format!("invalid token header: {e}"),
+            oauth: None,
+            reason: None,
         })?;
 
         if header.alg != Algorithm::EdDSA {
             return Err(AxiamError::Auth {
                 message: "unexpected alg: only EdDSA is accepted".into(),
+                oauth: None,
+                reason: None,
             });
         }
 
@@ -141,12 +258,16 @@ impl JwksVerifier {
                 let refreshed = self.force_refetch_if_allowed().await?;
                 find_jwk(&refreshed, header.kid.as_deref()).ok_or_else(|| AxiamError::Auth {
                     message: "unknown kid after JWKS refetch".into(),
+                    oauth: None,
+                    reason: None,
                 })?
             }
         };
 
         let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| AxiamError::Auth {
             message: "unable to build decoding key from JWK".into(),
+            oauth: None,
+            reason: None,
         })?;
 
         let mut validation = Validation::new(Algorithm::EdDSA);
@@ -157,12 +278,18 @@ impl JwksVerifier {
             match e.kind() {
                 ErrorKind::InvalidSignature => AxiamError::Auth {
                     message: "token signature invalid".into(),
+                    oauth: None,
+                    reason: None,
                 },
                 ErrorKind::ExpiredSignature => AxiamError::Auth {
                     message: "token expired".into(),
+                    oauth: None,
+                    reason: None,
                 },
                 _ => AxiamError::Auth {
                     message: format!("token claim validation failed: {e}"),
+                    oauth: None,
+                    reason: None,
                 },
             }
         })?;
@@ -282,6 +409,19 @@ fn find_jwk(jwks: &JwkSet, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> 
         None if jwks.keys.len() == 1 => jwks.keys.first().cloned(),
         None => None,
     }
+}
+
+/// Find a JWK by an EXPLICIT `kid` only — no single-key fallback. Used by
+/// [`JwksVerifier::verify_id_token_signature`] (CONTRACT.md §12.4 rule 2),
+/// which requires a `kid` header to be present at all; callers with no
+/// `kid` never reach this function (see its doc comment for why the
+/// access-token path's fallback in [`find_jwk`] does not apply here).
+#[cfg(any(feature = "rest", feature = "actix"))]
+fn find_jwk_by_kid(jwks: &JwkSet, kid: &str) -> Option<jsonwebtoken::jwk::Jwk> {
+    jwks.keys
+        .iter()
+        .find(|j| j.common.key_id.as_deref() == Some(kid))
+        .cloned()
 }
 
 #[cfg(all(test, any(feature = "rest", feature = "actix")))]

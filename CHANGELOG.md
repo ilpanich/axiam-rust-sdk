@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- CONTRACT.md §12 OIDC/SSO relying-party helpers (contract 1.4): nine new
+  methods directly on `AxiamClient` — `oidc_discover`, `oidc_begin`,
+  `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`,
+  `revoke`, `sso_start`, `sso_complete` — covering "Login with AXIAM"
+  (authorization-code + PKCE, S256-only), service-account
+  `client_credentials` login, RFC 7662 introspection, RFC 7009 revocation,
+  and the upstream-IdP federation SSO pair. New module `src/oidc/`
+  (`discovery`, `authorize`, `exchange`, `state`, `id_token`).
+- Full CONTRACT.md §12.4 ID-token validation checklist (`EdDSA`-only,
+  single-JWKS-refetch-on-unknown-`kid`, issuer/audience/time/nonce checks,
+  all-or-nothing discard), extending the existing `JwksVerifier` rather than
+  forking it.
+- `OidcStateStore` trait + `MemoryOidcStateStore` reference implementation
+  (10-minute TTL, single-use `consume`) for framework glue bridging the
+  login-redirect and callback requests — strictly optional; the core
+  operations remain stateless (§12.3 rule 1).
+- `AxiamClientBuilder::oidc_client_id`/`oidc_client_secret`/
+  `oidc_discovery_ttl`/`oidc_clock_skew` builder methods.
+- `OAuthProtocolError`, a language-idiomatic sub-type of the existing
+  `AxiamError::Auth` (carried via its new `oauth` field, not a new top-level
+  error variant), for RFC 6749 `OAuth2ErrorResponse` bodies from
+  `/oauth2/*`. `AxiamError::Auth` also gained a `reason: Option<IdTokenFailureReason>`
+  field carrying the stable §12.4 reason code for ID-token validation
+  failures. Existing `AxiamError::Auth { message, .. }` matches keep
+  compiling and keep catching these as authentication failures — additive,
+  not breaking.
+- New example `examples/oidc_login.rs`.
+
+### Changed
+
+- `Sensitive::expose()` is now `pub` (previously `pub(crate)`): §12's
+  `OidcTokenSet` hands `access_token`/`refresh_token`/`id_token` directly to
+  the caller (unlike the §1 cookie-only session), so a relying party needs a
+  way to read them back out to use them. Still the only path to the wrapped
+  value; still never touched by `Debug`/`Display`.
+- Conformance statement updated to "CONTRACT.md §1–§12 (including §6.1
+  mTLS)".
+
 ## [1.0.0-alpha18] - 2026-07-24
 
 ### Changed

@@ -133,6 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let access = extract_cookie(&jar, &base_url, "axiam_access").ok_or_else(|| {
                 axiam_sdk::AxiamError::Auth {
                     message: "refresh response did not set axiam_access".into(),
+                    oauth: None,
+                    reason: None,
                 }
             })?;
             let claims = jwks_verifier.verify(&access).await?;

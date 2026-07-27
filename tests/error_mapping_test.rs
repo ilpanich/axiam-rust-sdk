@@ -198,6 +198,8 @@ fn grpc_unrecognized_code_defaults_to_network() {
 fn display_impls_render_the_message_for_each_variant() {
     let auth = AxiamError::Auth {
         message: "auth msg".into(),
+        oauth: None,
+        reason: None,
     };
     assert!(format!("{auth}").contains("auth msg"));
 

@@ -93,6 +93,10 @@ pub struct AxiamClientBuilder {
     custom_ca_pem: Option<Vec<u8>>,
     client_cert_pem: Option<Vec<u8>>,
     client_key: Option<crate::Sensitive<Vec<u8>>>,
+    oidc_client_id: Option<String>,
+    oidc_client_secret: Option<crate::Sensitive<String>>,
+    oidc_discovery_ttl: Option<Duration>,
+    oidc_clock_skew: Option<Duration>,
 }
 
 impl AxiamClientBuilder {
@@ -232,6 +236,43 @@ impl AxiamClientBuilder {
         Ok(self)
     }
 
+    /// The relying-party OAuth2 `client_id` used by the CONTRACT.md §12
+    /// OIDC/SSO helpers (`oidc_begin`, `oidc_exchange`, `oidc_refresh`,
+    /// `login_client_credentials`, `introspect`, `revoke`). Optional: a
+    /// client built without it can still use every §1–§11 operation; calling
+    /// one of the nine §12 operations without it is a client-side
+    /// [`AxiamError::Auth`], with no wire call.
+    pub fn oidc_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.oidc_client_id = Some(client_id.into());
+        self
+    }
+
+    /// The confidential-client `client_secret` for the §12 OIDC/SSO
+    /// helpers. Required by `introspect`/`revoke` (§12.1 note 4); optional
+    /// for `oidc_exchange`/`oidc_refresh` (a public client omits it) and
+    /// mandatory for `login_client_credentials`. Held behind
+    /// [`crate::Sensitive`] (§12.5).
+    pub fn oidc_client_secret(mut self, client_secret: impl Into<String>) -> Self {
+        self.oidc_client_secret = Some(crate::Sensitive::new(client_secret.into()));
+        self
+    }
+
+    /// Override the §12 OIDC discovery-document cache TTL. Clamped up to
+    /// [`crate::oidc::MIN_DISCOVERY_TTL`] (5 minutes) — CONTRACT.md §12.3
+    /// rule 6 forbids a smaller value. Defaults to that floor.
+    pub fn oidc_discovery_ttl(mut self, ttl: Duration) -> Self {
+        self.oidc_discovery_ttl = Some(ttl);
+        self
+    }
+
+    /// Override the permitted ID-token clock skew for the §12.4 rule 5 time
+    /// checks. Clamped down to 60 seconds — the contract forbids configuring
+    /// it higher. Defaults to that maximum.
+    pub fn oidc_clock_skew(mut self, skew: Duration) -> Self {
+        self.oidc_clock_skew = Some(skew);
+        self
+    }
+
     /// Finalize the client. Fails if `base_url` or a tenant identifier is
     /// missing (§5 — never a silent default).
     pub fn build(self) -> Result<AxiamClient, AxiamError> {
@@ -244,7 +285,9 @@ impl AxiamClientBuilder {
                 "a tenant identifier (tenant_slug or tenant_id) is required to build an AxiamClient \
                  — AXIAM is multi-tenant and there is no default tenant (CONTRACT.md §5)"
                     .into(),
-        })?;
+                oauth: None,
+reason: None,
+})?;
 
         let jar = Arc::new(reqwest::cookie::Jar::default());
 
@@ -315,6 +358,20 @@ impl AxiamClientBuilder {
 
         let jwks_verifier = JwksVerifier::new(http.clone(), &base_url)?;
 
+        // CONTRACT.md §12.3 rule 6: discovery-cache TTL floored at 5 minutes,
+        // never process-global (owned by this client instance).
+        let oidc_discovery_cache = crate::oidc::discovery::DiscoveryCache::new(
+            self.oidc_discovery_ttl
+                .unwrap_or(crate::oidc::MIN_DISCOVERY_TTL),
+        );
+        // CONTRACT.md §12.4 rule 5: clock skew capped at 60s, never
+        // configurable above that bound.
+        let oidc_clock_skew_sec = self
+            .oidc_clock_skew
+            .map(|d| d.as_secs())
+            .unwrap_or(crate::oidc::id_token::MAX_CLOCK_SKEW_SEC)
+            .min(crate::oidc::id_token::MAX_CLOCK_SKEW_SEC);
+
         Ok(AxiamClient {
             inner: Arc::new(AxiamClientInner {
                 http,
@@ -330,6 +387,12 @@ impl AxiamClientBuilder {
                 custom_ca_pem: self.custom_ca_pem,
                 client_cert_pem: self.client_cert_pem,
                 client_key: self.client_key,
+                oidc_client_id: self.oidc_client_id,
+                oidc_client_secret: self.oidc_client_secret,
+                oidc_discovery_cache,
+                oidc_clock_skew_sec,
+                oidc_verifiers: std::sync::RwLock::new(std::collections::HashMap::new()),
+                oidc_refresh_guard: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -379,6 +442,29 @@ pub(crate) struct AxiamClientInner {
     /// §6.1 client private key (PEM), held behind [`crate::Sensitive`] so it
     /// never leaks via `Debug`/log/getter (§6.1 rule 3, §7).
     pub(crate) client_key: Option<crate::Sensitive<Vec<u8>>>,
+    /// The CONTRACT.md §12 relying-party `client_id`, if configured.
+    pub(crate) oidc_client_id: Option<String>,
+    /// The CONTRACT.md §12 confidential-client `client_secret`, if
+    /// configured (§12.5).
+    pub(crate) oidc_client_secret: Option<crate::Sensitive<String>>,
+    /// Per-instance, origin-keyed, single-flight OIDC discovery cache
+    /// (§12.3 rule 6).
+    pub(crate) oidc_discovery_cache: crate::oidc::discovery::DiscoveryCache,
+    /// Permitted ID-token clock skew in seconds, already clamped to
+    /// [`crate::oidc::id_token::MAX_CLOCK_SKEW_SEC`] (§12.4 rule 5).
+    pub(crate) oidc_clock_skew_sec: u64,
+    /// One [`JwksVerifier`] per `jwks_uri` seen so far (§12.3 rule 6) — the
+    /// discovery document's `jwks_uri` is not necessarily this client's own
+    /// `/oauth2/jwks`, so it cannot reuse `jwks_verifier` above.
+    pub(crate) oidc_verifiers:
+        std::sync::RwLock<std::collections::HashMap<String, Arc<JwksVerifier>>>,
+    /// Single-flight guard for `oidc_refresh` (CONTRACT.md §9) — a
+    /// dedicated guard, distinct from the §1 cookie-session refresh guard
+    /// owned by `token_manager`: the two protect unrelated token spaces (an
+    /// OAuth2 `TokenResponse` the caller owns vs. the session's own
+    /// cookie-derived access/refresh tokens) and must never be merged
+    /// (CONTRACT.md §12.1 "`oidc_refresh` vs `refresh`").
+    pub(crate) oidc_refresh_guard: tokio::sync::Mutex<()>,
 }
 
 /// The AXIAM SDK's REST/gRPC/AMQP client entry point.
@@ -434,6 +520,67 @@ impl AxiamClient {
     /// Access the JWKS verifier (crate-internal use by `rest`/`middleware`).
     pub(crate) fn jwks_verifier(&self) -> &JwksVerifier {
         &self.inner.jwks_verifier
+    }
+
+    /// The configured CONTRACT.md §12 OIDC `client_id`, if any
+    /// (crate-internal; `crate::oidc` turns its absence into a client-side
+    /// `AxiamError`).
+    pub(crate) fn oidc_client_id(&self) -> Option<&str> {
+        self.inner.oidc_client_id.as_deref()
+    }
+
+    /// The configured CONTRACT.md §12 OIDC `client_secret`, if any (§12.5).
+    pub(crate) fn oidc_client_secret(&self) -> Option<&crate::Sensitive<String>> {
+        self.inner.oidc_client_secret.as_ref()
+    }
+
+    /// The per-instance, origin-keyed OIDC discovery cache (§12.3 rule 6).
+    pub(crate) fn oidc_discovery_cache(&self) -> &crate::oidc::discovery::DiscoveryCache {
+        &self.inner.oidc_discovery_cache
+    }
+
+    /// The permitted ID-token clock skew in seconds (§12.4 rule 5, already
+    /// clamped to the 60s maximum).
+    pub(crate) fn oidc_clock_skew_sec(&self) -> u64 {
+        self.inner.oidc_clock_skew_sec
+    }
+
+    /// Lazily build (and cache) the JWKS verifier for `jwks_uri` (CONTRACT.md
+    /// §12.3 rule 6 — one verifier per `jwks_uri`, which is read from the
+    /// discovery document rather than hardcoded, and is never shared across
+    /// tenants).
+    pub(crate) fn oidc_verifier_for(
+        &self,
+        jwks_uri: &str,
+    ) -> Result<Arc<JwksVerifier>, AxiamError> {
+        if let Some(existing) = self
+            .inner
+            .oidc_verifiers
+            .read()
+            .ok()
+            .and_then(|m| m.get(jwks_uri).cloned())
+        {
+            return Ok(existing);
+        }
+        let url = url::Url::parse(jwks_uri).map_err(|e| AxiamError::Network {
+            message: format!("invalid jwks_uri in discovery document: {e}"),
+            source: None,
+        })?;
+        let verifier = Arc::new(JwksVerifier::for_jwks_url(self.inner.http.clone(), url));
+        if let Ok(mut map) = self.inner.oidc_verifiers.write() {
+            map.entry(jwks_uri.to_string())
+                .or_insert_with(|| Arc::clone(&verifier));
+            return Ok(Arc::clone(map.get(jwks_uri).expect("just inserted")));
+        }
+        Ok(verifier)
+    }
+
+    /// Acquire the §9 single-flight guard for `oidc_refresh` (CONTRACT.md
+    /// §9). See the field doc on `AxiamClientInner::oidc_refresh_guard` for
+    /// why this is a dedicated guard, distinct from the §1 cookie-session
+    /// refresh guard.
+    pub(crate) async fn oidc_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.oidc_refresh_guard.lock().await
     }
 
     /// Read the latest captured CSRF token, if any (§3).
@@ -595,7 +742,7 @@ mod tests {
             .build()
         {
             Ok(_) => panic!("build() without a tenant identifier must fail (§5)"),
-            Err(AxiamError::Auth { message }) => {
+            Err(AxiamError::Auth { message, .. }) => {
                 assert!(message.contains("tenant"), "message: {message}");
             }
             Err(other) => panic!("expected Auth error, got {other}"),

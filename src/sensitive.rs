@@ -3,8 +3,9 @@
 //! Wraps any token-carrying value so that it can never accidentally leak via
 //! `Debug`, `Display`, `tracing`, or any other diagnostic sink. The inner
 //! value is genuinely private (no `pub` field, no `Deref` impl); the only
-//! path to the raw value is [`Sensitive::expose`], which is `pub(crate)` —
-//! never part of this crate's public API surface.
+//! path to the raw value is [`Sensitive::expose`] — see its doc comment for
+//! why it is `pub` (needed by CONTRACT.md §12's `OidcTokenSet`) rather than
+//! `pub(crate)`.
 
 use std::fmt;
 
@@ -22,18 +23,24 @@ impl<T> Sensitive<T> {
         Self(value)
     }
 
-    /// Crate-internal access to the raw value only.
+    /// The only path to the raw wrapped value.
     ///
-    /// This is the *only* path to the wrapped value. It is intentionally
-    /// `pub(crate)`, never `pub` — no downstream consumer of this crate may
-    /// call it. Internal callers MUST NOT pass the returned value to any
-    /// `Debug`/`Display`/logging/tracing sink.
-    ///
-    /// Unused until plans 16-02/16-03 wire in the first internal consumers
-    /// (`TokenManager`, the gRPC auth interceptor); `#[allow(dead_code)]`
-    /// is intentional here, not a lint suppression of a real issue.
-    #[allow(dead_code)]
-    pub(crate) fn expose(&self) -> &T {
+    /// For the §1–§11 surface (cookie/opaque-token sessions), this crate
+    /// never needs to hand a raw token back to a caller — every internal use
+    /// of `expose()` stays within this crate. §12's `OidcTokenSet`
+    /// (`access_token`/`refresh_token`/`id_token`) is different: those
+    /// tokens are delivered directly in the `/oauth2/token` JSON response
+    /// body, not via `Set-Cookie`, so a relying-party application MUST be
+    /// able to read them back out in order to use them (attach as an
+    /// `Authorization` header on its own downstream calls, store them,
+    /// revoke them later). This method is therefore `pub`, not
+    /// `pub(crate)` — mirroring the TypeScript reference SDK's `Sensitive`,
+    /// whose `expose()` is likewise a real, callable public method (marked
+    /// `@internal` in its doc comment as a *convention*, not a compiler
+    /// restriction). Call it only at the point of actually using the value;
+    /// MUST NOT pass the returned value to any `Debug`/`Display`/logging/
+    /// tracing sink.
+    pub fn expose(&self) -> &T {
         &self.0
     }
 
