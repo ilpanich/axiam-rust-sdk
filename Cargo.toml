@@ -115,7 +115,7 @@ subtle = { version = "2", optional = true }
 getrandom = { version = "0.4", optional = true }
 # base64url (no padding) encoding for §12.1 PKCE — already an unconditional
 # transitive dependency (via `tonic`); see the `rest` feature comment above.
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (SDK-Q01): backs `serde_json::Value`'s object map with an
