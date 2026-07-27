@@ -164,7 +164,7 @@ rcgen = "0.14"
 # same "promote an already-vendored crate to a named dependency" pattern as
 # `subtle`/`getrandom`/`base64` above — here scoped to `[dev-dependencies]`
 # only, so it never reaches a published build at all.
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 
 [package.metadata.docs.rs]
 all-features = true
