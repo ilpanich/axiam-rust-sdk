@@ -120,9 +120,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .json(&serde_json::json!({ "tenant_id": tenant_id, "org_id": Uuid::nil() }))
                 .send()
                 .await
-                .map_err(|e| axiam_sdk::AxiamError::Network {
-                    message: format!("refresh request failed: {e}"),
-                    source: Some(Box::new(e)),
+                .map_err(|e| {
+                    axiam_sdk::AxiamError::network_with_source(
+                        format!("refresh request failed: {e}"),
+                        Box::new(e),
+                    )
                 })?;
             if !response.status().is_success() {
                 return Err(axiam_sdk::AxiamError::from_http_status(
@@ -131,11 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
             let access = extract_cookie(&jar, &base_url, "axiam_access").ok_or_else(|| {
-                axiam_sdk::AxiamError::Auth {
-                    message: "refresh response did not set axiam_access".into(),
-                    oauth: None,
-                    reason: None,
-                }
+                axiam_sdk::AxiamError::auth("refresh response did not set axiam_access")
             })?;
             let claims = jwks_verifier.verify(&access).await?;
             Ok(axiam_sdk::token::refresh_guard::RefreshedTokens {

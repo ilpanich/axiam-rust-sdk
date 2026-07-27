@@ -28,6 +28,12 @@ pub const MAX_CLOCK_SKEW_SEC: u64 = 60;
 /// The JOSE `alg` this SDK accepts for an ID token (CONTRACT.md §12.4
 /// rule 1). Every other value — including `none` and every algorithm the
 /// discovery document might additionally advertise — is rejected.
+///
+/// The rejection itself happens in
+/// `crate::token::jwks::JwksVerifier::verify_id_token_signature`, which
+/// compares the decoded header against `jsonwebtoken`'s typed
+/// `Algorithm::EdDSA` and names this constant in the resulting
+/// `invalid_alg` error, so the wire spelling has exactly one definition.
 pub const ID_TOKEN_ALG: &str = "EdDSA";
 
 /// Either a single audience string or a list of them — the `aud` claim may

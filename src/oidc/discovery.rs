@@ -230,4 +230,19 @@ mod tests {
         let c = url::Url::parse("http://iam.example.com").unwrap();
         assert_ne!(normalize_origin(&a), normalize_origin(&c));
     }
+
+    /// A scheme with no IANA default port (the `_ => 0` arm) still yields a
+    /// stable, distinct origin key rather than colliding with `https`.
+    #[test]
+    fn normalize_origin_handles_a_scheme_with_no_default_port() {
+        let explicit = url::Url::parse("ftp://iam.example.com:2121/").unwrap();
+        assert_eq!(normalize_origin(&explicit), "ftp://iam.example.com:2121");
+
+        let implicit = url::Url::parse("ftp://iam.example.com/").unwrap();
+        assert_eq!(normalize_origin(&implicit), "ftp://iam.example.com:0");
+        assert_ne!(
+            normalize_origin(&implicit),
+            normalize_origin(&url::Url::parse("https://iam.example.com/").unwrap())
+        );
+    }
 }

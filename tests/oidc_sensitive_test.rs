@@ -73,6 +73,42 @@ fn oidc_state_entry_debug_redacts_the_code_verifier() {
     );
 }
 
+/// §9 rule 2 requires the single in-flight `oidc_refresh` to hand the *same*
+/// token set to every waiter, so `OidcTokenSet` is `Clone`. Cloning must not
+/// open a leak path: the clone's `Debug` has to redact every §12.5 secret
+/// field exactly as the original's does.
+#[test]
+fn cloning_an_oidc_token_set_keeps_every_secret_field_redacted() {
+    let tokens = OidcTokenSet {
+        access_token: Sensitive::new(SECRET_ACCESS.to_string()),
+        token_type: "Bearer".to_string(),
+        expires_in: 900,
+        scope: Some("openid".to_string()),
+        refresh_token: Some(Sensitive::new(SECRET_REFRESH.to_string())),
+        id_token: Some(Sensitive::new(SECRET_ID.to_string())),
+        id_claims: None,
+    };
+
+    let cloned = tokens.clone();
+    let rendered = format!("{cloned:?}");
+    assert!(!rendered.contains(SECRET_ACCESS), "leaked: {rendered}");
+    assert!(!rendered.contains(SECRET_REFRESH), "leaked: {rendered}");
+    assert!(!rendered.contains(SECRET_ID), "leaked: {rendered}");
+    assert!(rendered.contains("Sensitive(<redacted>)"));
+    // Same values, still only reachable via `expose()`.
+    assert_eq!(cloned.access_token.expose(), SECRET_ACCESS);
+    assert_eq!(
+        cloned.refresh_token.as_ref().map(|t| t.expose().as_str()),
+        Some(SECRET_REFRESH)
+    );
+    assert_eq!(
+        cloned.id_token.as_ref().map(|t| t.expose().as_str()),
+        Some(SECRET_ID)
+    );
+    // The original is untouched by the clone.
+    assert_eq!(tokens.access_token.expose(), SECRET_ACCESS);
+}
+
 #[test]
 fn sensitive_display_and_debug_never_emit_the_wrapped_value() {
     let secret = Sensitive::new(SECRET_ACCESS.to_string());

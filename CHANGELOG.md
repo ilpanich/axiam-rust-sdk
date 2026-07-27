@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⚠ Breaking
+
+This release is **source-breaking for downstream code that constructs
+`AxiamError` variants with struct-expression syntax.** The earlier draft of
+these notes described the §12 work as "additive, not breaking"; that was
+wrong, and this section replaces it.
+
+- **`AxiamError::Auth` gained two fields** (`oauth: Option<OAuthProtocolError>`
+  and `reason: Option<IdTokenFailureReason>`) for CONTRACT.md §12.3 rule 3 and
+  §12.4. Because the variant was not `#[non_exhaustive]`, that addition alone
+  already broke downstream code: every `AxiamError::Auth { message: … }`
+  construction became `E0063` (missing fields) and every exhaustive
+  destructure `AxiamError::Auth { message }` became `E0027`. 33 constructions
+  and 9 patterns inside this repository — including one in a shipped
+  `examples/` file — had to be rewritten. Nothing prevented the same break
+  recurring on the next field addition.
+- **All three variants are now `#[non_exhaustive]`** (`Auth`, `Authz`,
+  `Network`) so that no future field addition can break a consumer again. The
+  cost is a one-time break, taken deliberately at `1.0.0-alpha18`:
+  - **Constructing** a variant from outside this crate with struct-expression
+    syntax is no longer possible (`E0639`). Use the constructors instead — the
+    new `AxiamError::auth`, `AxiamError::authz`, `AxiamError::network`,
+    `AxiamError::network_with_source`, alongside the existing
+    `AxiamError::oauth_protocol_error`, `AxiamError::id_token_invalid`,
+    `AxiamError::from_http_status` and `AxiamError::from_grpc_code`. They cover
+    every shape the SDK itself builds.
+  - **Destructuring** now requires a trailing `..`
+    (`AxiamError::Auth { message, .. }`, `E0638` without it). Patterns that
+    already ended in `..` — including every `matches!(e, AxiamError::Auth { .. })`
+    — are unaffected.
+  - The **enum itself is deliberately *not* `#[non_exhaustive]`**: CONTRACT.md
+    §2 fixes the taxonomy at exactly three error types, so no fourth variant
+    can ever be added and `match`ing all three exhaustively stays valid.
+- **`AxiamClient::oidc_begin` now panics** instead of returning
+  `Err(AxiamError::Network { .. })` when caller-supplied `extra_params` try to
+  override one of the eight SDK-owned authorization query parameters. Per
+  CONTRACT.md §12.1 rule 5 that is a programming error, not a §2 taxonomy
+  outcome; every sibling SDK raises its language's unchecked
+  programming-error type there, and a panic is Rust's equivalent. Correct code
+  cannot trigger it — the condition depends only on parameter names the
+  calling code chooses. Tenant/organization resolution failures remain
+  `AxiamError::Auth` (§12.3 rule 4).
+- **`AxiamClient::sso_complete` now fails** (with `AxiamError::Auth`) when the
+  callback response sets no usable `axiam_access` cookie, where it previously
+  returned `Ok`. This is the same behaviour `login()` has always had, and is
+  required by the post-login session sync described under *Fixed* below.
+
 ### Added
 
 - CONTRACT.md §12 OIDC/SSO relying-party helpers (contract 1.4): nine new
@@ -32,10 +79,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error variant), for RFC 6749 `OAuth2ErrorResponse` bodies from
   `/oauth2/*`. `AxiamError::Auth` also gained a `reason: Option<IdTokenFailureReason>`
   field carrying the stable §12.4 reason code for ID-token validation
-  failures. Existing `AxiamError::Auth { message, .. }` matches keep
-  compiling and keep catching these as authentication failures — additive,
-  not breaking.
+  failures. Existing `AxiamError::Auth { message, .. }` **matches** keep
+  compiling and keep catching these as authentication failures; **constructions
+  and exhaustive destructures do not** — see the ⚠ Breaking section above.
+- Public `AxiamError` constructors — `auth`, `authz`, `network`,
+  `network_with_source` — so downstream code can build the taxonomy variants
+  without struct-expression syntax now that they are `#[non_exhaustive]`.
+- `Clone` for `Sensitive<T>` (hand-written, not derived) and for
+  `OidcTokenSet`. Required by CONTRACT.md §9 rule 2: the single in-flight
+  `oidc_refresh` must hand the *same* token set to every concurrent waiter.
+  Cloning duplicates the redacting wrapper, never the exposure — `Debug` and
+  `Display` still redact on a clone, and `expose()` remains the one and only
+  accessor. `Serialize`/`Deserialize` remain deliberately unimplemented.
 - New example `examples/oidc_login.rs`.
+
+### Fixed
+
+- **`oidc_refresh` now satisfies CONTRACT.md §9 rule 2 (result sharing).** It
+  previously took a bare `tokio::sync::Mutex<()>` with no result slot, so a
+  burst of N concurrent callers produced **N serialized wire calls**; because
+  AXIAM refresh tokens are single-use with rotation, callers 2..N replayed an
+  already-consumed token and each failed `invalid_grant`. The mutex is
+  replaced by a leader/waiter election over a
+  `broadcast::Sender<Result<OidcTokenSet, Arc<AxiamError>>>`
+  (`src/oidc/single_flight.rs`): exactly one caller per burst performs the wire
+  call and broadcasts its outcome, and every other caller receives *that*
+  outcome — the same token set on success, an equivalent error (same taxonomy
+  variant, same `oauth` payload, same `reason`) on failure. A cancelled leader
+  releases the slot rather than wedging the guard. No new dependency: `tokio`'s
+  `sync` feature was already enabled. Covered by ≥5-caller burst tests for both
+  the success and failure paths, each asserting exactly one request reaches the
+  server.
+- **`oidc_begin` now percent-encodes spaces as `%20`, not `+`.**
+  `url::Url::query_pairs_mut` is an `application/x-www-form-urlencoded`
+  serializer, so a multi-valued `scope` was emitted as
+  `openid+profile+email`; CONTRACT.md §12.1 rule 5 requires literal RFC 3986
+  encoding, which is what every other AXIAM SDK emits. The query component is
+  now re-encoded before the URL is returned.
+- **`sso_complete` now performs the post-login session sync.** It captured
+  cookies and the CSRF token but never ran `absorb_session_cookies`, so it did
+  not seed the token manager or resolve `tenant_id`/`org_id` — a subsequent
+  `refresh()` failed with "no access token to refresh". It now runs the exact
+  same sync `login()`/`verify_mfa()` do (CONTRACT.md §4/§3), leaving the client
+  in an identical authenticated state.
+- Removed an unreachable tenant-context guard in `sso_start`
+  (`TenantIdentifier` is a two-variant enum and §5 guarantees one is set), and
+  corrected the `compute_code_challenge` doc link, which pointed at
+  `tests/oidc_pkce_test.rs` for the RFC 7636 Appendix B vector that actually
+  lives in this module's own unit tests. `oidc::id_token::ID_TOKEN_ALG` is no
+  longer a dead constant — it is the single definition of the wire spelling
+  reported in the `invalid_alg` error.
 
 ### Changed
 

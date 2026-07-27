@@ -149,12 +149,12 @@ let request = client.oidc_begin(&configuration, OidcBeginParams::new("https://ap
 | `oidc_discover` | `GET /.well-known/openid-configuration`, cached per origin (≥5 min TTL) with single-flight de-duplication |
 | `oidc_begin` | Pure, local PKCE (S256-only) + `state`/`nonce` generation and authorization-URL construction — **no network I/O** |
 | `oidc_exchange` | `grant_type=authorization_code` — exchanges a code for an [`oidc::OidcTokenSet`], validating any `id_token` against the full §12.4 checklist before returning it |
-| `oidc_refresh` | `grant_type=refresh_token`, under the §9 single-flight refresh guard — distinct from and never merged with the §1 `refresh()` cookie-session path |
+| `oidc_refresh` | `grant_type=refresh_token`, under a §9-conformant single-flight guard dedicated to the OAuth2 token namespace (§9 rule 5): a burst of N concurrent callers makes **exactly one** wire call and every caller receives *that* call's outcome (§9 rule 2). Distinct from and never merged with the §1 `refresh()` cookie-session path |
 | `login_client_credentials` | `grant_type=client_credentials` — service-account machine-to-machine login |
 | `introspect` | `POST /oauth2/introspect` (RFC 7662) — requires a confidential client |
 | `revoke` | `POST /oauth2/revoke` (RFC 7009) — idempotent; requires a confidential client |
 | `sso_start` | `POST /api/v1/auth/federation/oidc/start` — step 1 of upstream-IdP SSO |
-| `sso_complete` | `POST /api/v1/auth/federation/oidc/callback` — step 2; the session arrives via `Set-Cookie` through the same §4 cookie jar every other REST call uses |
+| `sso_complete` | `POST /api/v1/auth/federation/oidc/callback` — step 2; the session arrives via `Set-Cookie` through the same §4 cookie jar every other REST call uses, and the same post-login sync `login()` runs seeds the token manager and resolves `tenant_id`/`org_id`, so `refresh()`/`logout()` work straight afterwards |
 
 **The caller owns the login state (§12.3 rule 1).** `oidc_begin` returns `state`, `nonce` and
 `code_verifier`; this SDK stores none of them. Persist all three yourself (your own HTTP session,

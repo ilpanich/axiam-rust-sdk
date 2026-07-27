@@ -84,9 +84,11 @@ pub fn generate_code_verifier() -> Result<Sensitive<String>, AxiamError> {
 /// §4.2, CONTRACT.md §12.1 rule 3).
 ///
 /// The verifier is hashed as ASCII exactly as the RFC specifies. Verified
-/// against the RFC 7636 Appendix B test vector in `tests/oidc_pkce_test.rs`.
-/// The challenge is a one-way digest and is **not** secret — it travels in
-/// the authorization URL — so it is returned as a plain string.
+/// against the RFC 7636 Appendix B test vector by this module's own
+/// `rfc7636_appendix_b_test_vector` unit test (see the `tests` module at the
+/// foot of this file). The challenge is a one-way digest and is **not**
+/// secret — it travels in the authorization URL — so it is returned as a
+/// plain string.
 pub fn compute_code_challenge(code_verifier: &str) -> String {
     let digest = Sha256::digest(code_verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
@@ -157,6 +159,32 @@ impl OidcBeginParams {
     }
 }
 
+/// Re-encode a URL's query component so spaces are RFC 3986 `%20` rather than
+/// `application/x-www-form-urlencoded` `+` (CONTRACT.md §12.1 rule 5, addendum
+/// judgment call 10).
+///
+/// `url::Url::query_pairs_mut` returns a `form_urlencoded::Serializer`, which
+/// is correct for a POST form body but wrong for the authorization URL: it
+/// emits `scope=openid+profile+email` where every other AXIAM SDK emits
+/// `scope=openid%20profile%20email`. Replacing `+` with `%20` across the query
+/// is exact rather than approximate, because the form serializer has already
+/// escaped every *literal* plus sign in a name or value as `%2B` — so a raw
+/// `+` remaining in the query can only be an encoded space.
+///
+/// Only the query is touched; the path (which may legitimately contain `+`)
+/// and the fragment are left alone. `Url::set_query` re-parses through the
+/// URL-standard query encode set, which escapes only controls, space, `"`,
+/// `#`, `<` and `>` — `%` is not in it, so the `%20` we write is preserved
+/// rather than double-encoded to `%2520`.
+fn percent_encode_query_spaces(url: &mut url::Url) {
+    if let Some(query) = url.query()
+        && query.contains('+')
+    {
+        let rfc3986 = query.replace('+', "%20");
+        url.set_query(Some(&rfc3986));
+    }
+}
+
 /// Normalize the requested scope to a space-separated string that always
 /// contains `openid` (§12.1 rule 4). Duplicate entries are collapsed.
 fn normalize_scope(scope: Option<&str>) -> String {
@@ -185,25 +213,45 @@ impl AxiamClient {
     /// Nothing is stored: persist the returned `state`, `nonce` and
     /// `code_verifier` yourself (§12.3 rule 1).
     ///
+    /// Every query value is RFC 3986 percent-encoded — in particular a
+    /// multi-valued `scope` is joined with `%20`, never the
+    /// `application/x-www-form-urlencoded` `+` (§12.1 rule 5).
+    ///
     /// # Errors
-    /// Returns `AxiamError::Network` (a client-side, no-wire-call
-    /// programming error) when `extra_params` tries to override one of the
-    /// eight SDK-owned parameters, or when the discovery document's
-    /// `authorization_endpoint` does not parse as a URL.
+    /// Returns [`AxiamError::Network`] when the discovery document's
+    /// `authorization_endpoint` does not parse as a URL, or when the CSPRNG
+    /// fails.
+    ///
+    /// # Panics
+    /// Panics when `extra_params` tries to override one of the eight
+    /// SDK-owned authorization parameters (`response_type`, `client_id`,
+    /// `redirect_uri`, `scope`, `state`, `nonce`, `code_challenge`,
+    /// `code_challenge_method`).
+    ///
+    /// That is a **programming error**, not a runtime outcome, and it is
+    /// deliberately not folded into the §2 error taxonomy: those three
+    /// variants describe what the *server* or the *network* did, whereas this
+    /// is the calling code asking the SDK to violate §12.1 rule 5 — and it is
+    /// also what keeps `code_challenge_method=plain` unreachable. Every other
+    /// AXIAM SDK raises its language's programming-error type here
+    /// (`IllegalArgumentException`, `ValueError`, `ArgumentException`, …); a
+    /// panic is Rust's equivalent of those unchecked throws. Reserve the
+    /// taxonomy for real outcomes: a missing or unresolvable tenant, by
+    /// contrast, *is* an [`AxiamError::Auth`] (§12.3 rule 4).
+    ///
+    /// The condition depends only on keys the calling code chooses, never on
+    /// user input or server data, so correct code cannot trigger it. Pass
+    /// anything *except* those eight names.
     pub fn oidc_begin(
         &self,
         configuration: &OidcConfiguration,
         params: OidcBeginParams,
     ) -> Result<AuthorizationRequest, AxiamError> {
         for (key, _) in &params.extra_params {
-            if RESERVED_AUTHORIZE_PARAMS.contains(&key.as_str()) {
-                return Err(AxiamError::Network {
-                    message: format!(
-                        "oidc_begin: extra_params may not override the SDK-owned authorization parameter \"{key}\" (CONTRACT.md §12.1 rule 5)"
-                    ),
-                    source: None,
-                });
-            }
+            assert!(
+                !RESERVED_AUTHORIZE_PARAMS.contains(&key.as_str()),
+                "oidc_begin: extra_params may not override the SDK-owned authorization parameter \"{key}\" (CONTRACT.md §12.1 rule 5)"
+            );
         }
 
         let state = random_url_safe_token(CSPRNG_BYTES)?;
@@ -233,6 +281,9 @@ impl AxiamClient {
             query.append_pair("code_challenge", &code_challenge);
             query.append_pair("code_challenge_method", CODE_CHALLENGE_METHOD_S256);
         }
+        // §12.1 rule 5: RFC 3986 percent-encoding, so `scope` reads
+        // `openid%20profile`, matching every sibling SDK byte for byte.
+        percent_encode_query_spaces(&mut url);
 
         Ok(AuthorizationRequest {
             url: url.to_string(),
@@ -274,6 +325,45 @@ mod tests {
             raw.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
         );
+    }
+
+    /// CONTRACT.md §12.1 rule 5 / addendum judgment call 10: spaces are
+    /// `%20`, never the form-encoding `+`.
+    #[test]
+    fn percent_encode_query_spaces_rewrites_plus_as_rfc3986_space() {
+        let mut url = url::Url::parse("https://iam.example.com/oauth2/authorize").unwrap();
+        url.query_pairs_mut()
+            .append_pair("scope", "openid profile email")
+            .append_pair("literal_plus", "a+b");
+        // The form serializer's own output, for the record.
+        assert!(url.query().unwrap().contains("openid+profile+email"));
+
+        percent_encode_query_spaces(&mut url);
+
+        let raw = url.to_string();
+        assert!(
+            raw.contains("scope=openid%20profile%20email"),
+            "spaces must be %20: {raw}"
+        );
+        assert!(!raw.contains('+'), "no raw '+' may survive: {raw}");
+        // A *literal* plus was already escaped to %2B by the form serializer,
+        // so it is untouched and still decodes back to "a+b".
+        assert!(raw.contains("literal_plus=a%2Bb"), "{raw}");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(k, _)| k == "literal_plus")
+                .map(|(_, v)| v.into_owned()),
+            Some("a+b".to_string())
+        );
+        // And no double-encoding of the '%' we wrote.
+        assert!(!raw.contains("%2520"), "{raw}");
+    }
+
+    #[test]
+    fn percent_encode_query_spaces_leaves_a_plus_free_query_and_the_path_alone() {
+        let mut url = url::Url::parse("https://iam.example.com/oauth2/a+b?x=1").unwrap();
+        percent_encode_query_spaces(&mut url);
+        assert_eq!(url.as_str(), "https://iam.example.com/oauth2/a+b?x=1");
     }
 
     #[test]

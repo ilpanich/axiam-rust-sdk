@@ -167,7 +167,11 @@ impl JwksVerifier {
         if header.alg != Algorithm::EdDSA {
             return Err(AxiamError::id_token_invalid(
                 IdTokenFailureReason::InvalidAlg,
-                format!("expected alg \"EdDSA\", got {:?}", header.alg),
+                format!(
+                    "expected alg \"{}\", got {:?}",
+                    crate::oidc::id_token::ID_TOKEN_ALG,
+                    header.alg
+                ),
             ));
         }
 

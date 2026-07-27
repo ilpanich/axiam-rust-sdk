@@ -158,6 +158,41 @@ pub fn sign_id_token(key: &SigningKeyFixture, opts: IdTokenOptions<'_>) -> Strin
         .expect("sign id token")
 }
 
+/// Sign a §1/§4 **session** access token — the JWT AXIAM puts in the
+/// `axiam_access` cookie, whose claim shape (`sub`/`tenant_id`/`org_id`/`exp`/
+/// `jti`) is what `absorb_session_cookies` decodes after a `login()` or a
+/// `sso_complete()`. Distinct from [`sign_id_token`], which mints an OIDC ID
+/// token.
+pub fn sign_session_access_token(
+    key: &SigningKeyFixture,
+    tenant: Uuid,
+    org: Uuid,
+    session_id: Uuid,
+) -> String {
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(key.kid.clone());
+    let claims = json!({
+        "sub": Uuid::new_v4().to_string(),
+        "tenant_id": tenant.to_string(),
+        "org_id": org.to_string(),
+        "iss": ISSUER,
+        "iat": 0,
+        "exp": 9_999_999_999i64,
+        "jti": session_id.to_string(),
+    });
+    jsonwebtoken::encode(&header, &claims, &encoding_key(key)).expect("sign session access token")
+}
+
+/// `Set-Cookie` headers for a §4 session: the httpOnly access/refresh pair
+/// plus the readable `axiam_csrf` value (§3).
+pub fn session_cookie_headers(access_token: &str, refresh_token: &str, csrf: &str) -> Vec<String> {
+    vec![
+        format!("axiam_access={access_token}; Path=/; HttpOnly"),
+        format!("axiam_refresh={refresh_token}; Path=/; HttpOnly"),
+        format!("axiam_csrf={csrf}; Path=/"),
+    ]
+}
+
 /// Build an unsigned `alg: none` JWT — the §12.4 rule 1 "must be rejected
 /// outright" case.
 pub fn unsigned_id_token(claims: Value) -> String {

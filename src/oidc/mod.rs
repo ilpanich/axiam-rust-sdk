@@ -14,10 +14,12 @@
 //!     [`crate::client::AxiamClient`]'s own `reqwest::Client`;
 //!   * §3 CSRF forwarding → the crate's existing `CsrfHeaderExt` extension
 //!     trait (`src/rest/auth.rs`), reused as-is;
-//!   * §9 single-flight refresh → a dedicated guard mirroring the existing
-//!     one in [`crate::token::refresh_guard`] (see the crate-internal
-//!     `AxiamClientInner::oidc_refresh_guard` field doc comment for why it
-//!     is a separate instance);
+//!   * §9 single-flight refresh → a dedicated coalescer
+//!     (`src/oidc/single_flight.rs`) built from the same primitives as the
+//!     existing guard in [`crate::token::refresh_guard`], permitted explicitly
+//!     by §9 rule 5; see that module and the crate-internal
+//!     `AxiamClientInner::oidc_refresh_inflight` field doc comment for why it
+//!     is a separate instance, and for how §9 rule 2's result sharing works;
 //!   * §12.4 signature verification → [`crate::token::jwks::JwksVerifier`],
 //!     extended (never forked) with its crate-internal
 //!     `verify_id_token_signature` method;
@@ -62,6 +64,7 @@ pub mod authorize;
 pub mod discovery;
 pub mod exchange;
 pub mod id_token;
+pub(crate) mod single_flight;
 pub mod state;
 
 pub use authorize::{AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, OidcBeginParams};

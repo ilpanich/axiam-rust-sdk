@@ -392,7 +392,7 @@ reason: None,
                 oidc_discovery_cache,
                 oidc_clock_skew_sec,
                 oidc_verifiers: std::sync::RwLock::new(std::collections::HashMap::new()),
-                oidc_refresh_guard: tokio::sync::Mutex::new(()),
+                oidc_refresh_inflight: crate::oidc::single_flight::OidcRefreshInflight::new(),
             }),
         })
     }
@@ -458,13 +458,20 @@ pub(crate) struct AxiamClientInner {
     /// `/oauth2/jwks`, so it cannot reuse `jwks_verifier` above.
     pub(crate) oidc_verifiers:
         std::sync::RwLock<std::collections::HashMap<String, Arc<JwksVerifier>>>,
-    /// Single-flight guard for `oidc_refresh` (CONTRACT.md §9) — a
-    /// dedicated guard, distinct from the §1 cookie-session refresh guard
-    /// owned by `token_manager`: the two protect unrelated token spaces (an
-    /// OAuth2 `TokenResponse` the caller owns vs. the session's own
-    /// cookie-derived access/refresh tokens) and must never be merged
-    /// (CONTRACT.md §12.1 "`oidc_refresh` vs `refresh`").
-    pub(crate) oidc_refresh_guard: tokio::sync::Mutex<()>,
+    /// Single-flight coalescer for `oidc_refresh` (CONTRACT.md §9 rules 1, 2,
+    /// 4 and 5) — a **dedicated** instance, distinct from the §1
+    /// cookie-session refresh guard owned by `token_manager`: the two protect
+    /// unrelated token spaces (an OAuth2 `TokenResponse` the caller owns vs.
+    /// the session's own cookie-derived access/refresh tokens) and must never
+    /// be merged (CONTRACT.md §12.1 "`oidc_refresh` vs `refresh`"; §9 rule 5
+    /// permits exactly this).
+    ///
+    /// It holds the in-flight **result channel**, not just a lock, because §9
+    /// rule 2 requires the one wire call's outcome to be shared with every
+    /// concurrent caller — serializing callers so each replays a single-use
+    /// refresh token is explicitly non-conformant. See
+    /// [`crate::oidc::single_flight`].
+    pub(crate) oidc_refresh_inflight: crate::oidc::single_flight::OidcRefreshInflight,
 }
 
 /// The AXIAM SDK's REST/gRPC/AMQP client entry point.
@@ -575,12 +582,17 @@ impl AxiamClient {
         Ok(verifier)
     }
 
-    /// Acquire the §9 single-flight guard for `oidc_refresh` (CONTRACT.md
-    /// §9). See the field doc on `AxiamClientInner::oidc_refresh_guard` for
-    /// why this is a dedicated guard, distinct from the §1 cookie-session
-    /// refresh guard.
-    pub(crate) async fn oidc_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.inner.oidc_refresh_guard.lock().await
+    /// Run the CONTRACT.md §9 leader/waiter election for `oidc_refresh`.
+    ///
+    /// The winner performs the single wire call and broadcasts its outcome;
+    /// everyone else awaits that outcome and makes no call of its own (§9
+    /// rules 1 and 2). See the field doc on
+    /// `AxiamClientInner::oidc_refresh_inflight` for why this is a dedicated
+    /// instance rather than the §1 cookie-session refresh guard.
+    pub(crate) fn oidc_refresh_election(
+        &self,
+    ) -> crate::oidc::single_flight::OidcRefreshElection<'_> {
+        self.inner.oidc_refresh_inflight.elect()
     }
 
     /// Read the latest captured CSRF token, if any (§3).

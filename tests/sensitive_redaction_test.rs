@@ -33,6 +33,41 @@ fn display_redacts_token_and_never_contains_raw_value() {
     );
 }
 
+/// `Sensitive<T>` became `Clone` so the CONTRACT.md §9 rule 2 single-flight
+/// `oidc_refresh` can share one `OidcTokenSet` with every concurrent waiter.
+/// Cloning duplicates the *wrapper*, so the clone must redact exactly as the
+/// original does — under `Debug`, under `Display`, and nested inside another
+/// `Debug` type.
+#[test]
+fn cloning_a_sensitive_preserves_redaction_in_both_debug_and_display() {
+    let original = Sensitive::new(FAKE_JWT.to_string());
+    let cloned = original.clone();
+
+    assert_eq!(format!("{cloned:?}"), "Sensitive(<redacted>)");
+    assert_eq!(format!("{cloned}"), "[SENSITIVE]");
+    assert!(!format!("{cloned:?}").contains("eyJ"));
+    assert!(!format!("{cloned}").contains("eyJ"));
+
+    // Nested in another Debug type, the clone still delegates to the
+    // redacting impl.
+    let nested = HoldsToken {
+        token: cloned.clone(),
+        label: "cloned",
+    };
+    let rendered = format!("{nested:?}");
+    assert!(rendered.contains("redacted"), "{rendered}");
+    assert!(!rendered.contains("eyJ"), "{rendered}");
+
+    // The clone carries the same value, reachable only through `expose()` —
+    // still the single documented accessor, on the clone as on the original.
+    assert_eq!(cloned.expose(), original.expose());
+
+    // Cloning a non-String payload redacts too (e.g. the §6.1 private key).
+    let bytes = Sensitive::new(vec![1u8, 2, 3]);
+    assert_eq!(format!("{:?}", bytes.clone()), "Sensitive(<redacted>)");
+    assert_eq!(bytes.clone().expose(), &vec![1u8, 2, 3]);
+}
+
 #[derive(Debug)]
 struct HoldsToken {
     #[allow(dead_code)]

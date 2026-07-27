@@ -79,7 +79,7 @@ fn adds_openid_scope_automatically_when_omitted_and_preserves_caller_scope() {
 }
 
 #[test]
-fn extra_params_are_added_but_cannot_override_the_eight_owned_parameters() {
+fn extra_params_are_added_to_the_authorization_url() {
     let client = client();
     let ok = client.oidc_begin(
         &configuration(),
@@ -91,15 +91,78 @@ fn extra_params_are_added_but_cannot_override_the_eight_owned_parameters() {
         url.query_pairs()
             .any(|(k, v)| k == "prompt" && v == "login")
     );
+}
 
-    let err = client.oidc_begin(
+/// CONTRACT.md §12.1 rule 5 / addendum judgment call 9: trying to override one
+/// of the eight SDK-owned parameters is a **programming error**, not a §2
+/// taxonomy outcome, so it panics rather than returning `Err` — matching the
+/// `IllegalArgumentException`/`ValueError`/`ArgumentException` the sibling SDKs
+/// raise. (A missing/unresolvable *tenant*, by contrast, stays an
+/// `AxiamError::Auth`; see `sso_start_requires_organization_context_client_side`
+/// in `tests/oidc_sso_test.rs`.)
+#[test]
+#[should_panic(expected = "extra_params may not override the SDK-owned authorization parameter")]
+fn overriding_an_sdk_owned_parameter_is_a_programming_error() {
+    let client = client();
+    let _ = client.oidc_begin(
         &configuration(),
         OidcBeginParams::new(oidc_support::REDIRECT_URI)
             .with_extra_param("client_id", "someone-else"),
     );
+}
+
+/// CONTRACT.md §12.1 rule 5: the eight parameters are **RFC 3986**
+/// percent-encoded. A multi-valued `scope` must therefore read
+/// `openid%20profile%20email` in the raw URL — not the
+/// `application/x-www-form-urlencoded` `openid+profile+email` that
+/// `url::Url::query_pairs_mut` produces by default, which is what every other
+/// AXIAM SDK emits and what the server's own `?` decoding treats as canonical.
+///
+/// Asserted against the **raw** URL string on purpose: reading the value back
+/// through `query_pairs()` decodes `+` to a space and so passes either way.
+#[test]
+fn spaces_in_query_values_are_percent_encoded_as_20_and_never_as_plus() {
+    let client = client();
+    let request = client
+        .oidc_begin(
+            &configuration(),
+            OidcBeginParams::new("https://app.example.com/auth/cb?next=/a b")
+                .with_scope("profile email offline_access")
+                .with_extra_param("prompt", "consent select_account"),
+        )
+        .expect("oidc_begin succeeds");
+
+    let raw = &request.url;
     assert!(
-        err.is_err(),
-        "overriding an SDK-owned parameter must be rejected client-side"
+        raw.contains("scope=openid%20profile%20email%20offline_access"),
+        "scope must be %20-joined: {raw}"
+    );
+    assert!(
+        raw.contains("prompt=consent%20select_account"),
+        "caller-supplied extra params are encoded the same way: {raw}"
+    );
+    assert!(
+        !raw.contains('+'),
+        "no '+' may appear anywhere in the authorization URL: {raw}"
+    );
+    assert!(
+        !raw.contains("%2520"),
+        "the percent signs must not be double-encoded: {raw}"
+    );
+
+    // Round-trips: the decoded values are exactly what was asked for.
+    let url = url::Url::parse(raw).expect("valid url");
+    let pairs: std::collections::HashMap<String, String> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert_eq!(
+        pairs.get("scope").unwrap(),
+        "openid profile email offline_access"
+    );
+    assert_eq!(
+        pairs.get("redirect_uri").unwrap(),
+        "https://app.example.com/auth/cb?next=/a b"
     );
 }
 

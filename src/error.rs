@@ -22,13 +22,38 @@ use std::error::Error as StdError;
 use std::fmt;
 
 /// The unified error type returned by all fallible operations in this SDK.
+///
+/// # Stability of the variant *fields*
+///
+/// All three variants are `#[non_exhaustive]`. The enum itself is not: §2
+/// fixes the taxonomy at exactly three error types, so no fourth variant can
+/// ever be added and `match`ing all three exhaustively stays sound. What §2
+/// does *not* freeze is each variant's field set — contract 1.4 added
+/// `oauth`/`reason` to [`AxiamError::Auth`], and a future contract revision
+/// may add more.
+///
+/// `#[non_exhaustive]` on the variants makes such an addition additive
+/// instead of source-breaking:
+///
+/// * **Matching** — always use `..`: `AxiamError::Auth { message, .. }`,
+///   `matches!(e, AxiamError::Network { .. })`. This already compiles today
+///   and keeps compiling when fields are added.
+/// * **Constructing** — outside this crate, use the constructors
+///   ([`AxiamError::auth`], [`AxiamError::authz`], [`AxiamError::network`],
+///   [`AxiamError::network_with_source`], [`AxiamError::oauth_protocol_error`],
+///   [`AxiamError::id_token_invalid`], [`AxiamError::from_http_status`],
+///   [`AxiamError::from_grpc_code`]) rather than struct-variant literals.
 #[derive(thiserror::Error, Debug)]
 pub enum AxiamError {
     /// Authentication failure: wrong credentials, expired session, MFA
     /// failure, a 401 on refresh, an RFC 6749 OAuth2 protocol error
     /// (CONTRACT.md §12.3 rule 3), or a §12.4 ID-token validation failure
     /// (CONTRACT.md §2).
+    ///
+    /// Construct with [`AxiamError::auth`] (or one of the more specific
+    /// builders); destructure with a trailing `..`.
     #[error("authentication failed: {message}")]
+    #[non_exhaustive]
     Auth {
         /// Human-readable description of the failure. MUST NOT contain a
         /// raw token value.
@@ -48,7 +73,10 @@ pub enum AxiamError {
 
     /// Authorization failure: the caller is authenticated but lacks
     /// permission for the requested operation (CONTRACT.md §2).
+    ///
+    /// Construct with [`AxiamError::authz`]; destructure with a trailing `..`.
     #[error("authorization denied: {message}")]
+    #[non_exhaustive]
     Authz {
         /// Human-readable description of the failure. MUST NOT contain a
         /// raw token value.
@@ -61,7 +89,11 @@ pub enum AxiamError {
 
     /// Transport-level failure: connection refused, timeout, TLS error, DNS
     /// failure, or a server-side 5xx (CONTRACT.md §2).
+    ///
+    /// Construct with [`AxiamError::network`] /
+    /// [`AxiamError::network_with_source`]; destructure with a trailing `..`.
     #[error("network error: {message}")]
+    #[non_exhaustive]
     Network {
         /// Human-readable description of the failure. MUST NOT contain a
         /// raw token value.
@@ -76,6 +108,55 @@ pub enum AxiamError {
 }
 
 impl AxiamError {
+    /// Build an [`AxiamError::Auth`] carrying just a message — the public
+    /// constructor to use instead of a struct-variant literal, so that adding
+    /// a field to the variant stays additive (see the type-level docs).
+    ///
+    /// `message` MUST NOT contain a raw token value.
+    pub fn auth(message: impl Into<String>) -> AxiamError {
+        AxiamError::Auth {
+            message: message.into(),
+            oauth: None,
+            reason: None,
+        }
+    }
+
+    /// Build an [`AxiamError::Authz`], optionally with the denied `action`
+    /// and `resource_id` CONTRACT.md §2 says to carry when the response body
+    /// provides them.
+    pub fn authz(
+        message: impl Into<String>,
+        action: Option<String>,
+        resource_id: Option<String>,
+    ) -> AxiamError {
+        AxiamError::Authz {
+            message: message.into(),
+            action,
+            resource_id,
+        }
+    }
+
+    /// Build an [`AxiamError::Network`] with no chained transport cause.
+    pub fn network(message: impl Into<String>) -> AxiamError {
+        AxiamError::Network {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Build an [`AxiamError::Network`] chaining the underlying transport
+    /// error as its [`std::error::Error::source`], as CONTRACT.md §2's
+    /// construction rules require.
+    pub fn network_with_source(
+        message: impl Into<String>,
+        source: Box<dyn StdError + Send + Sync>,
+    ) -> AxiamError {
+        AxiamError::Network {
+            message: message.into(),
+            source: Some(source),
+        }
+    }
+
     /// Map an HTTP status code to an [`AxiamError`] variant per CONTRACT.md
     /// §2's HTTP status table.
     ///
@@ -225,6 +306,52 @@ impl AxiamError {
             _ => None,
         }
     }
+
+    /// Reconstruct this error for a CONTRACT.md §9 rule 2 *waiter*.
+    ///
+    /// `AxiamError` is not `Clone`, and cannot cheaply become so: the
+    /// `Network` variant chains a `Box<dyn std::error::Error + Send + Sync>`
+    /// that has no `Clone` bound. §9 rule 2 nonetheless requires the single
+    /// in-flight refresh to hand *its* failure to every concurrent waiter, and
+    /// a waiter needs **an** error, not a byte-identical one. This therefore
+    /// preserves everything a caller can branch on —
+    ///
+    /// * the taxonomy variant (`Auth` stays `Auth`, never widens to `Network`),
+    /// * the `oauth` [`OAuthProtocolError`] payload (`error` +
+    ///   `error_description`, so `invalid_grant` is still `invalid_grant`),
+    /// * the `reason` [`IdTokenFailureReason`] code,
+    /// * the `message` string, and for `Authz` the `action`/`resource_id`
+    ///
+    /// — and drops only the un-clonable `Network::source` chain, which is a
+    /// diagnostic detail rather than something a caller matches on. `Display`
+    /// output is byte-identical in every case, because every variant's
+    /// `#[error(...)]` format string reads only `message`.
+    pub(crate) fn clone_for_waiter(&self) -> AxiamError {
+        match self {
+            AxiamError::Auth {
+                message,
+                oauth,
+                reason,
+            } => AxiamError::Auth {
+                message: message.clone(),
+                oauth: oauth.clone(),
+                reason: *reason,
+            },
+            AxiamError::Authz {
+                message,
+                action,
+                resource_id,
+            } => AxiamError::Authz {
+                message: message.clone(),
+                action: action.clone(),
+                resource_id: resource_id.clone(),
+            },
+            AxiamError::Network { message, .. } => AxiamError::Network {
+                message: message.clone(),
+                source: None,
+            },
+        }
+    }
 }
 
 /// An RFC 6749 protocol error returned by an `/oauth2/*` endpoint as an
@@ -349,11 +476,81 @@ mod tests {
     // type level — no other code path ever calls it).
     #[test]
     fn assert_no_token_in_display_accepts_any_display_error_variant() {
-        let auth = AxiamError::Auth {
-            message: "msg".into(),
-            oauth: None,
-            reason: None,
-        };
+        let auth = AxiamError::auth("msg");
         _assert_no_token_in_display(&auth);
+    }
+
+    #[test]
+    fn public_constructors_build_the_documented_variants() {
+        assert!(matches!(AxiamError::auth("a"), AxiamError::Auth { .. }));
+        assert!(matches!(
+            AxiamError::authz("b", Some("users:get".into()), None),
+            AxiamError::Authz {
+                action: Some(_),
+                resource_id: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            AxiamError::network("c"),
+            AxiamError::Network { source: None, .. }
+        ));
+        let chained = AxiamError::network_with_source("d", Box::new(std::fmt::Error));
+        assert!(StdError::source(&chained).is_some());
+    }
+
+    /// CONTRACT.md §9 rule 2: waiters receive the leader's outcome. The
+    /// taxonomy variant, the `oauth` payload, the `reason` code and the
+    /// rendered `Display` must all survive the trip.
+    #[test]
+    fn clone_for_waiter_preserves_variant_oauth_payload_and_reason() {
+        let oauth = AxiamError::oauth_protocol_error("invalid_grant", "refresh token revoked");
+        let cloned = oauth.clone_for_waiter();
+        assert!(matches!(cloned, AxiamError::Auth { .. }));
+        assert_eq!(
+            cloned.as_oauth_protocol_error().map(|o| o.error.as_str()),
+            Some("invalid_grant")
+        );
+        assert_eq!(
+            cloned
+                .as_oauth_protocol_error()
+                .map(|o| o.error_description.as_str()),
+            Some("refresh token revoked")
+        );
+        assert_eq!(cloned.to_string(), oauth.to_string());
+
+        let id_token = AxiamError::id_token_invalid(IdTokenFailureReason::NonceMismatch, "nope");
+        let cloned = id_token.clone_for_waiter();
+        assert_eq!(
+            cloned.id_token_failure_reason(),
+            Some(IdTokenFailureReason::NonceMismatch)
+        );
+        assert_eq!(cloned.to_string(), id_token.to_string());
+    }
+
+    #[test]
+    fn clone_for_waiter_keeps_authz_fields_and_drops_only_the_network_source() {
+        let authz = AxiamError::from_http_status(
+            403,
+            r#"{"action":"users:get","resource_id":"r-1"}"#.to_string(),
+        );
+        let cloned = authz.clone_for_waiter();
+        match cloned {
+            AxiamError::Authz {
+                ref action,
+                ref resource_id,
+                ..
+            } => {
+                assert_eq!(action.as_deref(), Some("users:get"));
+                assert_eq!(resource_id.as_deref(), Some("r-1"));
+            }
+            other => panic!("expected Authz, got {other:?}"),
+        }
+
+        let network = AxiamError::network_with_source("boom", Box::new(std::fmt::Error));
+        let cloned = network.clone_for_waiter();
+        assert!(matches!(cloned, AxiamError::Network { source: None, .. }));
+        // Display is unchanged: the format string reads only `message`.
+        assert_eq!(cloned.to_string(), network.to_string());
     }
 }

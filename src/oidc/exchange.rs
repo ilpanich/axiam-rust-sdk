@@ -142,7 +142,12 @@ struct SsoLoginSuccessResponseWire {
 /// **already-validated** claim set (§12.4) — validation happens before this
 /// struct is ever constructed, so an `OidcTokenSet` in your hands is never
 /// partially trusted (§12.4 rule 7).
-#[derive(Debug)]
+///
+/// `Clone` is implemented so the single in-flight `oidc_refresh` can hand the
+/// *same* token set to every concurrent waiter (CONTRACT.md §9 rule 2). It
+/// clones the [`Sensitive`] wrappers, never unwraps them: a clone redacts
+/// exactly as the original does.
+#[derive(Debug, Clone)]
 pub struct OidcTokenSet {
     /// The OAuth2 access token (§12.5 secret).
     pub access_token: Sensitive<String>,
@@ -523,14 +528,55 @@ impl AxiamClient {
     /// An `id_token` in the response is validated against rules 1–5 and 7;
     /// rule 6 (nonce) is skipped (OIDC Core §12.2 does not require a nonce
     /// in a refresh-issued ID token).
+    ///
+    /// # Concurrency (CONTRACT.md §9)
+    ///
+    /// A burst of N concurrent calls produces **exactly one**
+    /// `POST /oauth2/token` and every one of the N callers receives that one
+    /// call's outcome — the same [`OidcTokenSet`] on success, an equivalent
+    /// error (same variant, same `oauth` payload, same `reason`) on failure.
+    /// This is §9 rule 2's observable requirement, and it is not optional:
+    /// AXIAM refresh tokens are single-use with rotation, so N independent
+    /// wire calls would mean N−1 replays of a consumed token, each failing
+    /// `invalid_grant`. The coalescer lives in `src/oidc/single_flight.rs` — a
+    /// dedicated instance, as §9 rule 5 permits. There is no retry loop
+    /// anywhere on this path (§9 rule 3).
     pub async fn oidc_refresh(
         &self,
         params: OidcRefreshParams,
     ) -> Result<OidcTokenSet, AxiamError> {
-        // §9: exactly one in-flight oidc_refresh at a time, via a guard
-        // dedicated to this operation (see `AxiamClientInner::oidc_refresh_guard`).
-        let _guard = self.oidc_refresh_guard().await;
+        use super::single_flight::OidcRefreshElection;
 
+        // §9 rules 1 + 2: elect one leader per burst; everyone else waits for
+        // the leader's outcome and issues no wire call of its own.
+        let leader = match self.oidc_refresh_election() {
+            OidcRefreshElection::Waiter(mut rx) => {
+                return match rx.recv().await {
+                    Ok(Ok(tokens)) => Ok(tokens),
+                    Ok(Err(shared)) => Err(shared.clone_for_waiter()),
+                    // The leader's future was cancelled before it published
+                    // (see `single_flight`'s Drop impl). §9 rule 3 forbids a
+                    // retry loop, so this surfaces as an auth failure and the
+                    // caller decides what to do next.
+                    Err(_) => Err(AxiamError::auth(
+                        "the in-flight oidc_refresh was cancelled before completing; retry or re-authenticate (CONTRACT.md §9)",
+                    )),
+                };
+            }
+            OidcRefreshElection::Leader(leader) => leader,
+        };
+
+        let result = self.oidc_refresh_wire_call(params).await;
+        leader.publish(&result);
+        result
+    }
+
+    /// The actual single `POST /oauth2/token?grant_type=refresh_token` wire
+    /// call, performed by the elected leader only.
+    async fn oidc_refresh_wire_call(
+        &self,
+        params: OidcRefreshParams,
+    ) -> Result<OidcTokenSet, AxiamError> {
         let configuration = match params.configuration {
             Some(c) => c,
             None => self.oidc_discover().await?,
@@ -705,6 +751,10 @@ impl AxiamClient {
     /// A client-side [`AxiamError::Auth`] (no wire call) when tenant or org
     /// context cannot be resolved.
     pub async fn sso_start(&self, params: SsoStartParams) -> Result<SsoStartResult, AxiamError> {
+        // Tenant context always resolves: `TenantIdentifier` is a two-variant
+        // enum and §5 guarantees the builder set one of them, so unlike the
+        // organization pair below there is no unresolvable case to guard
+        // against here.
         let (tenant_id, tenant_slug) = match (params.tenant_id, params.tenant_slug) {
             (Some(id), _) => (Some(id), None),
             (None, Some(slug)) => (None, Some(slug)),
@@ -713,15 +763,6 @@ impl AxiamClient {
                 TenantIdentifier::Slug(slug) => (None, Some(slug.clone())),
             },
         };
-        if tenant_id.is_none() && tenant_slug.is_none() {
-            return Err(AxiamError::Auth {
-                message:
-                    "sso_start requires tenant context: pass tenant_id or tenant_slug, or construct the client with one (CONTRACT.md §5.1)"
-                        .into(),
-                oauth: None,
-                reason: None,
-            });
-        }
 
         let (org_id, org_slug) = match (params.org_id, params.org_slug) {
             (Some(id), _) => (Some(id), None),
@@ -798,6 +839,21 @@ impl AxiamClient {
     /// `reqwest::Client` every other REST call on this `AxiamClient` uses.
     /// §12.4 does not apply here: no ID token ever reaches the SDK on the
     /// federation path.
+    ///
+    /// On success this runs the **same post-login session sync** as
+    /// [`AxiamClient::login`] / [`AxiamClient::verify_mfa`] (§4, §3): the
+    /// `axiam_access`/`axiam_refresh` cookies are read out of the jar, the
+    /// access token is verified through the JWKS verifier to resolve
+    /// `tenant_id`/`org_id` and its expiry, the token manager is seeded, and
+    /// the `axiam_csrf` value is cached for §3 forwarding. A `sso_complete`
+    /// therefore leaves the client in exactly the state a `login()` would —
+    /// [`AxiamClient::refresh`] and [`AxiamClient::logout`] work afterwards.
+    ///
+    /// # Errors
+    /// Besides the §2 status mapping, an [`AxiamError::Auth`] when the
+    /// response set no usable `axiam_access` cookie or that cookie does not
+    /// verify — identical to `login()`'s behaviour, since a session that
+    /// cannot be absorbed is not a successful login.
     pub async fn sso_complete(
         &self,
         params: SsoCompleteParams,
@@ -835,10 +891,14 @@ impl AxiamClient {
             .await
             .map_err(|e| network_err("failed to parse sso_complete response", e))?;
 
-        // Best-effort: capture the freshly-set (non-secret) CSRF token, the
-        // same way login()/verify_mfa()/refresh() do — a no-op if the
-        // response did not set one.
-        self.capture_csrf_from_jar();
+        // Addendum judgment call 16 / §4 + §3: mark the session authenticated
+        // by running the *same* post-login sync login()/verify_mfa() run —
+        // seed the token manager from the jar, resolve tenant_id/org_id from
+        // the verified access token, and cache the CSRF token. Without this a
+        // caller holds a live server-side session the client knows nothing
+        // about, and a subsequent refresh() fails with "no access token to
+        // refresh".
+        crate::rest::auth::absorb_session_cookies(self).await?;
 
         Ok(SsoCompleteResult {
             user_id: wire.user_id,

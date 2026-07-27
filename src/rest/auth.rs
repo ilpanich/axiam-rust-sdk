@@ -181,7 +181,12 @@ impl LoginResult {
 /// `axiam_csrf`, read them out of the jar (RESEARCH.md Pattern 1), decode
 /// the access token's claims via the JWKS verifier to populate `exp` and
 /// resolve `tenant_id`/`org_id`, and cache the CSRF token for §3 forwarding.
-async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claims, AxiamError> {
+///
+/// `pub(crate)` because CONTRACT.md §12.1's `sso_complete` establishes a
+/// session the same way (addendum judgment call 16) and must run the identical
+/// sync rather than a partial copy of it — see
+/// [`AxiamClient::sso_complete`](crate::client::AxiamClient::sso_complete).
+pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claims, AxiamError> {
     let access = extract_access_token_from_jar(&client.inner.jar, &client.inner.base_url)
         .ok_or_else(|| AxiamError::Auth {
             message: "server response did not set the axiam_access cookie".into(),
