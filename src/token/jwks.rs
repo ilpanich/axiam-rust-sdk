@@ -276,6 +276,21 @@ impl JwksVerifier {
 
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.leeway = 0; // SDK talks to its own issuer; no federation clock skew.
+        // H8 fix (SDK bench harness validation): this verifies AXIAM's own
+        // access/refresh-derived tokens (called from
+        // `rest::auth::absorb_session_cookies` right after login/refresh),
+        // whose `aud` is always one of the two fixed, well-known constants
+        // `axiam:user` / `axiam:m2m` (crates/axiam-auth/src/token.rs
+        // AUD_USER/AUD_M2M) — not an RP-specific client_id the way an OIDC
+        // id_token's `aud` is (that RP-audience check is a *different*,
+        // already-correct code path: the sibling `verify_claims` above,
+        // via `crate::oidc::id_token`'s own checklist, at `validation.
+        // validate_aud = false` two branches up). Without this,
+        // jsonwebtoken's default `validate_aud = true` with no configured
+        // `validation.aud` rejects EVERY token that carries an `aud` claim
+        // — i.e. every real AXIAM access token — with `InvalidAudience`,
+        // so `login()`/`refresh()` always failed against a live server.
+        validation.validate_aud = false;
 
         let data = decode::<Claims>(token, &decoding_key, &validation).map_err(|e| {
             use jsonwebtoken::errors::ErrorKind;
