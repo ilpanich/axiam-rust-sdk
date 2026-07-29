@@ -193,7 +193,18 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
             oauth: None,
             reason: None,
         })?;
-    let refresh = extract_refresh_token_from_jar(&client.inner.jar, &client.inner.base_url);
+    // H8 fix (SDK bench harness validation): `axiam_refresh` is
+    // `Path=/api/v1/auth/refresh`-scoped (crates/axiam-api-rest/src/
+    // middleware/csrf.rs `refresh_cookie()`), so a jar lookup keyed on
+    // `base_url` (path "/") never matches it per RFC 6265 path-matching (a
+    // cookie's Path must be a prefix of the *request* path, not the other
+    // way around) — every login()/verify_mfa()/sso_complete() therefore
+    // absorbed a `refresh: None`, and the very first refresh() call failed
+    // with "no refresh token available; re-authentication required"
+    // (token/refresh_guard.rs) despite the server having issued one. Look it
+    // up at the REFRESH_PATH-scoped URL instead, matching the URL the cookie
+    // was actually set against.
+    let refresh = extract_refresh_token_from_jar(&client.inner.jar, &client.url(REFRESH_PATH));
 
     let claims = client.jwks_verifier().verify(access.expose()).await?;
 
@@ -373,9 +384,18 @@ impl AxiamClient {
                                 oauth: None,
                                 reason: None,
                             })?;
+                            // Same REFRESH_PATH-scoped lookup as
+                            // absorb_session_cookies above, and just as
+                            // load-bearing here: on a `base_url` lookup this
+                            // always returned None, so `RefreshedTokens.
+                            // refresh` was always None and `refresh_if_needed`
+                            // kept the OLD, already-consumed (single-use)
+                            // refresh token in its state forever — meaning
+                            // even a fixed first refresh() call would still
+                            // make every subsequent refresh() fail.
                             let refresh_token = extract_refresh_token_from_jar(
                                 &client.inner.jar,
-                                &client.inner.base_url,
+                                &client.url(REFRESH_PATH),
                             );
                             let claims = client.jwks_verifier().verify(access.expose()).await?;
                             client.capture_csrf_from_jar();
