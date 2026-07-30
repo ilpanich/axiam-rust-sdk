@@ -100,16 +100,39 @@ wrong, and this section replaces it.
   burst of N concurrent callers produced **N serialized wire calls**; because
   AXIAM refresh tokens are single-use with rotation, callers 2..N replayed an
   already-consumed token and each failed `invalid_grant`. The mutex is
-  replaced by a leader/waiter election over a
-  `broadcast::Sender<Result<OidcTokenSet, Arc<AxiamError>>>`
-  (`src/oidc/single_flight.rs`): exactly one caller per burst performs the wire
-  call and broadcasts its outcome, and every other caller receives *that*
-  outcome — the same token set on success, an equivalent error (same taxonomy
-  variant, same `oauth` payload, same `reason`) on failure. A cancelled leader
+  replaced by a leader/waiter election over a shared publication — a
+  `watch::Sender` carrying `Running | Settled(Result<OidcTokenSet,
+  Arc<AxiamError>>) | Cancelled` (`src/oidc/single_flight.rs`): exactly one
+  caller per burst performs the wire call and publishes its outcome, and every
+  other caller receives *that* outcome — the same token set on success, an
+  equivalent error (same taxonomy variant, same `oauth` payload, same `reason`)
+  on failure. A cancelled leader publishes a typed `Cancelled` state and
   releases the slot rather than wedging the guard. No new dependency: `tokio`'s
   `sync` feature was already enabled. Covered by ≥5-caller burst tests for both
   the success and failure paths, each asserting exactly one request reaches the
   server.
+- **`oidc_refresh`'s single-flight guard no longer has a publish/retire race
+  that could issue a second, doomed `refresh_token` grant.** The guard's first
+  implementation held a `tokio::sync::broadcast::Sender` and had to retire the
+  in-flight slot *before* sending (a `broadcast` receiver never observes sends
+  that predate its `subscribe`, so a caller subscribing after the send would
+  have hung). That left the slot **empty while the refresh had already
+  settled**: a concurrent caller landing there — no `.await` separates the two
+  statements, but another runtime worker thread can — became a second leader
+  and replayed the single-use refresh token the first leader had just consumed,
+  failing `invalid_grant`. The slot now holds a *value-retaining*
+  `tokio::sync::watch` publication, so **publication precedes vacating the
+  slot**: a caller at any instant either joins the shared outcome or finds the
+  slot empty with the refresh already settled and published, never "empty and
+  nothing published". Occupancy alone no longer means "join this": a `Settled`
+  publication is joinable (and cannot be stale — while it occupies the slot no
+  later refresh can have been elected), a `Cancelled` one never is, and a
+  caller arriving once the slot is empty still starts a genuinely fresh
+  refresh rather than being handed the previous burst's tokens. Observable §9
+  behaviour is unchanged: one wire call per burst, that outcome shared, no
+  retry loop, and a cancelled leader still frees the slot and wakes its
+  waiters (now with a typed cancellation signal instead of a channel-closed
+  error).
 - **`oidc_begin` now percent-encodes spaces as `%20`, not `+`.**
   `url::Url::query_pairs_mut` is an `application/x-www-form-urlencoded`
   serializer, so a multi-valued `scope` was emitted as

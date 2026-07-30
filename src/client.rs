@@ -584,7 +584,7 @@ impl AxiamClient {
 
     /// Run the CONTRACT.md §9 leader/waiter election for `oidc_refresh`.
     ///
-    /// The winner performs the single wire call and broadcasts its outcome;
+    /// The winner performs the single wire call and publishes its outcome;
     /// everyone else awaits that outcome and makes no call of its own (§9
     /// rules 1 and 2). See the field doc on
     /// `AxiamClientInner::oidc_refresh_inflight` for why this is a dedicated

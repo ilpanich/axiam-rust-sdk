@@ -545,20 +545,20 @@ impl AxiamClient {
         &self,
         params: OidcRefreshParams,
     ) -> Result<OidcTokenSet, AxiamError> {
-        use super::single_flight::OidcRefreshElection;
+        use super::single_flight::{OidcRefreshCancelled, OidcRefreshElection};
 
         // §9 rules 1 + 2: elect one leader per burst; everyone else waits for
         // the leader's outcome and issues no wire call of its own.
         let leader = match self.oidc_refresh_election() {
-            OidcRefreshElection::Waiter(mut rx) => {
-                return match rx.recv().await {
+            OidcRefreshElection::Waiter(waiter) => {
+                return match waiter.wait().await {
                     Ok(Ok(tokens)) => Ok(tokens),
                     Ok(Err(shared)) => Err(shared.clone_for_waiter()),
                     // The leader's future was cancelled before it published
                     // (see `single_flight`'s Drop impl). §9 rule 3 forbids a
                     // retry loop, so this surfaces as an auth failure and the
                     // caller decides what to do next.
-                    Err(_) => Err(AxiamError::auth(
+                    Err(OidcRefreshCancelled) => Err(AxiamError::auth(
                         "the in-flight oidc_refresh was cancelled before completing; retry or re-authenticate (CONTRACT.md §9)",
                     )),
                 };
