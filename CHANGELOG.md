@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha21] - 2026-07-30
+
+### Added
+
+- Add OIDC/SSO relying-party helpers (CONTRACT §12)
+
+### Changed
+
+- Re-sync vendored CONTRACT.md to contract 1.6
+- Update base64 requirement from 0.22 to 0.23
+- Update ed25519-dalek requirement from 2 to 3
+- Update jsonwebtoken requirement from 10 to 11
+- Bump coverallsapp/github-action from 2.3.7 to 2.3.8
+- Bump taiki-e/install-action from 2.84.0 to 2.85.2
+- Re-sync vendored CONTRACT.md to contract 1.5
+
+### Fixed
+
+- Publish the single-flight refresh outcome before vacating the slot
+- Read axiam_refresh from its REFRESH_PATH-scoped URL, not base_url (H8 SDK bench)
+- Disable aud validation in JwksVerifier::verify (H8 SDK bench)
+- Share the single-flight oidc_refresh result (CONTRACT §9 rule 2)
+
 ## [Unreleased]
 
 ### ⚠ Breaking
