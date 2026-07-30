@@ -614,6 +614,50 @@ All SDKs that manage token state (access + refresh tokens) MUST implement a sing
    unbounded) wait to acquire the shared guard is permitted, and exhausting that bound MUST
    raise `AuthError` rather than return a stale token set; the specific bound is an
    implementation detail and is deliberately **not** part of this contract.
+6. **Implementation invariants for "equally strong" (added in contract 1.6; not new
+   obligations — these are what rule 2's observable requirement was already implying, made
+   explicit because three independently-written SDKs violated one of them in three different
+   shapes before this clarification existed).** Whatever mechanism is chosen (rule 5), it MUST
+   satisfy all four of the following, stated in mechanism-neutral terms so they apply equally to
+   a channel, a future/promise, a condition variable, or a watch/state cell:
+   - **(a) Publish-before-vacate.** The shared outcome MUST be made observable to the guard's
+     synchronization point *before* the in-flight slot is cleared. There MUST be no reachable
+     instant at which a new caller sees "slot empty" while the outcome that just settled has not
+     yet been handed to already-waiting callers — that instant is indistinguishable from "no
+     refresh has run yet" and lets a new caller start a **second** wire call against an
+     already-consumed refresh token. (Found in production as: a Go/Rust implementation that
+     cleared its slot immediately, then handed the result to waiters as a second step.)
+   - **(b) Occupancy is not liveness.** Any code that needs to know whether a refresh is
+     *currently on the wire* — not merely whether the slot happens to be non-empty — MUST test
+     for that specifically (e.g., "is the held future/promise still pending," not "is the
+     reference non-null"). A slot MAY legitimately hold an already-settled outcome for a brief
+     bookkeeping window after rule (a)'s publication and before cleanup; that window MUST NOT be
+     misread as "a refresh is in flight" by unrelated logic that shares the same guard (for
+     example, an operation requiring mutual exclusion with a live refresh). (Found in production
+     as: a bounded-retry mutual-exclusion check that counted a settled-but-uncleared slot as
+     "busy" and exhausted its retry budget in microseconds, failing an otherwise-valid unrelated
+     operation.)
+   - **(c) Only the current owner clears its own slot.** An attempt (leader) that failed,
+     completed, or was cancelled MUST clear only the slot entry it itself created — identity- or
+     generation-checked, not merely "the slot is non-empty." A lagging attempt unwinding after a
+     *newer* attempt has already taken the slot MUST NOT clear that newer attempt's entry.
+     (Found in production as: an unconditional clear-on-error path that could wipe a different,
+     currently-live refresh's slot, again opening the door to a second concurrent wire call.)
+   - **(d) A caller arriving after full settlement gets a fresh refresh.** Once an outcome has
+     been published (rule a) and the slot fully vacated (rules b–c), a subsequently arriving
+     caller MUST perform its own new refresh attempt, never be handed a previous burst's outcome
+     as if it were current. Joining is only for callers whose request predates or coincides with
+     a *live* attempt (rule b); it is never for callers arriving after that attempt has already
+     concluded.
+
+   These four properties are what "an equally strong mechanism" (rule 5) means in practice; a
+   mechanism that satisfies rules 1–4's *stated* behavior on the happy path but admits a window
+   violating (a)–(d) under contention is not conformant, even though nothing in rules 1–4's prose
+   was literally broken. See the fixes in `axiam-java-sdk`, `axiam-go-sdk`, `axiam-cplusplus-sdk`
+   and `axiam-rust-sdk` (2026-07, contract 1.6) for four independent, sanitizer/loop-verified
+   implementations of these invariants across four different mechanisms (a shared future behind
+   a re-checked liveness test, a channel with corrected publish ordering, a generation-counted
+   `shared_future`, and a value-retaining `watch` cell respectively).
 
 Per-language implementation guidance:
 | Language   | Mechanism                                                         |
@@ -637,6 +681,19 @@ received that one call's outcome** (rule 2), and the requirement applies **per r
 operation** — an SDK that ships both the §1 `refresh` and the
 [§12](#§12-oidc--sso-relying-party-helpers) `oidc_refresh` needs the test for each, because they
 run on different token namespaces and (per rule 5) may use different guard instances.
+
+**Extended in contract 1.6**, to cover rule 6's invariants directly (each was the exact scenario
+a production bug survived the pre-1.6 test requirement under):
+- A caller whose request lands strictly after a refresh has published its outcome but before the
+  slot is fully vacated (rule 6a/6b's bookkeeping window) MUST join that outcome, not trigger a
+  second wire call. Assert the wire-call count stays at 1.
+- A caller whose request lands strictly after a refresh's slot has been fully vacated MUST
+  trigger its own new wire call, not receive the prior burst's outcome. Assert a second wire call
+  occurs and that this caller's outcome is that second call's, not the first's.
+- Where the guard's owner is identified across concurrent attempts (rule 6c), a failed or
+  cancelled attempt MUST NOT clear a different, still-live attempt's slot. Construct the race
+  (a lagging failure/cancellation unwinding after a new leader has already been elected) and
+  assert the new leader's slot survives it.
 
 ---
 
@@ -1254,6 +1311,84 @@ C# is the one documented deviation from the `buf` codegen pipeline. The C# SDK u
 No SDK currently ships a dedicated `CHANGELOG.md`; breaking changes to this contract are
 recorded here until one exists.
 
+- **2026-07 (§9 single-flight guard invariant clarification, contract 1.6)** —
+  **non-breaking / clarifying.** No new obligations, no signature changes, no vocabulary
+  changes — this states, precisely, what rule 2's pre-existing observable requirement ("exactly
+  one wire call, result shared with all N callers") was already implying about *how* a
+  conformant mechanism must behave under contention. It exists because that implication was not
+  explicit enough: `axiam-java-sdk`, `axiam-go-sdk` and `axiam-cplusplus-sdk` each independently
+  violated one of the four invariants below (found by a cross-SDK audit after the first,
+  `axiam-java-sdk`'s, was fixed), and `axiam-rust-sdk` was hardened against the same class
+  pre-emptively — four different mechanisms (a re-checked-liveness shared future, a
+  corrected-ordering channel, a generation-counted `shared_future`, a value-retaining `watch`
+  cell), the same four properties.
+  - **§9 gains rule 6**: publish-before-vacate (6a), occupancy is not liveness (6b), only the
+    current owner clears its own slot (6c), and a caller arriving after full settlement always
+    gets a fresh refresh rather than a previous burst's outcome (6d). Together these are what
+    rule 5's "equally strong mechanism" means in practice.
+  - **The §9 test requirement is extended** to cover the two windows that let these bugs ship
+    past the pre-1.6 requirement: a caller landing in the publish-before-vacate bookkeeping
+    window (must join, not re-call), and a caller landing after full vacate (must re-call, not
+    join a stale outcome) — plus, where ownership is tracked, that a losing/cancelled attempt
+    cannot clear a different, currently-live attempt's slot.
+  - **Fixed**: [`axiam-java-sdk#27`](https://github.com/ilpanich/axiam-java-sdk/pull/27) (§12
+    `runExclusive` counted a settled-but-uncleared slot as live, exhausting a bounded retry and
+    failing a valid unrelated operation — rule 6b), [`axiam-go-sdk#20`](https://github.com/ilpanich/axiam-go-sdk/pull/20)
+    (`OidcRefresh`/`OidcDiscover` cleared the slot before publishing, opening a window for a
+    second wire call — rule 6a), [`axiam-cplusplus-sdk#6`](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/6)
+    (a non-owner could clear a newer attempt's slot, rule 6c; a settled future was served to a
+    late arrival instead of that arrival refreshing itself, rule 6d), and
+    [`axiam-rust-sdk#34`](https://github.com/ilpanich/axiam-rust-sdk/pull/34) (pre-emptive
+    hardening of the same `oidc_refresh` coalescer, replacing a broadcast channel that required
+    retire-before-send with a value-retaining `watch` cell so rule 6a holds structurally).
+  - **Not affected, audited clean, for their `oidc_refresh` coalescer specifically**:
+    `axiam-typescript-sdk` (`singleFlightRefresh.ts`) and `axiam-php-sdk` (`OidcClient.php`) —
+    single-threaded promise/fiber-chain ordering makes rule 6a hold by construction, because the
+    slot clear is chained onto the very value being shared, so no application code can observe
+    the ordering violated. `axiam-csharp-sdk`'s dedicated OIDC guard was already checking
+    completion (not mere occupancy) before this clarification existed, satisfying 6b.
+  - **Not affected for the §1 cookie-session refresh guard** (a *different* operation from
+    `oidc_refresh`, sharing the same four invariants by construction): `axiam-python-sdk`,
+    `axiam-go-sdk`'s `internal/refreshguard`, `axiam-rust-sdk`'s `token::refresh_guard`, and the
+    C SDK's `single_flight_refresh` all hold the lock across the entire wire call, so there is no
+    publish/vacate gap to violate at all — releasing the lock is definitionally the last step,
+    which cannot precede the outcome being computed.
+  - **Follow-up audit completed (2026-07), and it found three more violations** — the initial
+    pass had only checked the Java-shaped bug (6b) SDK-wide, before the Go/C++/Rust bugs
+    (6a/6c/6d) were known, so Python's, Kotlin's and Swift's own guards were re-audited against
+    all four rules. None was clean:
+    - **`axiam-python-sdk`** — violations on **both** the sync and async `oidc_refresh` paths.
+      Async broke 6a in exactly Go's shape (slot vacated before `set_result`/`set_exception`),
+      and reachably so, not latently: a cancelled joiner cancels the shared future, so the
+      publish step itself raised `InvalidStateError` while the slot was already empty and the
+      outcome reached nobody. Sync broke 6b by waking waiters on a boolean flag rather than the
+      attempt they joined, so a not-yet-rescheduled waiter read a *newer* burst's occupancy as
+      its own refresh still being live and was handed the newer attempt's outcome (~82% per
+      interleaving round). Async also broke 6c: a *joiner's* cancellation destroyed the live
+      leader's publication, losing an already-rotated token set.
+    - **`axiam-kotlin-sdk`** — the most damaging variant found. Acquiring a kotlinx `Mutex` is a
+      cancellable suspension point, so a cancelled leader that hit contention threw *before*
+      clearing its own slot (6c), leaving a settled-exceptionally `Deferred` parked there
+      permanently; every later caller then joined that dead burst with zero further wire calls
+      (6d). Because the wire call ran in the electing caller's own coroutine over a blocking,
+      non-interruptible OkHttp call, a `withTimeout` typically fired *after* the refresh had
+      succeeded and the server had rotated the single-use token — discarding it and leaving the
+      session unrecoverable. Three sites shared the defect, including the §1 guard, which
+      (unlike Python's/Go's/Rust's/C's) did **not** hold its lock across the wire call and so was
+      never covered by that clearing argument.
+    - **`axiam-swift-sdk`** — 6c violated (unconditional slot clear, so a lagging attempt could
+      wipe a newer leader's live entry); 6a/6b/6d hold structurally for its actor + `Task`
+      mechanism and are now asserted by test. Swift's unstructured `Task {}` not inheriting
+      caller cancellation is what spared it from Kotlin's session-destroying variant.
+
+    Fixed in [`axiam-python-sdk#23`](https://github.com/ilpanich/axiam-python-sdk/pull/23),
+    [`axiam-kotlin-sdk#8`](https://github.com/ilpanich/axiam-kotlin-sdk/pull/8) and
+    [`axiam-swift-sdk#7`](https://github.com/ilpanich/axiam-swift-sdk/pull/7). Final tally: of
+    eleven SDKs, **six** carried a genuine rule-6 violation (Java, Go, C++, Kotlin, Swift,
+    Python), one was hardened pre-emptively (Rust), and four were clean on their own merits
+    (TypeScript, PHP, C#, C) — which is the empirical case for stating these invariants
+    normatively rather than leaving them implied by rule 2.
+
 - **2026-07 (§12 cross-SDK conformance review, contract 1.5)** — **non-breaking / clarifying.**
   No new obligations, no signature changes, no vocabulary changes. Contract 1.4's §12 was
   implemented independently in eight SDKs; the cross-SDK review
@@ -1369,6 +1504,6 @@ recorded here until one exists.
 
 ---
 
-*Contract version: 1.5 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07*
+*Contract version: 1.6 — Phase 15 (sdk-foundation); §11 declarative authorization helpers added 2026-07; §6.1 mTLS client certificates and Kotlin/Swift/C/C++ SDK columns added 2026-07; §1.1 gRPC-only `get_user_info` operation added 2026-07; §12 OIDC/SSO relying-party helpers and the `OAuthProtocolError` taxonomy sub-type added 2026-07; §7 accessor rules, §9 rule 5, and the §12 cross-SDK clarifications from the eight-SDK conformance review added 2026-07; §9 rule 6 single-flight implementation invariants and the extended §9 test requirement added 2026-07*
 *Binding since: 2026-06-30*
 *Reference: D-09, D-10 in `.planning/phases/15-sdk-foundation/15-CONTEXT.md`*
