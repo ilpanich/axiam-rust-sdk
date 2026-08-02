@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Webhook signature verification (CONTRACT §13, T-145).** New
+  `axiam_sdk::webhook::verify_webhook`: HMAC-SHA256 over `<t>.<raw_body>`,
+  `t=`/`v1=` header parsing with forward-compatible unknown-key tolerance,
+  constant-time comparison over the *decoded* MAC bytes via `subtle`, and a
+  two-sided freshness window defaulting to 300 s (a future-dated timestamp is
+  rejected as well as a stale one). The secret is taken as `Sensitive<String>`
+  (§7) and the typed `WebhookVerifyError` never surfaces the expected
+  signature. Compiled whenever `rest` **or** `amqp` is enabled — both already
+  vendor `hmac`/`sha2`/`hex`/`subtle`, so no new dependency is added.
+- `benches/jwks_verify.rs` — a dependency-free (`harness = false`) micro-benchmark
+  for the SDK's hottest CPU path, per-request access-token verification behind
+  the §10/§11 route guard, including a "floor" row that measures
+  `jsonwebtoken::decode` directly so SDK-side overhead can be read off
+  independently of the Ed25519 cost.
+
+### Changed
+
+- **`actix-web` is now depended on with `default-features = false`**
+  (`features = ["cookies", "macros"]`). The SDK only uses `HttpRequest`,
+  `web::Data`, `HttpResponse`, `Responder` and `ResponseError`; actix-web's
+  default set additionally forced its response-compression stack
+  (brotli/zstd/flate2), `h2` 0.3 — a second `h2` major alongside the 0.4 that
+  tonic and reqwest already use — `encoding_rs`, `language-tags`, WebSockets
+  and the `regex`-based router onto every build. A cold
+  `cargo build --all-features` graph drops from 295 to 276 crates, removing
+  roughly 60 s of measured compile work (zstd-sys 15.9 s, h2 0.3 15.7 s,
+  brotli 8.1 s, regex-automata 7.6 s, encoding_rs 7.1 s, language-tags 5.1 s,
+  regex-syntax 3.9 s). This takes nothing away from applications: an app using
+  the `actix`/`macros` features has its own `actix-web` dependency, and Cargo
+  unifies features across the graph.
+- Documented the scope of `[profile.release]` in `Cargo.toml` and README:
+  Cargo honours only the **top-level workspace's** profile tables, so the
+  release-build settings in this repository govern its own examples/benches and
+  are *not* inherited by consumers. README gains a "Release-profile tuning (for
+  consumers)" section with the block to copy into their own manifest, and a
+  "Build-time notes" section identifying `aws-lc-sys` (pulled in by `rustls`'s
+  default crypto provider via both `reqwest` and `lapin`) as the dominant
+  remaining cold-build cost.
+
+### Removed
+
+- The `[profile.release]` table in `axiam-sdk-macros/Cargo.toml`. Cargo ignores
+  profile tables in non-root workspace members and printed
+  "profiles for the non root package will be ignored" on **every** cargo
+  invocation in this repository; the table had no effect other than that
+  warning. The workspace-root profile already covers both members.
+
 ## [1.0.0-alpha23] - 2026-08-02
 
 ### Changed

@@ -26,6 +26,26 @@ categories = ["api-bindings", "authentication"]
 proc-macro = true
 
 [dependencies]
+# A proc-macro crate is compiled on the HOST for every downstream build, and it
+# sits on the critical path of every consumer that enables `axiam-sdk`'s
+# `macros` feature. `syn`'s feature set was therefore audited against what
+# `src/lib.rs` actually uses:
+#
+#   full        — `ItemFn`, `FnArg`, `Block`, `Pat` (the item-level AST).
+#                 Unavoidable: the macros parse whole `fn` items.
+#   parsing     — `parse_macro_input!`, `Punctuated::parse_terminated`,
+#                 `parse_quote!`.        (default)
+#   printing    — `quote!(#func)`, `Error::to_compile_error`.  (default)
+#   clone-impls — `sig.clone()`, `ExprPath::clone`.            (default)
+#   proc-macro  — `TokenStream` conversion.                    (default)
+#
+# The only default feature that is NOT used is `derive` (the `DeriveInput` AST
+# for `#[derive]` macros). Turning it off was measured — 3x cold
+# `cargo build -p axiam-sdk-macros --timings` per configuration — and made no
+# difference outside run-to-run noise (syn unit: 4.5-5.4 s with `derive`,
+# 4.5-5.6 s without), so the default set is kept rather than pinned for its own
+# sake. `extra-traits` (`Debug`/`Eq`/`Hash` for every AST node), by far the most
+# expensive `syn` feature, was never enabled and stays off.
 syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
@@ -33,11 +53,12 @@ proc-macro2 = "1"
 [package.metadata.docs.rs]
 all-features = true
 
-[profile.release]
-opt-level = 3         # Maximum optimization for speed.
-lto = "fat"           # Whole-program LTO across all crates (== `true`); best
-                      # runtime throughput, slowest link.
-codegen-units = 1     # One codegen unit per crate — lets the optimizer see the
-                      # whole crate at the cost of parallelism during compile.
-strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
-                      # runtime cost (release already builds with debug = 0).
+# NOTE: there is deliberately no `[profile.release]` here.
+#
+# Cargo only honours profile settings declared at the WORKSPACE ROOT. A
+# `[profile.*]` table in a non-root member is silently ignored — cargo prints
+# "profiles for the non root package will be ignored" on every single
+# invocation and carries on. The table that used to live here therefore did
+# nothing except emit that warning; the root `Cargo.toml`'s `[profile.release]`
+# already covers both workspace members. See the note there for why neither
+# table affects downstream consumers of the published crates.
