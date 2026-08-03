@@ -54,14 +54,23 @@ default = ["rest", "grpc", "amqp"]
 # precedent below: promoting an already-vendored transitive crate to a named
 # direct dependency for the code path that needs it adds no new supply-chain
 # surface.
-rest = ["dep:reqwest", "dep:sha2", "dep:getrandom", "dep:base64"]
+#
+# `hmac`/`hex`/`subtle` are additionally required by the CONTRACT.md §13
+# webhook signature verifier (`src/webhook.rs`): HMAC-SHA256 over the raw
+# delivery body, hex-decoding of the `v1=` field, and a constant-time compare
+# over the decoded MAC bytes. All three are already vendored — `hmac`/`hex` by
+# the `amqp` feature below and `subtle` unconditionally via
+# `jsonwebtoken` -> `ed25519-dalek` — so, exactly like `sha2`/`getrandom`/
+# `base64` above, this only promotes an already-present crate to a named direct
+# dependency for the code path that needs it. No new supply-chain surface.
+rest = ["dep:reqwest", "dep:sha2", "dep:getrandom", "dep:base64", "dep:hmac", "dep:hex", "dep:subtle"]
 grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
 # `tracing` is a required (non-optional) dependency of `amqp`, not gated by
 # `observability`: the CONTRACT.md §8.4 security-event log on HMAC
 # verification failure is a mandatory correctness/security control (T-16-11),
 # not optional diagnostic instrumentation, so it must always be emitted
 # regardless of whether the crate-wide `observability` feature is enabled.
-amqp = ["dep:lapin", "dep:hmac", "dep:sha2", "dep:hex", "dep:futures-util", "dep:tracing", "dep:chrono"]
+amqp = ["dep:lapin", "dep:hmac", "dep:sha2", "dep:hex", "dep:futures-util", "dep:tracing", "dep:chrono", "dep:subtle"]
 observability = ["dep:tracing"]
 # §10 middleware/route-guard: the Actix-Web `FromRequest` extractor
 # (`AxiamUser`). Off by default so the core SDK does not pull actix-web
@@ -104,7 +113,26 @@ hex = { version = "0.4", optional = true }
 # the `AuthzRequest`/`AuditEventMessage` DTO fields (mirrors the server's
 # `chrono::DateTime<Utc>` field type in `crates/axiam-amqp/src/messages.rs`).
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"], optional = true }
-actix-web = { version = "4", optional = true }
+# `default-features = false`: the SDK's §10/§11 code uses only `HttpRequest`
+# (+ `req.cookie()` -> `cookies`), `web::Data`, `HttpResponse`, `Responder` and
+# `ResponseError`. actix-web's default set additionally pulls its whole
+# server-side response-compression stack (brotli + zstd + flate2), HTTP/2
+# (h2 0.3, a second h2 major alongside the h2 0.4 tonic/reqwest already use),
+# `encoding_rs`, `language-tags`, WebSockets, and the `unicode` router (full
+# `regex` instead of `regex-lite`) — none of which this crate touches. On a cold
+# `cargo build --all-features` those units alone were measured at ~63 s of
+# compile work (zstd-sys 15.9 s, h2 0.3 15.7 s, brotli 8.1 s, regex-automata
+# 7.6 s, encoding_rs 7.1 s, language-tags 5.1 s, regex-syntax 3.9 s).
+#
+# This does NOT take those features away from consumers: an application using
+# the `actix`/`macros` features necessarily has its own `actix-web` dependency,
+# and Cargo unifies features across the graph — whatever that application
+# enables (compression, HTTP/2, WebSockets, …) is enabled for the whole build.
+# It only stops THIS crate from forcing them on builds that never asked.
+#
+# `macros` is kept because this repository's own tests and the
+# `actix_route_guard` example use `#[actix_web::test]` / `#[get]`.
+actix-web = { version = "4", default-features = false, features = ["cookies", "macros"], optional = true }
 # Constant-time comparison for the CSRF double-submit check in
 # `middleware::actix::csrf_valid`. See the `actix` feature comment above for
 # why this adds no new supply-chain surface.
@@ -169,6 +197,26 @@ ed25519-dalek = "3"
 [package.metadata.docs.rs]
 all-features = true
 
+# ⚠ SCOPE OF THIS PROFILE — READ BEFORE ASSUMING IT HELPS CONSUMERS.
+#
+# Cargo applies the `[profile.*]` tables of the WORKSPACE ROOT of the build
+# being run, and of nothing else. When `axiam-sdk` is a dependency, the root is
+# the *consumer's* workspace, so everything below is **ignored** — the SDK
+# compiles under whatever profile the consuming binary declares (by default
+# `opt-level = 3`, `lto = false`, `codegen-units = 16`). A `[profile.*]` table
+# in a dependency, or in a non-root workspace member, is silently discarded;
+# cargo only prints "profiles for the non root package will be ignored" for the
+# latter. (That warning is why the identical table was removed from
+# `axiam-sdk-macros/Cargo.toml`.)
+#
+# So this table governs exactly two things: `cargo build --release` /
+# `cargo bench` **inside this repository** (the examples, the benches, and the
+# `cargo publish --dry-run` verification build). It is not, and cannot be, a
+# performance setting shipped to users.
+#
+# Consumers who want whole-program LTO across the SDK must set it in their own
+# top-level `Cargo.toml`; see "Release-profile tuning (for consumers)" in
+# README.md for the copy-pasteable block.
 [profile.release]
 opt-level = 3         # Maximum optimization for speed.
 lto = "fat"           # Whole-program LTO across all crates (== `true`); best
@@ -206,3 +254,11 @@ required-features = ["amqp"]
 [[example]]
 name = "actix_route_guard"
 required-features = ["actix", "macros"]
+
+# Hot-path micro-benchmark (`harness = false`, no criterion/divan dependency —
+# see the file's module docs for why). Measures `JwksVerifier::verify`, the one
+# SDK code path the §10/§11 route guard runs per inbound request.
+[[bench]]
+name = "jwks_verify"
+harness = false
+required-features = ["rest"]

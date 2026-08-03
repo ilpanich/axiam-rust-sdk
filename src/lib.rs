@@ -78,6 +78,18 @@ pub mod amqp;
 #[cfg(feature = "actix")]
 pub mod middleware;
 
+// CONTRACT.md §13 webhook signature verification (T-145). Pure computation
+// over caller-supplied bytes — no transport of its own — so it is gated on
+// `any(rest, amqp)` rather than on a transport: those are exactly the two
+// feature sets that already vendor its inputs (`hmac`, `sha2`, `hex`,
+// `subtle`), which is why it adds no dependency to either. `rest` is the
+// natural home (webhooks arrive over HTTP and `rest` is on by default, so
+// `verify_webhook` is available out of the box); `amqp` is included because an
+// AMQP-only consumer already has the identical crypto stack and gating a pure
+// HMAC helper away from it would be arbitrary.
+#[cfg(any(feature = "rest", feature = "amqp"))]
+pub mod webhook;
+
 // §11 declarative authorization helpers: re-export the proc-macro attributes
 // from the companion `axiam-sdk-macros` crate so consumers write
 // `use axiam_sdk::require_access;` and never name the macro crate directly.

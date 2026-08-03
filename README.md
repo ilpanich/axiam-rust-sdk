@@ -19,7 +19,8 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§12 (including §6.1 mTLS).
+This SDK conforms to CONTRACT.md §1–§13 (including §6.1 mTLS and §13 webhook signature
+verification).
 
 See [`CONTRACT.md`](CONTRACT.md) for the full cross-language behavioral contract. It is shared
 verbatim across all seven AXIAM SDKs; the copy in this repository is the authority for this
@@ -36,6 +37,7 @@ dependencies for the transports/integrations it actually uses:
 | `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1) — both over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
 | `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
+| — | — | `webhook::verify_webhook` (CONTRACT.md §13) has no feature of its own: it is compiled whenever `rest` **or** `amqp` is on, since both already vendor its `hmac`/`sha2`/`hex`/`subtle` inputs. With the default feature set it is always available |
 | `actix` | off | The `AxiamUser` Actix-Web `FromRequest` extractor (CONTRACT.md §10 route guard). Implies `rest` (shares the same `JwksVerifier`) |
 | `macros` | off | The `#[require_access]` / `#[require_auth]` / `#[require_role]` declarative authorization attribute macros (CONTRACT.md §11), plus the programmatic `middleware::RequireAccess` guard. Implies `actix` |
 
@@ -264,6 +266,58 @@ RequireAccess::new("read")
 
 See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).
 
+### Webhook signature verification (`rest` or `amqp`)
+
+AXIAM signs every webhook delivery with a Stripe-style signed timestamp:
+`X-Axiam-Signature: t=<unix_seconds>,v1=<hex>`, where
+`v1 = HMAC-SHA256(secret, "<t>.<raw_body>")`. `verify_webhook` recomputes the
+MAC, compares it in constant time, and applies a two-sided 300-second freshness
+window (CONTRACT.md §13).
+
+```rust,ignore
+use actix_web::{HttpRequest, HttpResponse, web};
+use axiam_sdk::Sensitive;
+use axiam_sdk::webhook::{WebhookVerifyOptions, verify_webhook};
+
+async fn receive(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    let secret = Sensitive::new(std::env::var("AXIAM_WEBHOOK_SECRET").unwrap());
+    let header = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("");
+
+    let opts = WebhookVerifyOptions::new()
+        .event_type(header("X-Axiam-Event"))
+        .delivery_id(header("X-Axiam-Delivery"))
+        .timestamp_header(header("X-Axiam-Timestamp"));
+
+    // `body` is the UNPARSED request body — see the warning below.
+    match verify_webhook(&secret, header("X-Axiam-Signature"), &body, &opts) {
+        Ok(event) => {
+            if already_seen(event.delivery_id) {
+                return HttpResponse::Ok().finish(); // at-least-once retry
+            }
+            let payload: serde_json::Value = serde_json::from_slice(event.body).unwrap();
+            let _ = payload;
+            HttpResponse::Ok().finish()
+        }
+        // Never echo the error back to the sender.
+        Err(_) => HttpResponse::Unauthorized().finish(),
+    }
+}
+```
+
+> **⚠ Pass the raw body bytes.** `verify_webhook` takes `&[u8]` deliberately.
+> Parsing the body into JSON and re-serializing it changes key order and
+> whitespace, so the recomputed MAC covers different bytes than the server
+> signed and **every genuine delivery is rejected**. Capture the untouched body
+> (`web::Bytes`, `axum::body::Bytes`, `hyper::body::to_bytes`, …), verify, then
+> parse.
+
+> **Deliveries are at-least-once.** A retry replays a *valid* signature inside
+> the freshness window, so a successful verification does not mean a new event.
+> `X-Axiam-Delivery` is the dedup key — keep a short-lived seen-set.
+
+The `tolerance` (default 300 s) and a `now` injection seam for tests are both on
+`WebhookVerifyOptions`.
+
 ## Security notes
 
 - **`Sensitive<T>`** (§7): all token-carrying values redact their raw contents from `Debug`
@@ -308,12 +362,65 @@ let channel = build_channel("https://axiam.example.com:9443", &client.grpc_chann
 # }
 ```
 
+## Release-profile tuning (for consumers)
+
+Cargo applies **only the top-level workspace's** `[profile.*]` tables. The
+`[profile.release]` block in this repository's `Cargo.toml` therefore governs
+this repository's own `cargo build --release` / `cargo bench` — it is *not*
+inherited by anything that depends on `axiam-sdk`, and a `[profile.*]` table in
+any dependency is silently ignored.
+
+If you want whole-program optimization across the SDK, put it in **your own**
+top-level manifest:
+
+```toml
+# your-app/Cargo.toml
+[profile.release]
+opt-level = 3
+lto = "fat"          # cross-crate inlining into axiam-sdk and its deps
+codegen-units = 1    # slower to build, best generated code
+panic = "abort"      # optional; only if your app has no unwinding requirement
+```
+
+Two caveats worth knowing before reaching for these:
+
+- `lto = "fat"` + `codegen-units = 1` mainly buy **link-time** optimization.
+  The SDK's own per-call cost is dominated by network round-trips and by
+  Ed25519/HMAC primitives inside `jsonwebtoken`/`ring` that are already
+  compiled with full optimization, so the runtime gain on SDK code paths is
+  small while the build gets substantially slower.
+- Measure before adopting. `cargo bench --bench jwks_verify --features rest` in
+  this repository measures the SDK's hottest CPU path (per-request access-token
+  verification behind the §10/§11 route guard) against a local mock JWKS
+  endpoint, alongside a "floor" row (`jsonwebtoken::decode` with a pre-built
+  key) that shows how much of the cost the SDK can influence at all.
+
+## Build-time notes
+
+A cold `cargo build --all-features` compiles ~276 crates. The great majority of
+that time is **not** SDK code:
+
+- `aws-lc-sys` — a C build pulled in by `rustls`'s default `aws-lc-rs` crypto
+  provider, via both `reqwest` (`rustls` feature) and `lapin` (default
+  features). On a cold build its build script alone was measured between 65 s
+  and 119 s depending on machine load — comfortably the single largest item.
+  Note that `tonic` is configured for the `ring` provider, so a full-feature
+  build currently compiles **two** rustls crypto backends.
+- The SDK depends on `actix-web` with `default-features = false` precisely to
+  keep the next tier off the graph (brotli/zstd/flate2 compression, `h2` 0.3,
+  the `regex`-based router). Your application's own `actix-web` dependency
+  decides which of those it wants; Cargo unifies features across the graph.
+
+Enabling only the transports you use (`default-features = false, features =
+["rest"]`) is the most effective single lever a consumer has.
+
 ## Development
 
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+cargo bench --bench jwks_verify --features rest   # hot-path micro-benchmark
 ```
 
 Building with the `grpc` feature requires **protoc** on `PATH` (`apt install protobuf-compiler`,
