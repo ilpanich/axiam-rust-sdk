@@ -206,7 +206,10 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
     // was actually set against.
     let refresh = extract_refresh_token_from_jar(&client.inner.jar, &client.url(REFRESH_PATH));
 
-    let claims = client.jwks_verifier().verify(access.expose()).await?;
+    let claims = client
+        .jwks_verifier()
+        .verify_session_token(access.expose())
+        .await?;
 
     let tenant_id = Uuid::parse_str(&claims.tenant_id).ok();
     let org_id = claims
@@ -397,7 +400,10 @@ impl AxiamClient {
                                 &client.inner.jar,
                                 &client.url(REFRESH_PATH),
                             );
-                            let claims = client.jwks_verifier().verify(access.expose()).await?;
+                            let claims = client
+                                .jwks_verifier()
+                                .verify_session_token(access.expose())
+                                .await?;
                             client.capture_csrf_from_jar();
                             let _ = wire.expires_in; // exp is authoritative from claims, not this field
                             Ok(RefreshedTokens {
@@ -431,7 +437,10 @@ impl AxiamClient {
             let access = manager.cached_access_token();
             match access {
                 Some(token) => {
-                    let claims = self.jwks_verifier().verify(token.expose()).await?;
+                    let claims = self
+                        .jwks_verifier()
+                        .verify_session_token(token.expose())
+                        .await?;
                     claims
                         .jti
                         .as_deref()

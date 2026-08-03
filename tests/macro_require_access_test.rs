@@ -32,6 +32,14 @@ const ED25519_PKCS8_DER_PREFIX: [u8; 16] = [
 ];
 const TEST_ED25519_PUBLIC_X: &str = "_r-I_0nRSSV8kvwA93gwhX-hFRiWkaNk5HEud-DjnMk";
 const TEST_KID: &str = "test-kid-1";
+/// CONTRACT.md §10.1 rule 4: the §10 extractor these macros inject asserts
+/// `tenant_id` against the tenant the verifier is configured for, so the
+/// fixture mints tokens for one fixed tenant and configures it below.
+const TEST_TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000c3";
+
+fn test_tenant() -> Uuid {
+    TEST_TENANT.parse().expect("TEST_TENANT is a UUID")
+}
 
 #[derive(Debug, Serialize)]
 struct TestClaims {
@@ -50,7 +58,7 @@ fn issue_token(user_id: Uuid, scope: Option<&str>) -> String {
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: user_id.to_string(),
-        tenant_id: Uuid::new_v4().to_string(),
+        tenant_id: TEST_TENANT.to_string(),
         org_id: Uuid::new_v4().to_string(),
         iss: "axiam-test".to_string(),
         iat: 0,
@@ -86,7 +94,9 @@ async fn mount_jwks(server: &MockServer) {
 
 fn verifier_for(server: &MockServer) -> JwksVerifier {
     let url = url::Url::parse(&server.uri()).expect("valid base url");
-    JwksVerifier::new(reqwest::Client::new(), &url).expect("verifier constructs")
+    JwksVerifier::new(reqwest::Client::new(), &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(test_tenant())
 }
 
 fn client_for(server: &MockServer) -> AxiamClient {

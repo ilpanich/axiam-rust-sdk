@@ -33,6 +33,13 @@ const ED25519_PKCS8_DER_PREFIX: [u8; 16] = [
 /// The raw public key `x` coordinate (base64url, no padding) matching the seed above.
 const TEST_ED25519_PUBLIC_X: &str = "_r-I_0nRSSV8kvwA93gwhX-hFRiWkaNk5HEud-DjnMk";
 const TEST_KID: &str = "test-kid-1";
+/// CONTRACT.md §10.1 rule 4: `verify` asserts `tenant_id` against the tenant
+/// the verifier is configured for, so the fixture mints for one fixed tenant.
+const TEST_TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000f6";
+
+fn test_tenant() -> Uuid {
+    TEST_TENANT.parse().expect("TEST_TENANT is a UUID")
+}
 
 #[derive(Debug, Serialize)]
 struct TestClaims {
@@ -51,7 +58,7 @@ fn issue_test_access_token(exp: i64) -> String {
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
-        tenant_id: Uuid::new_v4().to_string(),
+        tenant_id: TEST_TENANT.to_string(),
         org_id: Uuid::new_v4().to_string(),
         iss: "axiam-test".to_string(),
         iat: 0,
@@ -101,7 +108,9 @@ async fn mount_counting_jwks_server() -> (MockServer, Arc<AtomicUsize>) {
 fn build_verifier(base_url: &str) -> JwksVerifier {
     let http_client = reqwest::Client::new();
     let url = url::Url::parse(base_url).expect("valid base url");
-    JwksVerifier::new(http_client, &url).expect("verifier constructs")
+    JwksVerifier::new(http_client, &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(test_tenant())
 }
 
 #[tokio::test]

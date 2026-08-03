@@ -356,7 +356,19 @@ reason: None,
             source: Some(Box::new(e)),
         })?;
 
-        let jwks_verifier = JwksVerifier::new(http.clone(), &base_url)?;
+        // CONTRACT.md §10.1 rule 4: when the client was built with a tenant
+        // UUID, the verifier it owns is pre-configured with it, so
+        // `JwksVerifier::verify` on this instance is a ready-to-use §10 guard.
+        // A `tenant_slug`-built client has no UUID to compare against, so its
+        // verifier stays unconfigured and `verify` fails closed — the SDK's
+        // own session-absorption path uses `verify_session_token`, which is
+        // explicitly not a guard, and does not depend on this.
+        let jwks_verifier = match &tenant {
+            TenantIdentifier::Id(id) => {
+                JwksVerifier::new(http.clone(), &base_url)?.expect_tenant_id(*id)
+            }
+            TenantIdentifier::Slug(_) => JwksVerifier::new(http.clone(), &base_url)?,
+        };
 
         // CONTRACT.md §12.3 rule 6: discovery-cache TTL floored at 5 minutes,
         // never process-global (owned by this client instance).

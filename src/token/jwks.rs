@@ -39,6 +39,17 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 #[cfg(any(feature = "rest", feature = "actix"))]
 const FORCED_REFETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Clock-skew leeway applied to the `exp` and `nbf` checks (CONTRACT.md
+/// §10.1 rule 7).
+///
+/// A **named, bounded, non-configurable** constant, deliberately fixed at the
+/// contract's RECOMMENDED 60 seconds: rule 7 forbids both an inline literal
+/// and an operator-settable value that could be widened to something
+/// unbounded. There is no setter for it anywhere in this SDK — widening the
+/// window is a source change, reviewable as such.
+#[cfg(any(feature = "rest", feature = "actix"))]
+pub const CLOCK_SKEW_LEEWAY_SECS: u64 = 60;
+
 /// The SDK's own plain claims struct, matching the field names AXIAM issues
 /// in its access tokens (`crates/axiam-auth/src/token.rs::AccessTokenClaims`)
 /// — mirrored, not imported.
@@ -87,6 +98,21 @@ struct CachedJwks {
 /// is always active whenever `actix` is — this `any(...)` gate is kept for
 /// clarity/documentation of the two call sites rather than strict
 /// necessity).
+///
+/// ## CONTRACT.md §10.1 — minimum local-verification set
+///
+/// [`Self::verify`] is the SDK's **documented guard entry point** and applies
+/// every rule of §10.1: EdDSA `alg` pinned before key lookup, a REQUIRED
+/// numeric `exp`, `nbf` honoured when present, `tenant_id` asserted against
+/// the tenant configured with [`Self::expect_tenant_id`] (failing closed when
+/// either is absent), and `iss`/`aud` checked when — and only when —
+/// [`Self::expect_issuer`]/[`Self::expect_audience`] were configured. A
+/// verifier used as a §10 route guard **must** be given an expected tenant;
+/// without one, `verify` rejects every token rather than accepting a token
+/// minted for a sibling tenant under the same organization-wide JWKS.
+///
+/// [`Self::verify_signature_only_unchecked`] is the §10.1 "raw signature-only
+/// primitive" escape hatch. It is deliberately *not* the guard entry point.
 #[cfg(any(feature = "rest", feature = "actix"))]
 pub struct JwksVerifier {
     http_client: reqwest::Client,
@@ -97,6 +123,15 @@ pub struct JwksVerifier {
     /// (D-08/D-09). Guards ONLY the fetch — a coalescing wrapper, never the
     /// cryptographic verify path.
     fetch_lock: tokio::sync::Mutex<()>,
+    /// §10.1 rule 4: the tenant every verified token MUST be scoped to.
+    /// `None` means "not configured", which makes [`Self::verify`] fail
+    /// closed — never "no tenant constraint".
+    expected_tenant_id: Option<uuid::Uuid>,
+    /// §10.1 rule 5: expected `iss`. `None` means the check is not performed
+    /// (the rule is explicitly conditional on configuration).
+    expected_issuer: Option<String>,
+    /// §10.1 rule 6: expected `aud`. `None` means the check is not performed.
+    expected_audience: Option<String>,
 }
 
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -113,7 +148,57 @@ impl JwksVerifier {
             jwks_url,
             cache: RwLock::new(None),
             fetch_lock: tokio::sync::Mutex::new(()),
+            expected_tenant_id: None,
+            expected_issuer: None,
+            expected_audience: None,
         })
+    }
+
+    /// Configure the tenant every token accepted by [`Self::verify`] must be
+    /// scoped to (CONTRACT.md §10.1 rule 4) — **required** for any verifier
+    /// used as a §10 route guard.
+    ///
+    /// The `/oauth2/jwks` trust anchor is organization-wide, so a valid
+    /// signature says only "some tenant in this organization", never "this
+    /// tenant". Without this call [`Self::verify`] fails closed on every
+    /// token.
+    ///
+    /// ```no_run
+    /// # use axiam_sdk::token::JwksVerifier;
+    /// # fn demo(http: reqwest::Client, base: url::Url, tenant: uuid::Uuid)
+    /// #     -> Result<(), axiam_sdk::AxiamError> {
+    /// let verifier = JwksVerifier::new(http, &base)?.expect_tenant_id(tenant);
+    /// # let _ = verifier;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn expect_tenant_id(mut self, tenant_id: uuid::Uuid) -> Self {
+        self.expected_tenant_id = Some(tenant_id);
+        self
+    }
+
+    /// Configure the expected `iss` claim (CONTRACT.md §10.1 rule 5).
+    ///
+    /// Optional and unset by default — the rule is conditional, and this SDK
+    /// never hardcodes an issuer. When set, a token whose `iss` differs is
+    /// rejected by [`Self::verify`].
+    #[must_use]
+    pub fn expect_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.expected_issuer = Some(issuer.into());
+        self
+    }
+
+    /// Configure the expected `aud` claim (CONTRACT.md §10.1 rule 6).
+    ///
+    /// Optional and unset by default. A resource server guarding user-facing
+    /// routes SHOULD set `"axiam:user"`; a machine-to-machine one
+    /// `"axiam:m2m"`. When set, a token whose `aud` does not match is
+    /// rejected by [`Self::verify`].
+    #[must_use]
+    pub fn expect_audience(mut self, audience: impl Into<String>) -> Self {
+        self.expected_audience = Some(audience.into());
+        self
     }
 
     /// Construct a verifier against an **already-absolute** JWKS URL
@@ -128,6 +213,9 @@ impl JwksVerifier {
             jwks_url,
             cache: RwLock::new(None),
             fetch_lock: tokio::sync::Mutex::new(()),
+            expected_tenant_id: None,
+            expected_issuer: None,
+            expected_audience: None,
         }
     }
 
@@ -233,16 +321,160 @@ impl JwksVerifier {
         Ok(data.claims)
     }
 
-    /// Verify `token`'s EdDSA signature and standard claims (`exp`) against
-    /// the cached JWKS, fetching/refetching as needed. Rejects any
-    /// non-EdDSA `alg` header.
+    /// Verify an inbound AXIAM access token against the **complete**
+    /// CONTRACT.md §10.1 minimum local-verification set. This is the SDK's
+    /// documented guard entry point — the §10 [`AxiamUser`] extractor and the
+    /// §11 `require_*` macros (which inject that extractor) both land here.
+    ///
+    /// | § | rule | how it is enforced |
+    /// |---|---|---|
+    /// | 1 | signature | `alg` read from the header and pinned to `EdDSA` **before** the JWKS is consulted, so `alg: none` and an HS-signed token bearing an EdDSA `kid` are rejected without a key lookup; the Ed25519 signature is then checked against the org JWKS. |
+    /// | 2 | `exp` | REQUIRED: `exp` is in `required_spec_claims` *and* a non-`Option` field of [`Claims`], so an absent or non-numeric `exp` is rejected. |
+    /// | 3 | `nbf` | `validate_nbf` enabled — a future `nbf` is rejected, an absent one is fine. |
+    /// | 4 | `tenant_id` | asserted against [`Self::expect_tenant_id`]; **fails closed** when the claim is absent/not a UUID, and when no expected tenant was configured at all. |
+    /// | 5 | `iss` | checked only when [`Self::expect_issuer`] was called. |
+    /// | 6 | `aud` | checked only when [`Self::expect_audience`] was called. |
+    /// | 7 | clock skew | [`CLOCK_SKEW_LEEWAY_SECS`] — a named, bounded, non-configurable 60 s. |
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Auth`] on any failed rule (the SDK never distinguishes
+    /// "no `tenant_id` to check" from "wrong `tenant_id`" — both reject), or
+    /// [`AxiamError::Network`] if the JWKS itself is unreachable.
+    ///
+    /// [`AxiamUser`]: crate::middleware::AxiamUser
     pub async fn verify(&self, token: &str) -> Result<Claims, AxiamError> {
+        let claims = self.verify_claims(token).await?;
+        self.assert_tenant(&claims)?;
+        Ok(claims)
+    }
+
+    /// Verify **only** the EdDSA signature of `token` against the org JWKS —
+    /// CONTRACT.md §10.1's "raw signature-only primitive".
+    ///
+    /// # This is not a guard
+    ///
+    /// It performs **no** `exp`, `nbf`, `tenant_id`, `iss` or `aud` check
+    /// whatsoever. An expired token, a not-yet-valid token, and a token
+    /// minted for a *different tenant* in the same organization all pass. It
+    /// exists purely for integrators deliberately implementing their own
+    /// policy on top of the signature; the `_unchecked` suffix is there to
+    /// make that omission obvious at the call site. Anything guarding a route
+    /// MUST call [`Self::verify`] instead.
+    ///
+    /// (`exp` must still be *present and numeric* simply because [`Claims`]
+    /// declares it as a non-`Option` `i64`; nothing checks whether it has
+    /// passed.)
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Auth`] if the `alg` is not EdDSA, the `kid` is unknown,
+    /// the signature does not verify, or the payload is not shaped like
+    /// [`Claims`]; [`AxiamError::Network`] if the JWKS is unreachable.
+    pub async fn verify_signature_only_unchecked(&self, token: &str) -> Result<Claims, AxiamError> {
+        let decoding_key = self.decoding_key_for(token).await?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.required_spec_claims.clear();
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.validate_aud = false;
+        validation.leeway = 0;
+
+        decode_claims(token, &decoding_key, &validation)
+    }
+
+    /// The client's own freshly-issued session token, decoded to learn the
+    /// identity the server just handed us (`login`/`verify_mfa`/`refresh`/
+    /// `logout`).
+    ///
+    /// **Not a §10 guard, and deliberately not `verify`.** §10.1 governs
+    /// relying-party verification of a token that arrived from an untrusted
+    /// caller; this path decodes a token this very client just received in
+    /// the TLS response of its own authenticated request to the configured
+    /// `base_url`. Rule 4 cannot apply here in either direction: the
+    /// `tenant_id` claim is what the client is *learning* (a client built
+    /// with a `tenant_slug` has no tenant UUID to compare against yet), so
+    /// asserting it would be circular. Every other rule — alg pinning,
+    /// required numeric `exp`, `nbf`, the configured-only `iss`/`aud`, and
+    /// the shared [`CLOCK_SKEW_LEEWAY_SECS`] — is applied exactly as in
+    /// [`Self::verify`].
+    pub(crate) async fn verify_session_token(&self, token: &str) -> Result<Claims, AxiamError> {
+        self.verify_claims(token).await
+    }
+
+    /// Everything in §10.1 except rule 4 (the tenant assertion), shared by
+    /// [`Self::verify`] and [`Self::verify_session_token`].
+    async fn verify_claims(&self, token: &str) -> Result<Claims, AxiamError> {
+        let decoding_key = self.decoding_key_for(token).await?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        // Rule 7: one named, bounded, non-operator-settable leeway for both
+        // the `exp` and the `nbf` comparison.
+        validation.leeway = CLOCK_SKEW_LEEWAY_SECS;
+        // Rule 2: `exp` is REQUIRED, not "checked if present". Two
+        // independent gates enforce it, and either is sufficient:
+        // `Claims::exp` is a non-`Option` `i64`, so serde rejects an absent
+        // or non-numeric `exp` while deserializing (jsonwebtoken decodes `T`
+        // before it validates, so in practice this is the one that trips);
+        // and `required_spec_claims` covers the same ground at the
+        // validation layer. jsonwebtoken already defaults the latter to
+        // `{"exp"}` — setting it explicitly keeps the guarantee from
+        // silently changing under a dependency bump.
+        validation.set_required_spec_claims(&["exp"]);
+        validation.validate_exp = true;
+        // Rule 3: honour `nbf` when present (jsonwebtoken defaults this to
+        // `false`, i.e. a future-dated token would otherwise be accepted).
+        // An absent `nbf` stays valid — it is not in `required_spec_claims`.
+        validation.validate_nbf = true;
+
+        // Rules 5 and 6 are CONDITIONAL: only checked when this verifier was
+        // configured with an expected value. Note that leaving
+        // `validate_aud` at jsonwebtoken's `true` default while
+        // `validation.aud` is `None` rejects every token that merely *has* an
+        // `aud` — i.e. every real AXIAM access token — so it is switched off
+        // unless an expectation was actually configured.
+        //
+        // Configuring an expectation also makes the corresponding claim
+        // REQUIRED: jsonwebtoken only compares a claim it can see, so an
+        // absent `aud` against a configured expectation would otherwise slip
+        // through ("the claim was missing so there was nothing to check" —
+        // the SEC-080 shape). A token whose `aud` does not contain the
+        // expected value is rejected, and an absent `aud` does not contain
+        // it.
+        match self.expected_issuer.as_deref() {
+            Some(iss) => {
+                validation.set_issuer(&[iss]);
+                validation.required_spec_claims.insert("iss".to_string());
+            }
+            None => validation.iss = None,
+        }
+        match self.expected_audience.as_deref() {
+            Some(aud) => {
+                validation.validate_aud = true;
+                validation.set_audience(&[aud]);
+                validation.required_spec_claims.insert("aud".to_string());
+            }
+            None => {
+                validation.validate_aud = false;
+                validation.aud = None;
+            }
+        }
+
+        decode_claims(token, &decoding_key, &validation)
+    }
+
+    /// §10.1 rule 1's first half: pin `alg` to EdDSA from the header
+    /// **before** any JWKS lookup, then resolve the `kid` to a decoding key.
+    async fn decoding_key_for(&self, token: &str) -> Result<DecodingKey, AxiamError> {
         let header = decode_header(token).map_err(|e| AxiamError::Auth {
             message: format!("invalid token header: {e}"),
             oauth: None,
             reason: None,
         })?;
 
+        // Rule 1: rejected WITHOUT consulting a key — `alg: none` and every
+        // HS-family confusion attempt dies here, before `get_or_fetch`.
         if header.alg != Algorithm::EdDSA {
             return Err(AxiamError::Auth {
                 message: "unexpected alg: only EdDSA is accepted".into(),
@@ -268,52 +500,45 @@ impl JwksVerifier {
             }
         };
 
-        let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| AxiamError::Auth {
+        DecodingKey::from_jwk(&jwk).map_err(|_| AxiamError::Auth {
             message: "unable to build decoding key from JWK".into(),
+            oauth: None,
+            reason: None,
+        })
+    }
+
+    /// §10.1 rule 4 — the `tenant_id` claim MUST equal the configured tenant.
+    ///
+    /// Fails closed on all three ways this can go wrong: no configured
+    /// tenant, an unparseable/absent claim, and a mismatch. "There was no
+    /// tenant to compare against, so there was nothing to check" is the
+    /// `SEC-080` defect, not a pass.
+    fn assert_tenant(&self, claims: &Claims) -> Result<(), AxiamError> {
+        let expected = self.expected_tenant_id.ok_or_else(|| AxiamError::Auth {
+            message: "JWKS verifier has no expected tenant configured; refusing to accept a \
+                      token (CONTRACT.md §10.1 rule 4 — call \
+                      JwksVerifier::expect_tenant_id before using it as a route guard)"
+                .into(),
             oauth: None,
             reason: None,
         })?;
 
-        let mut validation = Validation::new(Algorithm::EdDSA);
-        validation.leeway = 0; // SDK talks to its own issuer; no federation clock skew.
-        // H8 fix (SDK bench harness validation): this verifies AXIAM's own
-        // access/refresh-derived tokens (called from
-        // `rest::auth::absorb_session_cookies` right after login/refresh),
-        // whose `aud` is always one of the two fixed, well-known constants
-        // `axiam:user` / `axiam:m2m` (crates/axiam-auth/src/token.rs
-        // AUD_USER/AUD_M2M) — not an RP-specific client_id the way an OIDC
-        // id_token's `aud` is (that RP-audience check is a *different*,
-        // already-correct code path: the sibling `verify_claims` above,
-        // via `crate::oidc::id_token`'s own checklist, at `validation.
-        // validate_aud = false` two branches up). Without this,
-        // jsonwebtoken's default `validate_aud = true` with no configured
-        // `validation.aud` rejects EVERY token that carries an `aud` claim
-        // — i.e. every real AXIAM access token — with `InvalidAudience`,
-        // so `login()`/`refresh()` always failed against a live server.
-        validation.validate_aud = false;
+        let actual =
+            uuid::Uuid::parse_str(claims.tenant_id.trim()).map_err(|_| AxiamError::Auth {
+                message: "token tenant_id claim is absent or not a UUID".into(),
+                oauth: None,
+                reason: None,
+            })?;
 
-        let data = decode::<Claims>(token, &decoding_key, &validation).map_err(|e| {
-            use jsonwebtoken::errors::ErrorKind;
-            match e.kind() {
-                ErrorKind::InvalidSignature => AxiamError::Auth {
-                    message: "token signature invalid".into(),
-                    oauth: None,
-                    reason: None,
-                },
-                ErrorKind::ExpiredSignature => AxiamError::Auth {
-                    message: "token expired".into(),
-                    oauth: None,
-                    reason: None,
-                },
-                _ => AxiamError::Auth {
-                    message: format!("token claim validation failed: {e}"),
-                    oauth: None,
-                    reason: None,
-                },
-            }
-        })?;
+        if actual != expected {
+            return Err(AxiamError::Auth {
+                message: "token tenant_id does not match the configured tenant".into(),
+                oauth: None,
+                reason: None,
+            });
+        }
 
-        Ok(data.claims)
+        Ok(())
     }
 
     async fn get_or_fetch(&self) -> Result<JwkSet, AxiamError> {
@@ -410,6 +635,47 @@ impl JwksVerifier {
 
         Ok(jwks)
     }
+}
+
+/// Decode `token` into [`Claims`] under `validation`, translating
+/// `jsonwebtoken`'s error kinds into the SDK's [`AxiamError::Auth`] messages.
+///
+/// Every failure mode — bad signature, expired, not-yet-valid, missing or
+/// mistyped `exp`, wrong issuer/audience, a payload that is not shaped like
+/// [`Claims`] — funnels through here and is a rejection. There is no branch
+/// that turns a claim it could not evaluate into success.
+#[cfg(any(feature = "rest", feature = "actix"))]
+fn decode_claims(
+    token: &str,
+    decoding_key: &DecodingKey,
+    validation: &Validation,
+) -> Result<Claims, AxiamError> {
+    let data = decode::<Claims>(token, decoding_key, validation).map_err(|e| {
+        use jsonwebtoken::errors::ErrorKind;
+        let message = match e.kind() {
+            ErrorKind::InvalidSignature => "token signature invalid".to_string(),
+            ErrorKind::ExpiredSignature => "token expired".to_string(),
+            ErrorKind::ImmatureSignature => "token is not valid yet (nbf is in the future)".into(),
+            ErrorKind::MissingRequiredClaim(claim) => {
+                format!("token is missing the required {claim} claim")
+            }
+            ErrorKind::InvalidClaimFormat(claim) => {
+                format!("token {claim} claim is not a number")
+            }
+            ErrorKind::InvalidIssuer => "token issuer does not match the expected issuer".into(),
+            ErrorKind::InvalidAudience => {
+                "token audience does not match the expected audience".into()
+            }
+            _ => format!("token claim validation failed: {e}"),
+        };
+        AxiamError::Auth {
+            message,
+            oauth: None,
+            reason: None,
+        }
+    })?;
+
+    Ok(data.claims)
 }
 
 /// Find a JWK by `kid` in a JWK set. If `kid` is `None` and the set has

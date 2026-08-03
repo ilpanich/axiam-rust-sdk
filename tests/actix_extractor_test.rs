@@ -36,6 +36,14 @@ const ED25519_PKCS8_DER_PREFIX: [u8; 16] = [
 /// The raw public key `x` coordinate (base64url, no padding) matching the seed above.
 const TEST_ED25519_PUBLIC_X: &str = "_r-I_0nRSSV8kvwA93gwhX-hFRiWkaNk5HEud-DjnMk";
 const TEST_KID: &str = "test-kid-1";
+/// CONTRACT.md §10.1 rule 4: `JwksVerifier::verify` asserts `tenant_id`
+/// against the verifier's configured tenant, so every fixture token in this
+/// file is minted for one fixed tenant and `build_verifier` expects it.
+const TEST_TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000d4";
+
+fn test_tenant() -> Uuid {
+    TEST_TENANT.parse().expect("TEST_TENANT is a UUID")
+}
 
 #[derive(Debug, Serialize)]
 struct TestClaims {
@@ -107,7 +115,9 @@ async fn mount_jwks_server() -> MockServer {
 fn build_verifier(base_url: &str) -> JwksVerifier {
     let http_client = reqwest::Client::new();
     let url = url::Url::parse(base_url).expect("valid base url");
-    JwksVerifier::new(http_client, &url).expect("verifier constructs")
+    JwksVerifier::new(http_client, &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(test_tenant())
 }
 
 #[tokio::test]
@@ -115,7 +125,7 @@ async fn cookie_path_extracts_axiam_user() {
     let mock_server = mount_jwks_server().await;
     let verifier = build_verifier(&mock_server.uri());
 
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let org_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     let jti = Uuid::new_v4();
@@ -151,7 +161,7 @@ async fn bearer_header_path_extracts_axiam_user_when_no_cookie() {
     let mock_server = mount_jwks_server().await;
     let verifier = build_verifier(&mock_server.uri());
 
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let org_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     let jti = Uuid::new_v4();
@@ -256,7 +266,7 @@ async fn expired_token_yields_401() {
     let verifier = build_verifier(&mock_server.uri());
 
     let token = issue_test_access_token(
-        Uuid::new_v4(),
+        test_tenant(),
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -287,7 +297,7 @@ async fn cookie_auth_state_changing_without_csrf_header_yields_403() {
     let verifier = build_verifier(&mock_server.uri());
 
     let token = issue_test_access_token(
-        Uuid::new_v4(),
+        test_tenant(),
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -333,7 +343,7 @@ async fn cookie_auth_state_changing_with_matching_csrf_token_succeeds() {
     let mock_server = mount_jwks_server().await;
     let verifier = build_verifier(&mock_server.uri());
 
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let user_id = Uuid::new_v4();
     let token = issue_test_access_token(
         tenant_id,
@@ -371,7 +381,7 @@ async fn bearer_auth_state_changing_without_csrf_succeeds() {
     let mock_server = mount_jwks_server().await;
     let verifier = build_verifier(&mock_server.uri());
 
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let user_id = Uuid::new_v4();
     let token = issue_test_access_token(
         tenant_id,
@@ -405,7 +415,7 @@ async fn cookie_auth_safe_method_without_csrf_succeeds() {
     let mock_server = mount_jwks_server().await;
     let verifier = build_verifier(&mock_server.uri());
 
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let user_id = Uuid::new_v4();
     let token = issue_test_access_token(
         tenant_id,
@@ -440,7 +450,7 @@ async fn local_verification_makes_no_outbound_axiam_server_request() {
     let mock_server = mount_jwks_server().await;
     let verifier = build_verifier(&mock_server.uri());
 
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let user_id = Uuid::new_v4();
     let token = issue_test_access_token(
         tenant_id,
@@ -471,7 +481,7 @@ async fn local_verification_makes_no_outbound_axiam_server_request() {
 /// panic on the `.ok_or_else(...)?`.
 #[tokio::test]
 async fn missing_jwks_verifier_app_data_yields_401() {
-    let tenant_id = Uuid::new_v4();
+    let tenant_id = test_tenant();
     let token = issue_test_access_token(
         tenant_id,
         Uuid::new_v4(),
@@ -597,7 +607,7 @@ async fn cookie_auth_state_changing_with_csrf_header_but_no_csrf_cookie_yields_4
     let verifier = build_verifier(&mock_server.uri());
 
     let token = issue_test_access_token(
-        Uuid::new_v4(),
+        test_tenant(),
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -660,7 +670,7 @@ async fn cookie_auth_state_changing_with_mismatched_csrf_token_yields_403() {
     let verifier = build_verifier(&mock_server.uri());
 
     let token = issue_test_access_token(
-        Uuid::new_v4(),
+        test_tenant(),
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),

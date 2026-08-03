@@ -11,6 +11,19 @@
 //! 2. Verify the token locally against the cached JWKS from 16-02's
 //!    [`crate::token::JwksVerifier`] via `app_data` — no AXIAM-server
 //!    round-trip (§10.2).
+//!
+//!    This is the **complete §10.1 minimum local-verification set**, applied
+//!    by [`crate::token::JwksVerifier::verify`]: EdDSA `alg` pinned before
+//!    key lookup, a required numeric `exp`, `nbf` honoured when present,
+//!    `tenant_id` asserted against the verifier's configured tenant, and
+//!    `iss`/`aud` checked when configured. The registered verifier therefore
+//!    **must** be built with
+//!    [`expect_tenant_id`](crate::token::JwksVerifier::expect_tenant_id):
+//!    the `/oauth2/jwks` trust anchor is organization-wide, so without it
+//!    every token — including one minted for a sibling tenant — is rejected
+//!    (fail closed, §10.1 rule 4). The §11 `require_auth`/`require_access`/
+//!    `require_role` macros inject this same extractor, so they inherit the
+//!    identical set with no separate verification path of their own.
 //! 3. Build and inject `AxiamUser { user_id, tenant_id, roles }` from the
 //!    verified claims (§10.3).
 //! 4. Map `AuthError` -> HTTP 401 and `AuthzError` -> HTTP 403 with a

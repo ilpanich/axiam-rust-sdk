@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — BREAKING
+
+- **`JwksVerifier::verify` now applies the complete CONTRACT §10.1 "minimum
+  local-verification set".** §10.1 is a new normative section written because
+  `SEC-071` and `SEC-080` were the same defect found independently in two
+  SDKs: each verified a *different subset* of the token, and each subset
+  looked complete in isolation. This SDK was audited against the stated
+  complete set for the first time; three rules were missing and are now
+  enforced. Every §10 / §11 entry point routes through the same call — the
+  Actix `AxiamUser` extractor, and the `require_auth` / `require_access` /
+  `require_role` macros, which inject that extractor rather than verifying
+  anything themselves.
+
+  This **tightens acceptance** and is therefore breaking, as §10.1 requires it
+  to be called out. A token minted by the AXIAM server is unaffected — it
+  always carries `exp` and never a future `nbf` — but a guard fed tokens from
+  another signer sharing the organization JWKS may start rejecting what it
+  used to accept. That is the intent.
+
+  - **`nbf` is now honoured (rule 3).** `jsonwebtoken` defaults `validate_nbf`
+    to `false`, so a token dated into the future previously verified.
+    `validate_nbf` is now enabled; an absent `nbf` remains valid.
+  - **`tenant_id` is now asserted (rule 4).** The `/oauth2/jwks` trust anchor
+    is *organization-wide*, so a valid signature only ever proved "some tenant
+    in this organization". `verify` now requires an expected tenant, set with
+    the new `JwksVerifier::expect_tenant_id(Uuid)`, and rejects a token whose
+    `tenant_id` is absent, unparseable, or different. **A verifier with no
+    expected tenant configured now rejects every token (fail closed).** Any
+    application registering a `JwksVerifier` as Actix `app_data` for the §10
+    extractor must add `.expect_tenant_id(...)`; an `AxiamClient` built with
+    `tenant_id(uuid)` pre-configures the verifier it owns.
+  - **Clock skew is now a named, bounded constant (rule 7).** The previous
+    inline `validation.leeway = 0` becomes the exported
+    `axiam_sdk::token::CLOCK_SKEW_LEEWAY_SECS` at the contract's RECOMMENDED
+    60 seconds, applied to both `exp` and `nbf`. It is deliberately not
+    operator-configurable, so it can never be widened to an unbounded value.
+    Note this makes the `exp` check 60 s *more* tolerant than before.
+  - `exp` (rule 2) and the `alg`-pinned signature check (rule 1) were already
+    correct and are unchanged: `Claims::exp` is a non-`Option` `i64` and
+    `required_spec_claims` contains `"exp"`, so an absent or non-numeric `exp`
+    was — and is — rejected; `alg` is read from the header and compared to
+    `EdDSA` *before* the JWKS is consulted, so `alg: none` and an HS-signed
+    token bearing an EdDSA `kid` are both rejected without a key lookup.
+
+- The client's own session-absorption path (`login`/`verify_mfa`/`refresh`/
+  `logout`) now calls a new crate-internal `verify_session_token` instead of
+  `verify`. It applies every §10.1 rule except the tenant assertion, which
+  cannot apply there: that path decodes a token the client just received over
+  TLS from its own authenticated request, and the `tenant_id` claim is what it
+  is *learning* (a `tenant_slug`-built client has no tenant UUID to compare
+  against yet). No public API changes; no relaxation of any check that
+  previously ran on that path.
+
+### Added
+
+- **Conditional issuer/audience expectations (CONTRACT §10.1 rules 5 and 6).**
+  New `JwksVerifier::expect_issuer(impl Into<String>)` and
+  `JwksVerifier::expect_audience(impl Into<String>)`, both optional and unset
+  by default — the rules are explicitly conditional on configuration, and the
+  SDK never hardcodes an expected issuer. When configured, a mismatched value
+  is rejected, and the corresponding claim additionally becomes required (an
+  absent `aud` does not "contain" the expected audience).
+- **`JwksVerifier::verify_signature_only_unchecked`** — the §10.1 raw
+  signature-only primitive, for integrators deliberately implementing their
+  own policy. It verifies the EdDSA signature and *nothing else*: no `exp`,
+  `nbf`, `tenant_id`, `iss` or `aud` check. The `_unchecked` suffix is the
+  contract's reference spelling, chosen so the omission is obvious at the call
+  site. It is not, and must not become, the documented guard entry point.
+- `tests/local_verification_set_test.rs` — the complete §10.1 required
+  negative-test set: expired; no `exp`; non-numeric `exp`; future `nbf`;
+  different tenant; no `tenant_id`; no configured tenant; `alg: none`;
+  HS-signed token bearing the EdDSA `kid`; foreign signature; plus
+  issuer-mismatch and audience-mismatch cases for the newly-configurable
+  expectations, and proof that the raw primitive waves through exactly what
+  the guard rejects.
+- CONTRACT.md in this repository is re-synced with the upstream
+  `ilpanich/axiam` copy: §10.1 is vendored verbatim.
+
 ### Added
 
 - **Webhook signature verification (CONTRACT §13, T-145).** New
