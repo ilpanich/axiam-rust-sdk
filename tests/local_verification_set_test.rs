@@ -1,0 +1,466 @@
+//! CONTRACT.md §10.1 "Minimum local-verification set" — the complete required
+//! negative-test set, asserted against the SDK's local-verification entry
+//! points: [`JwksVerifier::verify`] (the documented guard) and, through it,
+//! the §10 Actix `AxiamUser` extractor that the §11 `require_*` macros inject.
+//!
+//! §10.1 exists because `SEC-071` and `SEC-080` were the same defect found
+//! twice: each SDK verified a *different subset* of the token, and each subset
+//! looked complete in isolation. This file is the stated complete set, so a
+//! future change that quietly drops one rule fails here instead of in
+//! production.
+
+#![cfg(feature = "rest")]
+
+use axiam_sdk::AxiamError;
+use axiam_sdk::token::{CLOCK_SKEW_LEEWAY_SECS, JwksVerifier};
+use base64::Engine as _;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use serde_json::{Value, json};
+use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const TEST_ED25519_SEED: [u8; 32] = [
+    0x74, 0x8c, 0x0b, 0xd3, 0xad, 0xc0, 0x28, 0x0a, 0xfd, 0xd7, 0xc0, 0x7c, 0x35, 0x07, 0x03, 0x64,
+    0x6d, 0x14, 0x2d, 0x1d, 0xbd, 0x73, 0x4c, 0xd4, 0xf8, 0x17, 0x17, 0x0b, 0x91, 0x7b, 0x49, 0xfc,
+];
+const ED25519_PKCS8_DER_PREFIX: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+const TEST_ED25519_PUBLIC_X: &str = "_r-I_0nRSSV8kvwA93gwhX-hFRiWkaNk5HEud-DjnMk";
+const TEST_KID: &str = "sec-101-kid";
+const TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000a1";
+const OTHER_TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000b2";
+const ISSUER: &str = "https://iam.example.com";
+
+fn tenant_uuid() -> Uuid {
+    TENANT.parse().expect("tenant const is a UUID")
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock is after the epoch")
+        .as_secs() as i64
+}
+
+fn ed25519_key() -> EncodingKey {
+    let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    der.extend_from_slice(&TEST_ED25519_SEED);
+    EncodingKey::from_ed_der(&der)
+}
+
+/// A claims object satisfying every §10.1 rule, before a test breaks one.
+fn good_claims() -> Value {
+    json!({
+        "sub": Uuid::new_v4().to_string(),
+        "tenant_id": TENANT,
+        "org_id": Uuid::new_v4().to_string(),
+        "iss": ISSUER,
+        "aud": "axiam:user",
+        "iat": now() - 60,
+        "exp": now() + 3600,
+        "jti": Uuid::new_v4().to_string(),
+        "scope": "read write",
+    })
+}
+
+fn sign_eddsa(claims: &Value) -> String {
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    jsonwebtoken::encode(&header, claims, &ed25519_key()).expect("encode EdDSA token")
+}
+
+/// Serve the org-wide JWKS with the one Ed25519 key the tests sign against.
+async fn jwks_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": TEST_KID,
+                "alg": "EdDSA",
+                "x": TEST_ED25519_PUBLIC_X,
+            }]
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A guard-shaped verifier: an expected tenant is configured, as §10.1 rule 4
+/// requires of anything used as a route guard.
+fn guard_verifier(base_url: &str) -> JwksVerifier {
+    let url = url::Url::parse(base_url).expect("valid base url");
+    JwksVerifier::new(reqwest::Client::new(), &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(tenant_uuid())
+}
+
+fn assert_auth_error_containing(err: AxiamError, needle: &str) {
+    match err {
+        AxiamError::Auth { message, .. } => assert!(
+            message.contains(needle),
+            "expected message containing {needle:?}, got {message:?}"
+        ),
+        other => panic!("expected AxiamError::Auth, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------- control --
+
+#[tokio::test]
+async fn accepts_a_token_that_satisfies_every_rule() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri())
+        .expect_issuer(ISSUER)
+        .expect_audience("axiam:user");
+    let token = sign_eddsa(&good_claims());
+
+    let claims = verifier
+        .verify(&token)
+        .await
+        .expect("control token verifies");
+    assert_eq!(claims.tenant_id, TENANT);
+}
+
+// ------------------------------------------------- rule 1: signature / alg --
+
+#[tokio::test]
+async fn rule1_rejects_alg_none_without_consulting_a_key() {
+    // No JWKS mock is mounted at all: if the implementation reached a key
+    // lookup, the request would fail as a *network* error rather than an
+    // auth error, which is exactly what this assertion distinguishes.
+    let url = url::Url::parse("https://iam.invalid").expect("url");
+    let verifier = JwksVerifier::new(reqwest::Client::new(), &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(tenant_uuid());
+
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    // The `kid` names a real published key — only the `alg` header may sink it.
+    let header = b64.encode(json!({"alg": "none", "kid": TEST_KID}).to_string());
+    let payload = b64.encode(good_claims().to_string());
+    let token = format!("{header}.{payload}.");
+
+    let err = verifier
+        .verify(&token)
+        .await
+        .expect_err("alg: none must be rejected");
+    assert_auth_error_containing(err, "EdDSA");
+}
+
+#[tokio::test]
+async fn rule1_rejects_an_hs_signed_token_bearing_the_eddsa_kid() {
+    // Same reasoning: no JWKS mock, so reaching a key lookup would surface as
+    // a network error instead of the alg rejection asserted below.
+    let url = url::Url::parse("https://iam.invalid").expect("url");
+    let verifier = JwksVerifier::new(reqwest::Client::new(), &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(tenant_uuid());
+
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(TEST_KID.to_string());
+    let token = jsonwebtoken::encode(
+        &header,
+        &good_claims(),
+        &EncodingKey::from_secret(b"irrelevant-shared-secret"),
+    )
+    .expect("encode HS256 token");
+
+    let err = verifier
+        .verify(&token)
+        .await
+        .expect_err("HS-family confusion must be rejected");
+    assert_auth_error_containing(err, "EdDSA");
+}
+
+#[tokio::test]
+async fn rule1_rejects_a_token_signed_by_a_foreign_key() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+
+    let mut wrong_seed = TEST_ED25519_SEED;
+    wrong_seed[0] ^= 0xFF;
+    let mut wrong_der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    wrong_der.extend_from_slice(&wrong_seed);
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    let token = jsonwebtoken::encode(
+        &header,
+        &good_claims(),
+        &EncodingKey::from_ed_der(&wrong_der),
+    )
+    .expect("encode token signed with the wrong key");
+
+    let err = verifier
+        .verify(&token)
+        .await
+        .expect_err("a foreign signature must be rejected");
+    assert_auth_error_containing(err, "signature");
+}
+
+// -------------------------------------------------------------- rule 2: exp --
+
+#[tokio::test]
+async fn rule2_rejects_an_expired_token() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["exp"] = json!(now() - 3600);
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("an expired token must be rejected");
+    assert_auth_error_containing(err, "expired");
+}
+
+#[tokio::test]
+async fn rule2_rejects_a_token_with_no_exp_claim() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims.as_object_mut().expect("object").remove("exp");
+
+    // An absent `exp` is a PERMANENT credential — never "no expiry constraint".
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("a token with no exp must be rejected");
+    assert_auth_error_containing(err, "exp");
+}
+
+#[tokio::test]
+async fn rule2_rejects_a_token_with_a_non_numeric_exp() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["exp"] = json!("tomorrow");
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("a non-numeric exp must be rejected");
+    assert_auth_error_containing(err, "exp");
+}
+
+// -------------------------------------------------------------- rule 3: nbf --
+
+#[tokio::test]
+async fn rule3_rejects_a_token_whose_nbf_is_in_the_future() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["nbf"] = json!(now() + 3600);
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("a future nbf must be rejected");
+    assert_auth_error_containing(err, "not valid yet");
+}
+
+#[tokio::test]
+async fn rule3_accepts_a_token_with_no_nbf() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+
+    verifier
+        .verify(&sign_eddsa(&good_claims()))
+        .await
+        .expect("an absent nbf is valid");
+}
+
+// -------------------------------------------------------- rule 4: tenant_id --
+
+#[tokio::test]
+async fn rule4_rejects_a_token_minted_for_a_different_tenant() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["tenant_id"] = json!(OTHER_TENANT);
+
+    // The JWKS trust anchor is organization-wide, so this token's signature is
+    // perfectly valid — only the tenant assertion stops it.
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("a sibling tenant's token must be rejected");
+    assert_auth_error_containing(err, "does not match the configured tenant");
+}
+
+#[tokio::test]
+async fn rule4_rejects_a_token_with_no_tenant_id_claim() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims.as_object_mut().expect("object").remove("tenant_id");
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("a token with no tenant_id must be rejected");
+    assert_auth_error_containing(err, "tenant_id");
+}
+
+#[tokio::test]
+async fn rule4_fails_closed_when_no_expected_tenant_is_configured() {
+    let server = jwks_server().await;
+    let url = url::Url::parse(&server.uri()).expect("valid base url");
+    // Deliberately NOT calling `expect_tenant_id`.
+    let verifier = JwksVerifier::new(reqwest::Client::new(), &url).expect("verifier constructs");
+
+    // "There was nothing to compare against, so there was nothing to check"
+    // is the SEC-080 defect — it must reject, not pass.
+    let err = verifier
+        .verify(&sign_eddsa(&good_claims()))
+        .await
+        .expect_err("an unconfigured verifier must fail closed");
+    assert_auth_error_containing(err, "no expected tenant configured");
+}
+
+// -------------------------------------------------------------- rule 5: iss --
+
+#[tokio::test]
+async fn rule5_rejects_an_issuer_mismatch_when_configured() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri()).expect_issuer(ISSUER);
+    let mut claims = good_claims();
+    claims["iss"] = json!("https://evil.example.com");
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("an issuer mismatch must be rejected");
+    assert_auth_error_containing(err, "issuer");
+}
+
+#[tokio::test]
+async fn rule5_does_not_check_iss_when_not_configured() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["iss"] = json!("https://anything.example.com");
+
+    verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect("iss is not checked without an expectation");
+}
+
+// -------------------------------------------------------------- rule 6: aud --
+
+#[tokio::test]
+async fn rule6_rejects_an_audience_mismatch_when_configured() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri()).expect_audience("axiam:user");
+    let mut claims = good_claims();
+    claims["aud"] = json!("axiam:m2m");
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("an audience mismatch must be rejected");
+    assert_auth_error_containing(err, "audience");
+}
+
+#[tokio::test]
+async fn rule6_rejects_a_missing_aud_when_configured() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri()).expect_audience("axiam:user");
+    let mut claims = good_claims();
+    claims.as_object_mut().expect("object").remove("aud");
+
+    let err = verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect_err("an absent aud must be rejected once an expectation is configured");
+    assert_auth_error_containing(err, "aud");
+}
+
+#[tokio::test]
+async fn rule6_does_not_check_aud_when_not_configured() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["aud"] = json!("axiam:m2m");
+
+    verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect("aud is not checked without an expectation");
+}
+
+// ------------------------------------------------------- rule 7: clock skew --
+
+#[tokio::test]
+async fn rule7_exposes_a_named_bounded_sixty_second_skew() {
+    assert_eq!(CLOCK_SKEW_LEEWAY_SECS, 60);
+}
+
+#[tokio::test]
+async fn rule7_tolerates_an_exp_that_just_passed() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["exp"] = json!(now() - 5);
+
+    verifier
+        .verify(&sign_eddsa(&claims))
+        .await
+        .expect("a 5s-stale exp is inside the named 60s leeway");
+}
+
+// -------------------------------------------- the §10.1 raw escape hatch ---
+
+#[tokio::test]
+async fn signature_only_unchecked_skips_every_claim_rule_but_the_guard_does_not() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+
+    let mut claims = good_claims();
+    claims["tenant_id"] = json!(OTHER_TENANT);
+    claims["exp"] = json!(now() - 3600);
+    claims["nbf"] = json!(now() + 3600);
+    let token = sign_eddsa(&claims);
+
+    // The raw primitive is documented to check the signature and nothing else
+    // — which is precisely why its name says `_unchecked`.
+    let raw = verifier
+        .verify_signature_only_unchecked(&token)
+        .await
+        .expect("signature-only verification succeeds");
+    assert_eq!(raw.tenant_id, OTHER_TENANT);
+
+    // ...and the same token is rejected by the documented guard entry point.
+    verifier
+        .verify(&token)
+        .await
+        .expect_err("the guard must reject what the raw primitive waves through");
+}
+
+#[tokio::test]
+async fn signature_only_unchecked_still_rejects_a_bad_signature() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+
+    let mut wrong_seed = TEST_ED25519_SEED;
+    wrong_seed[0] ^= 0xFF;
+    let mut wrong_der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    wrong_der.extend_from_slice(&wrong_seed);
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    let token = jsonwebtoken::encode(
+        &header,
+        &good_claims(),
+        &EncodingKey::from_ed_der(&wrong_der),
+    )
+    .expect("encode token signed with the wrong key");
+
+    verifier
+        .verify_signature_only_unchecked(&token)
+        .await
+        .expect_err("a bad signature is rejected even by the raw primitive");
+}

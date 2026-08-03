@@ -74,8 +74,19 @@ async fn main() -> std::io::Result<()> {
 
     let base_url_parsed = url::Url::parse(&base_url).expect("AXIAM_BASE_URL must be a valid URL");
     let http = reqwest::Client::new();
-    let jwks_verifier =
-        JwksVerifier::new(http, &base_url_parsed).expect("failed to construct JwksVerifier");
+    // CONTRACT.md §10.1 rule 4: a route guard MUST know which tenant it is
+    // guarding. `/oauth2/jwks` is organization-wide, so a valid signature
+    // proves only "some tenant in this org" — without `expect_tenant_id` the
+    // verifier fails closed on every request. `expect_audience` (rule 6) is
+    // optional but recommended for a user-facing resource server.
+    let tenant_id: uuid::Uuid = std::env::var("AXIAM_TENANT_ID")
+        .expect("AXIAM_TENANT_ID is required: the §10 guard asserts it on every token")
+        .parse()
+        .expect("AXIAM_TENANT_ID must be a UUID");
+    let jwks_verifier = JwksVerifier::new(http, &base_url_parsed)
+        .expect("failed to construct JwksVerifier")
+        .expect_tenant_id(tenant_id)
+        .expect_audience("axiam:user");
 
     // The `AxiamClient` the `#[require_access]` guard uses to issue checks. In
     // production this typically holds a service-account session; the guard

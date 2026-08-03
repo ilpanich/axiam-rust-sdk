@@ -24,6 +24,13 @@ const ED25519_PKCS8_DER_PREFIX: [u8; 16] = [
 ];
 const TEST_ED25519_PUBLIC_X: &str = "_r-I_0nRSSV8kvwA93gwhX-hFRiWkaNk5HEud-DjnMk";
 const TEST_KID: &str = "test-kid-1";
+/// CONTRACT.md §10.1 rule 4: `verify` asserts `tenant_id` against the tenant
+/// the verifier is configured for, so the fixture mints for one fixed tenant.
+const TEST_TENANT: &str = "3f6b1c8e-0000-4000-8000-000000000107";
+
+fn test_tenant() -> Uuid {
+    TEST_TENANT.parse().expect("TEST_TENANT is a UUID")
+}
 
 #[derive(Debug, Serialize)]
 struct TestClaims {
@@ -49,7 +56,7 @@ fn issue_ed25519_token(exp: i64) -> String {
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
-        tenant_id: Uuid::new_v4().to_string(),
+        tenant_id: TEST_TENANT.to_string(),
         org_id: Uuid::new_v4().to_string(),
         iss: "axiam-test".to_string(),
         iat: 0,
@@ -62,7 +69,9 @@ fn issue_ed25519_token(exp: i64) -> String {
 fn build_verifier(base_url: &str) -> JwksVerifier {
     let http_client = reqwest::Client::new();
     let url = url::Url::parse(base_url).expect("valid base url");
-    JwksVerifier::new(http_client, &url).expect("verifier constructs")
+    JwksVerifier::new(http_client, &url)
+        .expect("verifier constructs")
+        .expect_tenant_id(test_tenant())
 }
 
 #[tokio::test]
@@ -73,7 +82,7 @@ async fn verify_rejects_a_non_eddsa_alg_before_any_fetch() {
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
-        tenant_id: Uuid::new_v4().to_string(),
+        tenant_id: TEST_TENANT.to_string(),
         org_id: Uuid::new_v4().to_string(),
         iss: "axiam-test".to_string(),
         iat: 0,
@@ -168,7 +177,7 @@ async fn verify_maps_a_wrong_signature_to_an_auth_error() {
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
-        tenant_id: Uuid::new_v4().to_string(),
+        tenant_id: TEST_TENANT.to_string(),
         org_id: Uuid::new_v4().to_string(),
         iss: "axiam-test".to_string(),
         iat: 0,
@@ -215,10 +224,9 @@ async fn verify_maps_a_token_missing_the_exp_claim_to_an_auth_error() {
     let verifier = build_verifier(&mock_server.uri());
 
     // A well-signed token whose claims JSON has no `exp` key at all (unlike
-    // `Claims`, which requires it) — `jsonwebtoken`'s default `Validation`
-    // requires `exp` to be present, so this must fail with a claim-validation
-    // error distinct from `InvalidSignature`/`ExpiredSignature`, exercising the
-    // catch-all `_ => "token claim validation failed"` arm.
+    // `Claims`, which requires it) — CONTRACT.md §10.1 rule 2 makes `exp`
+    // REQUIRED, so this must fail with a missing-required-claim error distinct
+    // from `InvalidSignature`/`ExpiredSignature`.
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(TEST_KID.to_string());
     let claims_without_exp = json!({
@@ -237,10 +245,11 @@ async fn verify_maps_a_token_missing_the_exp_claim_to_an_auth_error() {
         .expect_err("a token with no exp claim must fail claim validation, not panic");
     match err {
         AxiamError::Auth { message, .. } => {
-            assert!(
-                message.contains("token claim validation failed"),
-                "{message}"
-            )
+            // `Claims::exp` is a non-`Option` `i64`, so serde's missing-field
+            // error trips before `jsonwebtoken`'s own `required_spec_claims`
+            // gate does; either way the token is rejected, which is what
+            // §10.1 rule 2 demands.
+            assert!(message.contains("exp"), "{message}")
         }
         other => panic!("expected Auth error, got {other:?}"),
     }

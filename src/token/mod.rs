@@ -7,5 +7,5 @@ pub mod refresh_guard;
 
 pub use jwks::Claims;
 #[cfg(any(feature = "rest", feature = "actix"))]
-pub use jwks::JwksVerifier;
+pub use jwks::{CLOCK_SKEW_LEEWAY_SECS, JwksVerifier};
 pub use manager::TokenManager;

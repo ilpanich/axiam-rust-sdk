@@ -62,6 +62,16 @@ fn key(kid: &str, seed_byte: u8) -> Key {
     }
 }
 
+/// The tenant every benchmark token is minted for. `JwksVerifier::verify` is
+/// the full CONTRACT.md §10.1 set, which includes asserting `tenant_id`
+/// against a configured tenant (rule 4) — so the benchmark configures it, and
+/// the assertion is part of what is being measured.
+fn bench_tenant_id() -> uuid::Uuid {
+    "3f6b1c8e-0000-4000-8000-000000000002"
+        .parse()
+        .expect("bench tenant id is a valid UUID")
+}
+
 fn sign(k: &Key) -> String {
     let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
     der.extend_from_slice(&k.seed);
@@ -175,7 +185,8 @@ async fn measure(label: &str, keys: &[Key], token_kid: usize) {
         reqwest::Client::new(),
         &url::Url::parse(&base).expect("base url"),
     )
-    .expect("verifier");
+    .expect("verifier")
+    .expect_tenant_id(bench_tenant_id());
 
     // Warm the cache (and pay the one-off network fetch) before timing.
     for _ in 0..WARMUP {
@@ -209,7 +220,8 @@ async fn measure_concurrent(label: &str, keys: &[Key], token_kid: usize, tasks: 
             reqwest::Client::new(),
             &url::Url::parse(&base).expect("base url"),
         )
-        .expect("verifier"),
+        .expect("verifier")
+        .expect_tenant_id(bench_tenant_id()),
     );
     for _ in 0..WARMUP {
         verifier.verify(&token).await.expect("token verifies");

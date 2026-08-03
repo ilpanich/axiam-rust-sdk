@@ -19,8 +19,31 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 (including §6.1 mTLS and §13 webhook signature
-verification).
+This SDK conforms to CONTRACT.md §1–§13 (including §6.1 mTLS, the §10.1 minimum
+local-verification set, and §13 webhook signature verification).
+
+### §10.1 minimum local-verification set
+
+`JwksVerifier::verify` is the documented guard entry point and applies **every** §10.1
+rule on every inbound token: EdDSA `alg` pinned before the JWKS is consulted, a REQUIRED
+numeric `exp`, `nbf` honoured when present, `tenant_id` asserted against the configured
+tenant, `iss`/`aud` checked when configured, all under a named 60-second
+`CLOCK_SKEW_LEEWAY_SECS`. The §10 `AxiamUser` extractor and the §11 `require_auth` /
+`require_access` / `require_role` macros (which inject that extractor) all route through
+it — there is no second verification path.
+
+Because the `/oauth2/jwks` trust anchor is **organization-wide**, a verifier used as a
+route guard MUST be told which tenant it is guarding:
+
+```rust,ignore
+let verifier = JwksVerifier::new(http, &base_url)?
+    .expect_tenant_id(tenant_uuid)      // §10.1 rule 4 — required, fails closed without it
+    .expect_audience("axiam:user");     // §10.1 rule 6 — optional, recommended
+```
+
+`JwksVerifier::verify_signature_only_unchecked` is the §10.1 raw signature-only
+primitive, for integrators implementing their own policy. It checks the signature and
+nothing else — never use it to guard a route.
 
 See [`CONTRACT.md`](CONTRACT.md) for the full cross-language behavioral contract. It is shared
 verbatim across all seven AXIAM SDKs; the copy in this repository is the authority for this
