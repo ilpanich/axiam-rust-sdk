@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha24] - 2026-08-04
+
+### Added
+
+- Enforce the full CONTRACT §10.1 local-verification set
+- Add CONTRACT §13 verify_webhook; trim build-time dependency surface
+
+### Changed
+
+- Add the §10.1 rule-8 guardrail regression tests (#43)
+- Device (mTLS) tokens now carry aud=axiam:m2m (#42)
+- Service accounts can use login_client_credentials (#41)
+- Bump github/codeql-action from 4 to 4.37.4
+- Bump taiki-e/install-action from 2.85.2 to 2.85.5
+- Sync CONTRACT.md §10.1 rule 8 — subject of the decision (#38)
+
 ## [Unreleased]
 
 ### Security — BREAKING
