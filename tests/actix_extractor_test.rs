@@ -696,3 +696,188 @@ async fn cookie_auth_state_changing_with_mismatched_csrf_token_yields_403() {
     use actix_web::ResponseError;
     assert_eq!(err.status_code(), actix_web::http::StatusCode::FORBIDDEN);
 }
+
+// ---------------------------------------------------------------------------
+// CONTRACT.md §10.1 rule 8 — "subject of the decision" (SEC-085, §15.3.1).
+//
+// Rules 1-7 ask whether the token is good. Rule 8 asks whether it is the token
+// the decision is even ABOUT. SEC-085 satisfied all seven and was still an
+// authentication bypass: the PHP guard routed a failed verification into a
+// second, successful one against the *application's own* session, so the caller
+// was admitted as the app's service account — in an IAM integration usually far
+// more privileged than the user whose request it replaced.
+//
+// This extractor is structurally safe from that shape: it resolves exactly one
+// thing from `app_data` — a `JwksVerifier` — and decides on the token it pulled
+// off the request. There is no session in scope to substitute.
+//
+// The Actix-specific risk these tests pin is real, though: `app_data` is a
+// type-keyed bag, and a production app will very plausibly register its
+// `AxiamClient` there too, for its own outbound calls. That places a second
+// credential *within reach* of the extractor even though it is structurally
+// safe today. These tests assert the extractor ignores anything but the
+// verifier, so the property cannot be quietly undone later.
+// ---------------------------------------------------------------------------
+
+/// A stand-in for the application's own authenticated client, registered in
+/// `app_data` exactly as a real service would. Its token is deliberately one
+/// the verifier WOULD accept: if the extractor ever reached for it, the request
+/// would succeed and the assertions below would catch it.
+struct AppOwnSession {
+    #[allow(dead_code)]
+    access_token: String,
+    #[allow(dead_code)]
+    principal: Uuid,
+}
+
+#[tokio::test]
+async fn rule8_rejects_a_failed_caller_token_with_an_app_session_in_app_data() {
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let tenant_id = test_tenant();
+    let app_principal = Uuid::new_v4();
+
+    // The application's own credential — genuinely valid, so a substitution
+    // would actually succeed rather than failing for an incidental reason.
+    let app_token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        app_principal,
+        Uuid::new_v4(),
+        9_999_999_999,
+        Some("admin:all"),
+    );
+
+    // The caller's credential: correctly signed, for the right tenant, and
+    // expired. It fails rule 2 and nothing else, so the only way to admit it
+    // is to decide on some other credential.
+    let expired = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        1, // 1970 — far outside any leeway
+        Some("documents:read"),
+    );
+
+    let req = TestRequest::default()
+        .app_data(web::Data::new(verifier))
+        // The second credential, in reach but not the caller's.
+        .app_data(web::Data::new(AppOwnSession {
+            access_token: app_token.clone(),
+            principal: app_principal,
+        }))
+        .insert_header(("Authorization", format!("Bearer {expired}")))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let result = AxiamUser::from_request(&req, &mut payload).await;
+
+    match result {
+        Ok(user) => panic!(
+            "SECURITY: a caller whose token failed verification was admitted as {} \
+             — rule 8 violated",
+            user.user_id
+        ),
+        Err(err) => {
+            // Must be an authentication failure, and must NOT be the app's identity.
+            let rendered = format!("{err}");
+            assert!(
+                !rendered.contains(&app_principal.to_string()),
+                "the rejection must not surface the application's own principal"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn rule8_the_extractor_consults_only_the_credential_on_the_request() {
+    // The positive half: with a valid caller token AND an app session present,
+    // the identity injected is the CALLER's, never the app's. A guard that
+    // preferred the ambient credential would pass the negative test above while
+    // still being wrong.
+    let mock_server = mount_jwks_server().await;
+    let verifier = build_verifier(&mock_server.uri());
+
+    let tenant_id = test_tenant();
+    let caller_id = Uuid::new_v4();
+    let app_principal = Uuid::new_v4();
+
+    let caller_token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        caller_id,
+        Uuid::new_v4(),
+        9_999_999_999,
+        Some("documents:read"),
+    );
+    let app_token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        app_principal,
+        Uuid::new_v4(),
+        9_999_999_999,
+        Some("admin:all"),
+    );
+
+    let req = TestRequest::default()
+        .app_data(web::Data::new(verifier))
+        .app_data(web::Data::new(AppOwnSession {
+            access_token: app_token,
+            principal: app_principal,
+        }))
+        .insert_header(("Authorization", format!("Bearer {caller_token}")))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let user = AxiamUser::from_request(&req, &mut payload)
+        .await
+        .expect("a valid caller token must be admitted");
+
+    assert_eq!(
+        user.user_id, caller_id,
+        "the injected identity must be the caller's"
+    );
+    assert_ne!(
+        user.user_id, app_principal,
+        "SECURITY: the extractor injected the application's own principal"
+    );
+    assert_eq!(user.roles, vec!["documents:read".to_string()]);
+}
+
+#[tokio::test]
+async fn rule8_a_missing_verifier_fails_closed_rather_than_falling_back() {
+    // If the one dependency the extractor is allowed to resolve is absent, it
+    // must fail — not look around `app_data` for something else that could
+    // authenticate the request.
+    let mock_server = mount_jwks_server().await;
+    let tenant_id = test_tenant();
+    let app_principal = Uuid::new_v4();
+    let app_token = issue_test_access_token(
+        tenant_id,
+        Uuid::new_v4(),
+        app_principal,
+        Uuid::new_v4(),
+        9_999_999_999,
+        Some("admin:all"),
+    );
+    // Keep the server alive so a fallback could genuinely have verified.
+    let _keepalive = &mock_server;
+
+    let req = TestRequest::default()
+        // No JwksVerifier registered — only the app's own session.
+        .app_data(web::Data::new(AppOwnSession {
+            access_token: app_token.clone(),
+            principal: app_principal,
+        }))
+        .insert_header(("Authorization", format!("Bearer {app_token}")))
+        .to_http_request();
+
+    let mut payload = actix_web::dev::Payload::None;
+    let result = AxiamUser::from_request(&req, &mut payload).await;
+    assert!(
+        result.is_err(),
+        "SECURITY: the extractor authenticated a request with no verifier configured"
+    );
+}
