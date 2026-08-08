@@ -83,10 +83,24 @@ pub struct CheckAccessRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
     /// Whether the checked action is permitted.
+    ///
+    /// **This field alone carries the outcome.** [`Self::reason_code`]
+    /// explains it and never contradicts it.
     pub allowed: bool,
     /// Optional human-readable explanation for the decision. `None` when
     /// the wire response's `deny_reason` was empty.
     pub reason: Option<String>,
+    /// Machine-readable decision reason (CONTRACT.md §11 rule 9, B1
+    /// deny-override): `"allowed"`, `"no_grant"`, or `"denied_by_rule"`.
+    /// See [`crate::rest::authz::reason_code`] for the constants and for why
+    /// this is a `String` rather than an enum.
+    ///
+    /// `None` when the server omits it — proto3 renders an unset `string` as
+    /// `""`, and an older server that never sets field 3 is indistinguishable
+    /// from one that set it empty. Both mean "no reason code", so both map to
+    /// `None` rather than to `Some("")`, which would be a value callers could
+    /// accidentally match on.
+    pub reason_code: Option<String>,
 }
 
 impl From<WireCheckAccessResponse> for AccessDecision {
@@ -97,6 +111,11 @@ impl From<WireCheckAccessResponse> for AccessDecision {
                 None
             } else {
                 Some(wire.deny_reason)
+            },
+            reason_code: if wire.reason_code.is_empty() {
+                None
+            } else {
+                Some(wire.reason_code)
             },
         }
     }

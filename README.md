@@ -19,8 +19,12 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 (including §6.1 mTLS, the §10.1 minimum
-local-verification set, and §13 webhook signature verification).
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15 (including §6.1 mTLS, the
+§10.1 minimum local-verification set, and §13 webhook signature verification).
+
+§12.7, §14 and §15 are named rather than folded into the range because they landed after
+this SDK already claimed §1–§13: widening the range silently would turn a statement that
+was true when written into a different claim without anyone editing it.
 
 ### §10.1 minimum local-verification set
 
@@ -56,7 +60,7 @@ dependencies for the transports/integrations it actually uses:
 
 | Feature | Default | Enables |
 |---------|---------|---------|
-| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, and the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`) |
+| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
 | `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1) — both over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
 | `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
@@ -288,6 +292,97 @@ RequireAccess::new("read")
 ```
 
 See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).
+
+### Device authorization grant (`rest`)
+
+CONTRACT.md §14 (RFC 8628) — signing in a device that cannot show a browser: a TV, a
+CLI, a headless commissioning tool.
+
+```rust,ignore
+let tokens = client
+    .device_login(DeviceLoginParams::default(), |auth| {
+        // Called BEFORE the first poll. Display it however the device can —
+        // screen, QR code, e-ink panel. The SDK never prints it for you.
+        println!("visit {} and enter {}", auth.verification_uri, auth.user_code);
+    })
+    .await?;
+```
+
+`device_authorize` and `device_poll` are also public, for an application that wants to
+drive its own loop (to render a countdown, say). The polling rules are where
+implementations go wrong, so they are worth stating:
+
+- **`slow_down` raises the interval permanently.** An SDK that backs off for one round
+  and returns to the original interval will be told to slow down again, forever.
+- **`access_denied` and `expired_token` stay distinct.** A human said no, versus nobody
+  answered — the only information the device can act on.
+- **Polling stops at `expires_in`**, even if the server has not yet said `expired_token`.
+- **A `5xx` mid-poll is not terminal.** A server restart must not lose a grant the user
+  has already approved.
+
+`device_code` is `Sensitive`; `user_code` deliberately is not — it exists to be read
+aloud, and wrapping it would defeat the one thing it is for.
+
+Per §14.3 rule 4, `device_login` **returns** the token set rather than adopting it, which
+matches this SDK's `login_client_credentials` posture. See
+[`examples/device_login.rs`](examples/device_login.rs).
+
+### Token exchange (`rest`)
+
+CONTRACT.md §15 (RFC 8693) — a service holding a user's token exchanging it for a
+*narrower* one before calling the next service.
+
+```rust,ignore
+let exchanged = client
+    .token_exchange(TokenExchangeParams {
+        scopes: Some(vec!["orders:read".into()]),
+        audience: Some("orders-service".into()),
+        ..TokenExchangeParams::new(Sensitive::new(user_token))
+    })
+    .await?;
+```
+
+Most of what this method does is refuse to be helpful, and each refusal is deliberate:
+
+- **No default `actor_token`.** Omitting it asks for *impersonation*; the SDK will not
+  quietly substitute the client's own session token and turn that into a delegation.
+- **No auto-narrowing after `invalid_scope`.** The server refuses rather than silently
+  narrowing precisely so the caller finds out here.
+- **No refresh token, ever** — `ExchangedToken` has no such field, so there is nothing to
+  synthesise. Re-run the exchange.
+- **No adoption.** The issued token is handed onward in one call; adopting it would
+  silently re-privilege every later call this client makes. A MUST NOT, where
+  `login_client_credentials` adoption is a MAY.
+
+See [`examples/token_exchange.rs`](examples/token_exchange.rs).
+
+### Logout — RP-initiated and back-channel (`rest`)
+
+CONTRACT.md §12.7. `logout_url` builds the redirect (pure local computation);
+`verify_logout_token` validates a token the OP **pushed** to your back-channel endpoint.
+
+```rust,ignore
+let url = client.logout_url(&configuration, LogoutUrlParams::new(id_token))?;
+
+// …and at your registered backchannel_logout_uri:
+let verified = client.verify_logout_token(&logout_token, &configuration).await?;
+if let Some(sid) = verified.sid {
+    end_session(&sid); // that session ONLY
+}
+```
+
+The verifier is where the security weight sits — the input arrives unsolicited and
+instructs you to terminate a session. It checks the signature, `iss`, `aud`, that
+`events` carries the back-channel-logout key (**the only thing separating a logout token
+from an ID token**), that `nonce` is *absent* (its presence is how an ID token gets
+replayed as one), that something is named, and freshness.
+
+It returns `sid`/`sub`/`jti` rather than a bare boolean: you have to know *which* session
+to end. **Dedup on `jti` yourself** — delivery is at-least-once, so a valid token
+legitimately arrives twice; the SDK has no durable store and an in-memory guard would
+silently drop a real second logout after a restart.
+
+See [`examples/logout.rs`](examples/logout.rs).
 
 ### Webhook signature verification (`rest` or `amqp`)
 

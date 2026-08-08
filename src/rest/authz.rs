@@ -65,11 +65,46 @@ impl AccessCheckRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccessDecision {
     /// Whether the checked action is permitted.
+    ///
+    /// **This field alone carries the outcome.** [`Self::reason_code`]
+    /// explains it and never contradicts it.
     pub allowed: bool,
     /// Optional human-readable explanation for the decision (e.g. which
     /// role/permission granted or denied it). Not guaranteed to be present.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Machine-readable decision reason (CONTRACT.md §11 rule 9, B1
+    /// deny-override): `"allowed"`, `"no_grant"`, or `"denied_by_rule"`.
+    ///
+    /// **The two refusals mean opposite things to the person on the other
+    /// end.** `no_grant` says *ask an admin for access*; `denied_by_rule`
+    /// says *an admin has already decided*. An application that cannot tell
+    /// them apart sends users to raise tickets that will be refused — which
+    /// is why the contract forbids collapsing them into a bare `false`.
+    ///
+    /// `None` when the server does not send the field: a newer SDK against an
+    /// older server treats it as absent, never as an error. An unrecognised
+    /// value is surfaced verbatim and never changes [`Self::allowed`].
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
+/// The three `reason_code` values CONTRACT.md §11 rule 9 defines.
+///
+/// Deliberately **not** an enum on [`AccessDecision`]: the contract requires
+/// an unrecognised code to be surfaced verbatim, and a closed enum would have
+/// to either drop it or invent an `Unknown(String)` arm that callers would
+/// then match on as though it meant something. The field stays a `String`;
+/// these constants exist so callers compare against a name rather than a
+/// literal.
+pub mod reason_code {
+    /// An allow grant matched and no deny did.
+    pub const ALLOWED: &str = "allowed";
+    /// Nothing matched — default deny. *Ask an admin for access.*
+    pub const NO_GRANT: &str = "no_grant";
+    /// An explicit deny rule matched and overrode any allow. *An admin has
+    /// already decided.*
+    pub const DENIED_BY_RULE: &str = "denied_by_rule";
 }
 
 #[derive(Debug, Serialize)]

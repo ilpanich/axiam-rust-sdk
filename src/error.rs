@@ -244,6 +244,43 @@ impl AxiamError {
 }
 
 impl AxiamError {
+    /// The RFC 6749 `error` code, when this failure carries an
+    /// `OAuth2ErrorResponse` body (CONTRACT.md §12.3 rule 3) — `None` for
+    /// every other error, including transport failures.
+    ///
+    /// Added for the CONTRACT.md §14.2 rule 5 dispatch order: the five
+    /// device-polling answers all arrive as `400`, which the §2 taxonomy
+    /// would map to one indistinguishable error, so the poll loop must
+    /// branch on the `error` field **before** the status code. Callers
+    /// driving their own poll loop over [`crate::client::AxiamClient::device_poll`]
+    /// need the same accessor, which is why it is public rather than
+    /// crate-internal.
+    ///
+    /// ```
+    /// # use axiam_sdk::AxiamError;
+    /// let e = AxiamError::oauth_protocol_error("slow_down", "polling too fast");
+    /// assert_eq!(e.oauth_error_code(), Some("slow_down"));
+    /// assert_eq!(AxiamError::network("connection reset").oauth_error_code(), None);
+    /// ```
+    pub fn oauth_error_code(&self) -> Option<&str> {
+        match self {
+            AxiamError::Auth { oauth, .. } => oauth.as_ref().map(|o| o.error.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a transport-level failure that a bounded retry may
+    /// resolve — a connection reset, timeout, TLS or DNS failure, or a 5xx.
+    ///
+    /// CONTRACT.md §14.2 rule 6 makes exactly these non-terminal during
+    /// device polling: a server restart mid-flow must not discard a grant
+    /// the user has already approved. Distinct from
+    /// [`Self::oauth_error_code`], which identifies the *protocol* answers
+    /// that terminate a poll.
+    pub fn is_retryable_transport(&self) -> bool {
+        matches!(self, AxiamError::Network { .. })
+    }
+
     /// Build the `Auth` sub-type for an RFC 6749 `OAuth2ErrorResponse` body
     /// returned by an `/oauth2/*` endpoint (CONTRACT.md §12.3 rule 3,
     /// addendum item 17): a `400` from `POST /oauth2/token` or a `401` from
