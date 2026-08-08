@@ -61,13 +61,20 @@
 //! ```
 
 pub mod authorize;
+pub mod device;
 pub mod discovery;
 pub mod exchange;
 pub mod id_token;
+pub mod logout;
 pub(crate) mod single_flight;
 pub mod state;
+pub mod token_exchange;
 
 pub use authorize::{AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, OidcBeginParams};
+pub use device::{
+    DEFAULT_POLL_INTERVAL_SECS, DEVICE_CODE_GRANT_TYPE, DeviceAuthorization, DeviceAuthorizeParams,
+    DeviceLoginParams, DevicePollParams, SLOW_DOWN_INCREMENT_SECS,
+};
 pub use discovery::{DISCOVERY_PATH, MIN_DISCOVERY_TTL, OidcConfiguration};
 pub use exchange::{
     IntrospectParams, IntrospectionResult, LoginClientCredentialsParams, OidcExchangeParams,
@@ -75,4 +82,10 @@ pub use exchange::{
     SsoStartParams, SsoStartResult,
 };
 pub use id_token::{IdTokenClaims, MAX_CLOCK_SKEW_SEC};
+pub use logout::{
+    BACKCHANNEL_LOGOUT_EVENT, LogoutUrlParams, MAX_LOGOUT_TOKEN_AGE_SECS, VerifiedLogoutToken,
+};
 pub use state::{MemoryOidcStateStore, OIDC_STATE_TTL, OidcStateEntry, OidcStateStore};
+pub use token_exchange::{
+    ACCESS_TOKEN_TYPE, ExchangedToken, TOKEN_EXCHANGE_GRANT_TYPE, TokenExchangeParams,
+};

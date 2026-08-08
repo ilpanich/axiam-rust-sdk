@@ -71,6 +71,34 @@ pub struct OidcConfiguration {
     pub claims_supported: Vec<String>,
     /// Grant types the token endpoint supports.
     pub grant_types_supported: Vec<String>,
+
+    /// RFC 8628 device authorization endpoint, used by
+    /// [`crate::client::AxiamClient::device_authorize`] (§14.1).
+    ///
+    /// `Option` because a server that does not implement the device grant
+    /// does not advertise it, and because this document may come from a
+    /// non-AXIAM OP. Its absence is an error at call time, never a cue to
+    /// build the URL by concatenation.
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
+
+    /// OIDC RP-Initiated Logout 1.0 `end_session_endpoint`, used by
+    /// [`crate::client::AxiamClient::logout_url`] (§12.7.2 rule 1).
+    ///
+    /// `Option` for the same reason, and the rule is stricter here: §12.7.2
+    /// rule 1 forbids synthesising this URL from the issuer. Code that
+    /// concatenates works against AXIAM and breaks against every other OP
+    /// the same application is pointed at.
+    #[serde(default)]
+    pub end_session_endpoint: Option<String>,
+
+    /// Whether the OP sends back-channel logout tokens.
+    #[serde(default)]
+    pub backchannel_logout_supported: Option<bool>,
+
+    /// Whether those logout tokens carry `sid`. AXIAM always sends it.
+    #[serde(default)]
+    pub backchannel_logout_session_supported: Option<bool>,
 }
 
 /// Normalize a base URL to its cache key: lowercased scheme and host with

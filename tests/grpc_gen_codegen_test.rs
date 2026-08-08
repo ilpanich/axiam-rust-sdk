@@ -58,6 +58,7 @@ impl AuthorizationService for StubAuthz {
         Ok(Response::new(CheckAccessResponse {
             allowed: true,
             deny_reason: String::new(),
+            reason_code: String::new(),
         }))
     }
 
@@ -409,6 +410,7 @@ fn message_types_encode_decode_round_trip() {
         results: vec![CheckAccessResponse {
             allowed: false,
             deny_reason: "nope".into(),
+            reason_code: String::new(),
         }],
     };
     let mut buf4 = Vec::new();
@@ -435,6 +437,7 @@ fn access_decision_from_wire_response_maps_deny_reason() {
     let allow = AccessDecision::from(CheckAccessResponse {
         allowed: true,
         deny_reason: String::new(),
+        reason_code: String::new(),
     });
     assert!(allow.allowed);
     assert!(allow.reason.is_none());
@@ -443,6 +446,7 @@ fn access_decision_from_wire_response_maps_deny_reason() {
     let deny = AccessDecision::from(CheckAccessResponse {
         allowed: false,
         deny_reason: "caller lacks permission".into(),
+        reason_code: String::new(),
     });
     assert!(!deny.allowed);
     assert_eq!(deny.reason.as_deref(), Some("caller lacks permission"));

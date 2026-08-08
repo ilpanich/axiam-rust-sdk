@@ -55,16 +55,16 @@ struct IntrospectOrRevokeForm<'a> {
 
 /// 200 body of `POST /oauth2/token` (wire schema `TokenResponse`).
 #[derive(Debug, Deserialize)]
-struct TokenResponseWire {
-    access_token: String,
-    token_type: String,
-    expires_in: u64,
+pub(crate) struct TokenResponseWire {
+    pub(crate) access_token: String,
+    pub(crate) token_type: String,
+    pub(crate) expires_in: u64,
     #[serde(default)]
-    scope: Option<String>,
+    pub(crate) scope: Option<String>,
     #[serde(default)]
-    refresh_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
     #[serde(default)]
-    id_token: Option<String>,
+    pub(crate) id_token: Option<String>,
 }
 
 /// 200 body of `POST /oauth2/introspect` (wire schema
@@ -334,7 +334,7 @@ pub struct SsoCompleteResult {
 /// `OAuth2ErrorResponse`-shaped body becomes [`AxiamError::oauth_protocol_error`]
 /// (CONTRACT.md §12.3 rule 3); anything else falls back to the generic
 /// [`AxiamError::from_http_status`] mapping.
-async fn oauth2_error_or_fallback(response: reqwest::Response) -> AxiamError {
+pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> AxiamError {
     let status = response.status().as_u16();
     let text = response
         .text()
@@ -369,7 +369,7 @@ impl AxiamClient {
     /// The configured §12 `client_secret`, or a client-side
     /// [`AxiamError::Auth`] (no wire call) for an operation that cannot be
     /// performed by a public client (§12.1 note 4).
-    fn oidc_client_secret_or_err(&self, operation: &str) -> Result<String, AxiamError> {
+    pub(crate) fn oidc_client_secret_or_err(&self, operation: &str) -> Result<String, AxiamError> {
         self.oidc_client_secret()
             .map(|s| s.expose().clone())
             .ok_or_else(|| AxiamError::Auth {
@@ -385,7 +385,10 @@ impl AxiamClient {
     /// parameter (§12.3 rule 4): the explicit argument, else the client's
     /// resolved tenant, else a client-side [`AxiamError::Auth`] (no wire
     /// call) — a slug-only, not-yet-logged-in client cannot fill this.
-    async fn resolve_oidc_tenant_id(&self, explicit: Option<Uuid>) -> Result<Uuid, AxiamError> {
+    pub(crate) async fn resolve_oidc_tenant_id(
+        &self,
+        explicit: Option<Uuid>,
+    ) -> Result<Uuid, AxiamError> {
         if let Some(id) = explicit {
             return Ok(id);
         }
@@ -400,7 +403,11 @@ impl AxiamClient {
 
     /// Build the token/introspection/revocation endpoint URL with the
     /// mandatory `?tenant_id=<uuid>` query parameter (§12.1 note 2).
-    fn oidc_endpoint_url(&self, endpoint: &str, tenant_id: Uuid) -> Result<url::Url, AxiamError> {
+    pub(crate) fn oidc_endpoint_url(
+        &self,
+        endpoint: &str,
+        tenant_id: Uuid,
+    ) -> Result<url::Url, AxiamError> {
         let mut url = url::Url::parse(endpoint).map_err(|e| AxiamError::Network {
             message: format!("invalid endpoint URL in discovery document: {e}"),
             source: None,
@@ -439,7 +446,7 @@ impl AxiamClient {
     /// Convert a `TokenResponse` into an [`OidcTokenSet`], validating any
     /// `id_token` first (§12.4). Validation precedes construction, so a
     /// failure discards the whole set (§12.4 rule 7).
-    async fn to_token_set(
+    pub(crate) async fn to_token_set(
         &self,
         wire: TokenResponseWire,
         configuration: &OidcConfiguration,

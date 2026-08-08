@@ -83,6 +83,7 @@ impl StubAuthorizationService {
             StubOutcome::Allow => Ok(WireCheckAccessResponse {
                 allowed: true,
                 deny_reason: String::new(),
+                reason_code: String::new(),
             }),
             StubOutcome::Deny => Err(Status::permission_denied("caller lacks permission")),
             StubOutcome::Unavailable => Err(Status::unavailable("server unreachable")),
@@ -94,6 +95,7 @@ impl StubAuthorizationService {
                     Ok(WireCheckAccessResponse {
                         allowed: true,
                         deny_reason: String::new(),
+                        reason_code: String::new(),
                     })
                 } else {
                     Err(Status::unauthenticated("token expired"))
@@ -225,6 +227,7 @@ async fn grpc_check_access() {
         AccessDecision {
             allowed: true,
             reason: None,
+            reason_code: None,
         }
     );
 }

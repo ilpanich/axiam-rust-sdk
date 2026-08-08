@@ -222,8 +222,99 @@ pub fn discovery_document(base_url: &str) -> Value {
         "scopes_supported": ["openid", "profile", "email"],
         "token_endpoint_auth_methods_supported": ["client_secret_post"],
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "nonce"],
-        "grant_types_supported": ["authorization_code", "client_credentials", "refresh_token"],
+        "grant_types_supported": [
+            "authorization_code", "client_credentials", "refresh_token",
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+        "device_authorization_endpoint": format!("{base_url}/oauth2/device_authorization"),
+        "end_session_endpoint": format!("{base_url}/oauth2/end_session"),
+        "backchannel_logout_supported": true,
+        "backchannel_logout_session_supported": true,
     })
+}
+
+/// A discovery document with the §14/§12.7 endpoints deliberately absent —
+/// the shape an older AXIAM, or a third-party OP without those features,
+/// publishes. Used to assert the SDK errors rather than concatenating a URL
+/// onto the issuer (§12.7.2 rule 1).
+pub fn discovery_document_without_optional_endpoints(base_url: &str) -> Value {
+    let mut doc = discovery_document(base_url);
+    let obj = doc.as_object_mut().expect("discovery is an object");
+    obj.remove("device_authorization_endpoint");
+    obj.remove("end_session_endpoint");
+    doc
+}
+
+/// Options for [`sign_logout_token`]. Defaults produce a **valid** AXIAM
+/// back-channel logout token; each field exists so one test can break exactly
+/// one §12.7.3 rule.
+#[derive(Default)]
+pub struct LogoutTokenOptions<'a> {
+    pub issuer: Option<&'a str>,
+    pub audience: Option<&'a str>,
+    pub subject: Option<&'a str>,
+    /// `Some(None)` omits `sid`; `None` uses the default.
+    pub sid: Option<Option<&'a str>>,
+    pub jti: Option<&'a str>,
+    pub expires_in_sec: Option<i64>,
+    pub issued_at_sec: Option<i64>,
+    /// When `true`, the `events` claim is omitted entirely — the check that
+    /// separates a logout token from an ID token.
+    pub omit_events: bool,
+    /// When `true`, `events` is present but carries some other event key.
+    pub wrong_event: bool,
+    /// A `nonce`, which Back-Channel Logout 1.0 §2.4 forbids.
+    pub nonce: Option<&'a str>,
+    /// Omit `sub` as well as `sid`, so the token names nothing.
+    pub omit_sub: bool,
+}
+
+pub const LOGOUT_SID: &str = "session-abc";
+pub const LOGOUT_JTI: &str = "logout-token-jti-1";
+
+/// Mint a back-channel logout token (OIDC Back-Channel Logout 1.0 §2.4),
+/// signed with the same EdDSA fixture keys as the ID-token helpers.
+pub fn sign_logout_token(key: &SigningKeyFixture, opts: LogoutTokenOptions<'_>) -> String {
+    let now = now_sec();
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(key.kid.clone());
+
+    let mut claims = serde_json::Map::new();
+    claims.insert("iss".into(), json!(opts.issuer.unwrap_or(ISSUER)));
+    claims.insert("aud".into(), json!(opts.audience.unwrap_or(CLIENT_ID)));
+    claims.insert("iat".into(), json!(opts.issued_at_sec.unwrap_or(now)));
+    claims.insert(
+        "exp".into(),
+        json!(now + opts.expires_in_sec.unwrap_or(120)),
+    );
+    claims.insert("jti".into(), json!(opts.jti.unwrap_or(LOGOUT_JTI)));
+    if !opts.omit_sub {
+        claims.insert("sub".into(), json!(opts.subject.unwrap_or("user-1")));
+    }
+    match opts.sid {
+        Some(Some(s)) => {
+            claims.insert("sid".into(), json!(s));
+        }
+        Some(None) => {}
+        None => {
+            claims.insert("sid".into(), json!(LOGOUT_SID));
+        }
+    }
+    if !opts.omit_events {
+        let key_name = if opts.wrong_event {
+            "http://schemas.openid.net/event/some-other-thing"
+        } else {
+            "http://schemas.openid.net/event/backchannel-logout"
+        };
+        claims.insert("events".into(), json!({ key_name: {} }));
+    }
+    if let Some(n) = opts.nonce {
+        claims.insert("nonce".into(), json!(n));
+    }
+
+    jsonwebtoken::encode(&header, &Value::Object(claims), &encoding_key(key))
+        .expect("sign logout token")
 }
 
 /// A `TokenResponse` wire body, with `overrides` merged in (shallow).
