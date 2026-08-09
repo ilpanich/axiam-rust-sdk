@@ -97,6 +97,11 @@ pub struct AxiamClientBuilder {
     oidc_client_secret: Option<crate::Sensitive<String>>,
     oidc_discovery_ttl: Option<Duration>,
     oidc_clock_skew: Option<Duration>,
+    /// §16.1 disable switch. `None` means the default, which is **on**.
+    retry_enabled: Option<bool>,
+    /// §19 telemetry sink. `None` means no hook installed, which costs one
+    /// branch per request.
+    telemetry: Option<std::sync::Arc<dyn crate::telemetry::TelemetrySink>>,
 }
 
 impl AxiamClientBuilder {
@@ -273,6 +278,39 @@ impl AxiamClientBuilder {
         self
     }
 
+    /// Enable or disable the CONTRACT.md §16 bounded read-only retry policy.
+    /// **Default: enabled.**
+    ///
+    /// Disabling it yields exactly one attempt per operation. That is the right
+    /// choice for a caller who owns their own retry layer — they know their
+    /// deadline and this SDK does not — but it is not a way to make failures
+    /// quieter: a transient `NetworkError` will simply surface immediately.
+    ///
+    /// §16.1 permits this switch but forbids raising the attempt cap, base
+    /// delay or delay cap above the contract's values, so there is no knob for
+    /// those: eleven SDKs agreeing on one table is the point.
+    pub fn retry_enabled(mut self, enabled: bool) -> Self {
+        self.retry_enabled = Some(enabled);
+        self
+    }
+
+    /// Install a CONTRACT.md §19 telemetry sink.
+    ///
+    /// The sink receives [`crate::telemetry::TelemetryEvent`]s for request
+    /// start/end, §16 retries, and §9 refreshes, so metrics can be wired
+    /// without this crate depending on any metrics library. See
+    /// `examples/telemetry_otel.rs` for an OpenTelemetry adapter.
+    ///
+    /// Two guarantees worth knowing: a sink that panics cannot fail the
+    /// operation that fired it (§19.2 rule 2), and no event payload can carry a
+    /// token — the event type has a closed field set with no escape hatch
+    /// (§19.2 rule 3). The sink is invoked on the calling path, so it must not
+    /// block; buffer on your side if you need async delivery.
+    pub fn telemetry_hook(mut self, sink: impl crate::telemetry::TelemetrySink) -> Self {
+        self.telemetry = Some(std::sync::Arc::new(sink));
+        self
+    }
+
     /// Finalize the client. Fails if `base_url` or a tenant identifier is
     /// missing (§5 — never a silent default).
     pub fn build(self) -> Result<AxiamClient, AxiamError> {
@@ -405,6 +443,10 @@ reason: None,
                 oidc_clock_skew_sec,
                 oidc_verifiers: std::sync::RwLock::new(std::collections::HashMap::new()),
                 oidc_refresh_inflight: crate::oidc::single_flight::OidcRefreshInflight::new(),
+                // §16.1: the policy is on unless the caller turns it off.
+                retry_enabled: self.retry_enabled.unwrap_or(true),
+                telemetry: crate::telemetry::Telemetry::new(self.telemetry),
+                closed: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -435,6 +477,13 @@ pub(crate) struct AxiamClientInner {
     /// Latest captured `X-CSRF-Token` value, forwarded on state-changing
     /// verbs (§3). `None` until the first response carrying the cookie.
     pub(crate) csrf_token: std::sync::RwLock<Option<String>>,
+    /// CONTRACT.md §16.1 retry switch. Defaults to `true`.
+    pub(crate) retry_enabled: bool,
+    /// CONTRACT.md §19 telemetry dispatcher. Empty unless a sink was installed.
+    pub(crate) telemetry: crate::telemetry::Telemetry,
+    /// CONTRACT.md §18 shutdown flag. Set once by `close()`; read on every
+    /// operation so use-after-close is an error rather than a reconnect.
+    pub(crate) closed: std::sync::atomic::AtomicBool,
     /// Organization UUID resolved from the `org_id` claim of the verified
     /// access token after the first successful login/verify_mfa. See
     /// `OrgIdentifier` doc comment.
@@ -534,6 +583,58 @@ impl AxiamClient {
     /// Access the token manager (crate-internal use by `rest`/`grpc`).
     pub(crate) fn token_manager(&self) -> &TokenManager {
         &self.inner.token_manager
+    }
+
+    /// Whether the §16 retry policy is enabled on this client.
+    pub(crate) fn retry_enabled(&self) -> bool {
+        self.inner.retry_enabled
+    }
+
+    /// This client's §19 telemetry dispatcher.
+    pub(crate) fn telemetry(&self) -> &crate::telemetry::Telemetry {
+        &self.inner.telemetry
+    }
+
+    /// Release this client's transport resources (CONTRACT.md §18).
+    ///
+    /// Idempotent — calling it twice is not an error. Cleanup runs from error
+    /// paths, and an error path that itself fails hides the original failure.
+    ///
+    /// **This does not log out.** §18.1 rule 5: shutting down a client releases
+    /// *local* resources only and never reaches the network. The server-side
+    /// session deliberately outlives the client object, which is what lets a
+    /// process restart and resume; a `close()` that logged out would silently
+    /// end every user's session on each deploy. Call [`Self::logout`] first if
+    /// ending the session is what you actually want.
+    ///
+    /// After this returns, any operation on the client fails with
+    /// [`AxiamError::Network`] rather than silently reconnecting.
+    pub async fn close(&self) {
+        // `Release` pairs with the `Acquire` in `ensure_open`, so a thread that
+        // observes `closed` also observes everything that happened before it.
+        self.inner
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Drop the cookie jar's contents: §18.1 rule 3 requires the jar cleared,
+        // and it is the one piece of session state this type owns outright.
+        // `reqwest`'s pool is released when the last `Arc` clone drops — there
+        // is no eager shutdown hook — so the observable guarantee this method
+        // makes is "no further requests", enforced by `ensure_open`.
+        self.inner.token_manager.clear().await;
+    }
+
+    /// Returns an error if [`Self::close`] has been called (§18.1 rule 4).
+    ///
+    /// Use-after-close is an error, never undefined and never a silent
+    /// reconnect: a caller who kept a handle past shutdown has a bug, and
+    /// quietly reopening the transport would hide it.
+    pub(crate) fn ensure_open(&self) -> Result<(), AxiamError> {
+        if self.inner.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(AxiamError::network(
+                "client is closed: this AxiamClient was shut down with close()",
+            ));
+        }
+        Ok(())
     }
 
     /// Access the JWKS verifier (crate-internal use by `rest`/`middleware`).

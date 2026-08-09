@@ -159,9 +159,4 @@ impl Telemetry {
         // own invariants are its implementor's problem.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.emit(&event)));
     }
-
-    #[cfg(test)]
-    pub(crate) fn is_installed(&self) -> bool {
-        self.sink.is_some()
-    }
 }

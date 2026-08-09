@@ -244,6 +244,8 @@ impl AxiamClient {
     /// `LoginResult { mfa_required: true, .. }` carrying the challenge
     /// token; call [`Self::verify_mfa`] next.
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginResult, AxiamError> {
+        // §18.1 rule 4: use-after-close is an error, not a reconnect.
+        self.ensure_open()?;
         let body = self.build_login_body(email, password);
 
         let response = self
@@ -281,6 +283,8 @@ impl AxiamClient {
     /// `mfa_required` was `true`, using the challenge token captured
     /// internally from that prior `login()` call.
     pub async fn verify_mfa(&self, code: &str) -> Result<LoginResult, AxiamError> {
+        // §18.1 rule 4: use-after-close is an error, not a reconnect.
+        self.ensure_open()?;
         let challenge = self
             .take_pending_mfa_challenge()
             .ok_or_else(|| AxiamError::Auth {
@@ -323,6 +327,8 @@ impl AxiamClient {
     /// contains no refresh HTTP logic of its own beyond driving that guard
     /// with the actual `reqwest` call as its closure.
     pub async fn refresh(&self) -> Result<(), AxiamError> {
+        // §18.1 rule 4: use-after-close is an error, not a reconnect.
+        self.ensure_open()?;
         let observed =
             self.token_manager()
                 .cached_access_token()
@@ -428,6 +434,8 @@ impl AxiamClient {
     ///
     /// Clears in-memory token state and the jar's session cookies.
     pub async fn logout(&self) -> Result<(), AxiamError> {
+        // §18.1 rule 4: use-after-close is an error, not a reconnect.
+        self.ensure_open()?;
         let session_id = {
             // The server keys logout off the session id embedded in the
             // caller's own JWT (`jti`), cross-validated server-side against

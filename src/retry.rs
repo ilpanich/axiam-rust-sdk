@@ -412,15 +412,14 @@ mod tests {
         // caller — a slow success with no signal the server is failing.
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sink_events = events.clone();
-        let tel = Telemetry::new(Some(std::sync::Arc::new(
-            move |e: &TelemetryEvent| match e {
-                TelemetryEvent::Retry { attempt, delay, .. } => sink_events
+        let tel = Telemetry::new(Some(std::sync::Arc::new(move |e: &TelemetryEvent| {
+            if let TelemetryEvent::Retry { attempt, delay, .. } = e {
+                sink_events
                     .lock()
                     .unwrap()
-                    .push(format!("retry {attempt} {delay:?}")),
-                _ => {}
-            },
-        )));
+                    .push(format!("retry {attempt} {delay:?}"));
+            }
+        })));
         let sleeper = RecordingSleeper::default();
         let calls = std::sync::atomic::AtomicU32::new(0);
 
