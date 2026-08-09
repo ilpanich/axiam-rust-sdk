@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the case that breaks, and it breaks silently.
 - `AxiamClientBuilder::retry_enabled` (§16.6), default on. There is deliberately no knob
   for the attempt cap, base or delay cap: §16.1 forbids raising them.
+- `examples/telemetry_hook.rs` — a runnable §19 sink aggregating request counts, latency
+  and retries, with the exact OpenTelemetry mapping alongside it. Running it against an
+  unreachable host prints `count=3` and `retries=2`, which is the §16 attempt cap made
+  observable: without the hook a retried call is indistinguishable from a slow one.
+
+### Removed
+
+- The direct `backon` dependency. Nothing referenced it after §16 landed; it remains in
+  the lockfile only as a transitive dependency of `lapin` under the `amqp` feature.
 
 ### Changed
 
