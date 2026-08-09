@@ -51,6 +51,23 @@ mod sensitive;
 // compiled (transport modules below are feature-gated but all reuse this).
 mod url_guard;
 
+// CONTRACT.md §19 telemetry hooks. Deliberately ungated: the event types are
+// pure data with no transport dependency, so a caller can name them (and write
+// a sink) under any feature set.
+pub mod telemetry;
+
+// CONTRACT.md §16 bounded read-only retry policy. Internal — the policy is
+// machinery, and §16.6 makes only the disable switch public surface. Gated on
+// `rest` because it waits on the tokio timer.
+#[cfg(feature = "rest")]
+mod retry;
+
+// CONTRACT.md §17 client-side decision memo. Internal — §17.2 makes only the
+// TTL public surface. Off by default; see the module docs for the staleness
+// bound a caller accepts by enabling it.
+#[cfg(feature = "rest")]
+mod memo;
+
 pub use error::{AxiamError, IdTokenFailureReason, OAuthProtocolError};
 pub use sensitive::Sensitive;
 

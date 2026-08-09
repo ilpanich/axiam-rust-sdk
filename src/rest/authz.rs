@@ -5,13 +5,15 @@
 //! `tenant_id` is never sent in the body — the server derives it from the
 //! JWT (§5); the SDK only sends `X-Tenant-ID` as the CONTRACT.md §5 header.
 
-use backon::{ExponentialBuilder, Retryable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AxiamError;
 use crate::client::AxiamClient;
+use crate::memo::MemoKey;
 use crate::rest::auth::CsrfHeaderExt;
+use crate::retry::{Attempt, RetryRunner, ThreadRngJitter, TokioSleeper, parse_retry_after};
+use crate::telemetry::{Outcome, TelemetryEvent};
 
 const CHECK_PATH: &str = "/api/v1/authz/check";
 const BATCH_CHECK_PATH: &str = "/api/v1/authz/check/batch";
@@ -186,17 +188,22 @@ impl AxiamClient {
         &self,
         requests: Vec<AccessCheckRequest>,
     ) -> Result<Vec<AccessDecision>, AxiamError> {
+        self.ensure_open()?;
         let body = BatchCheckRequestBody { checks: requests };
         let client = self.clone();
 
-        let wire: BatchCheckResponseWire = (|| {
-            let client = client.clone();
-            let body_ref = &body;
-            async move { client.send_authz_post(BATCH_CHECK_PATH, body_ref).await }
-        })
-        .retry(retry_policy())
-        .when(is_retryable)
-        .await?;
+        let wire: BatchCheckResponseWire = self
+            .runner("batch_check")
+            .run(|attempt| {
+                let client = client.clone();
+                let body_ref = &body;
+                async move {
+                    client
+                        .send_authz_post("batch_check", BATCH_CHECK_PATH, body_ref, attempt)
+                        .await
+                }
+            })
+            .await?;
 
         Ok(wire.results)
     }
@@ -205,22 +212,93 @@ impl AxiamClient {
         &self,
         request: &AccessCheckRequest,
     ) -> Result<AccessDecision, AxiamError> {
+        self.ensure_open()?;
+
+        // §17: consult the memo first. Disabled by default, in which case
+        // `get_at` always misses and this costs one branch.
+        let memo = self.decision_memo();
+        let key = MemoKey::new(
+            request.subject_id,
+            request.resource_id,
+            &request.action,
+            request.scope.as_deref(),
+        );
+        if let Some(hit) = memo.get_at(&key, std::time::Instant::now()) {
+            return Ok(hit);
+        }
+
         let client = self.clone();
-        (|| {
-            let client = client.clone();
-            async move { client.send_authz_post(CHECK_PATH, request).await }
-        })
-        .retry(retry_policy())
-        .when(is_retryable)
-        .await
+        let decision = self
+            .runner("check_access")
+            .run(|attempt| {
+                let client = client.clone();
+                async move {
+                    client
+                        .send_authz_post("check_access", CHECK_PATH, request, attempt)
+                        .await
+                }
+            })
+            .await?;
+
+        // Only a decision the server actually returned is memoized: reaching
+        // here means `Ok`, so §17.1 rule 7's ban on negative-caching a failure
+        // is structural rather than a check that could be forgotten.
+        memo.put_at(key, &decision, std::time::Instant::now());
+        Ok(decision)
     }
 
-    async fn send_authz_post<B, R>(&self, path: &str, body: &B) -> Result<R, AxiamError>
+    /// A §16 runner bound to this client's telemetry sink and retry switch.
+    fn runner(&self, operation: &'static str) -> RetryRunner<'_> {
+        RetryRunner {
+            enabled: self.retry_enabled(),
+            operation,
+            telemetry: self.telemetry(),
+            jitter: &ThreadRngJitter,
+            sleeper: &TokioSleeper,
+        }
+    }
+
+    /// One attempt at an authz POST.
+    ///
+    /// Emits the §19 `RequestStart`/`RequestEnd` pair **per attempt**, not per
+    /// logical call: §19.2 rule 5 requires a caller to be able to count real
+    /// wire calls from the events, which one pair per operation would hide.
+    /// `path` doubles as the §19.1 path template — these are literal constants
+    /// with no ids substituted in, so there is no cardinality risk.
+    async fn send_authz_post<B, R>(
+        &self,
+        operation: &'static str,
+        path: &'static str,
+        body: &B,
+        attempt: u32,
+    ) -> Result<R, Attempt>
     where
         B: Serialize + ?Sized,
         R: for<'de> Deserialize<'de>,
     {
-        let response = self
+        let telemetry = self.telemetry();
+        telemetry.emit(TelemetryEvent::RequestStart {
+            operation,
+            method: "POST",
+            path_template: path,
+            attempt,
+        });
+        let started = std::time::Instant::now();
+
+        // Closes the §19 pair exactly once, on every exit path.
+        let finish = |status: Option<u16>, outcome: Outcome| {
+            telemetry.emit(TelemetryEvent::RequestEnd {
+                operation,
+                method: "POST",
+                path_template: path,
+                attempt,
+                status,
+                duration: started.elapsed(),
+                outcome,
+            });
+        };
+
+        let response = match self
             .http()
             .post(self.authz_url(path))
             .header("X-Tenant-ID", self.tenant_header_value())
@@ -231,24 +309,51 @@ impl AxiamClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| AxiamError::Network {
-                message: format!("authz request failed: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                finish(None, Outcome::Failure);
+                return Err(Attempt::bare(AxiamError::Network {
+                    message: format!("authz request failed: {e}"),
+                    source: Some(Box::new(e)),
+                }));
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            // Read the hint before consuming the body — §16.1 makes it a floor
+            // on the next wait, and it typically rides a 429 or 503.
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after);
             let message = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "no response body".to_string());
-            return Err(AxiamError::from_http_status(status, message));
+            finish(Some(status), Outcome::Failure);
+            return Err(Attempt {
+                err: AxiamError::from_http_status(status, message),
+                retry_after,
+            });
         }
 
-        response.json().await.map_err(|e| AxiamError::Network {
-            message: format!("failed to parse authz response body: {e}"),
-            source: Some(Box::new(e)),
-        })
+        let status = response.status().as_u16();
+        match response.json().await {
+            Ok(v) => {
+                finish(Some(status), Outcome::Success);
+                Ok(v)
+            }
+            Err(e) => {
+                finish(Some(status), Outcome::Failure);
+                Err(Attempt::bare(AxiamError::Network {
+                    message: format!("failed to parse authz response body: {e}"),
+                    source: Some(Box::new(e)),
+                }))
+            }
+        }
     }
 
     fn authz_url(&self, path: &str) -> url::Url {
@@ -258,14 +363,8 @@ impl AxiamClient {
     }
 }
 
-/// Bounded exponential backoff for read-only authz checks (D-12): max 3
-/// attempts total (1 initial + 2 retries).
-fn retry_policy() -> ExponentialBuilder {
-    ExponentialBuilder::default().with_max_times(2)
-}
-
-/// Only retry `NetworkError` (transient/429/5xx) — never retry `Auth`/`Authz`
-/// failures, which are decisive, not transient (§9/D-12).
-fn is_retryable(err: &AxiamError) -> bool {
-    matches!(err, AxiamError::Network { .. })
-}
+// The retry policy that used to live here — `backon`'s ExponentialBuilder
+// defaults with `with_max_times(2)` — has moved to `crate::retry`, which
+// implements CONTRACT.md §16's normative table: full jitter over [0, backoff]
+// rather than backon's narrower `[0, min_delay)` addition, and `Retry-After`
+// honored as a floor, neither of which the old policy did.
