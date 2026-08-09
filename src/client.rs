@@ -328,8 +328,8 @@ impl AxiamClientBuilder {
     /// role and immediately re-checks is the case that breaks, and it breaks
     /// silently. If that is your workload, leave this off.
     ///
-    /// `ttl` is clamped to [`crate::memo::MAX_TTL`] (5 s) rather than rejected,
-    /// so asking for 60 s gets you 5 s. Allows and denies are memoized
+    /// `ttl` is clamped to **5 seconds** rather than rejected, so asking for
+    /// 60 s gets you 5 s. Allows and denies are memoized
     /// identically (§17.1 rule 4 — asymmetric caching leaks the outcome through
     /// latency), failures are never memoized, and the memo is cleared on
     /// `login`/`logout`/`refresh`. The §11 route guard's fail-closed path never
