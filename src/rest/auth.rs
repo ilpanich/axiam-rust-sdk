@@ -246,6 +246,10 @@ impl AxiamClient {
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginResult, AxiamError> {
         // §18.1 rule 4: use-after-close is an error, not a reconnect.
         self.ensure_open()?;
+        // §17.1 rule 9: entries are keyed by subject, not session, so any
+        // credential change must drop them — otherwise a re-authentication as
+        // a different principal inherits the previous one's decisions.
+        self.decision_memo().clear();
         let body = self.build_login_body(email, password);
 
         let response = self
@@ -285,6 +289,10 @@ impl AxiamClient {
     pub async fn verify_mfa(&self, code: &str) -> Result<LoginResult, AxiamError> {
         // §18.1 rule 4: use-after-close is an error, not a reconnect.
         self.ensure_open()?;
+        // §17.1 rule 9: entries are keyed by subject, not session, so any
+        // credential change must drop them — otherwise a re-authentication as
+        // a different principal inherits the previous one's decisions.
+        self.decision_memo().clear();
         let challenge = self
             .take_pending_mfa_challenge()
             .ok_or_else(|| AxiamError::Auth {
@@ -329,6 +337,10 @@ impl AxiamClient {
     pub async fn refresh(&self) -> Result<(), AxiamError> {
         // §18.1 rule 4: use-after-close is an error, not a reconnect.
         self.ensure_open()?;
+        // §17.1 rule 9: entries are keyed by subject, not session, so any
+        // credential change must drop them — otherwise a re-authentication as
+        // a different principal inherits the previous one's decisions.
+        self.decision_memo().clear();
         let observed =
             self.token_manager()
                 .cached_access_token()
@@ -436,6 +448,10 @@ impl AxiamClient {
     pub async fn logout(&self) -> Result<(), AxiamError> {
         // §18.1 rule 4: use-after-close is an error, not a reconnect.
         self.ensure_open()?;
+        // §17.1 rule 9: entries are keyed by subject, not session, so any
+        // credential change must drop them — otherwise a re-authentication as
+        // a different principal inherits the previous one's decisions.
+        self.decision_memo().clear();
         let session_id = {
             // The server keys logout off the session id embedded in the
             // caller's own JWT (`jti`), cross-validated server-side against

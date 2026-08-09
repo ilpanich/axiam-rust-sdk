@@ -19,12 +19,126 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15 (including §6.1 mTLS, the
-§10.1 minimum local-verification set, and §13 webhook signature verification).
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19 (including §6.1
+mTLS, the §10.1 minimum local-verification set, and §13 webhook signature verification).
+The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
+are not named — a MUST is not something an SDK opts into.
 
-§12.7, §14 and §15 are named rather than folded into the range because they landed after
-this SDK already claimed §1–§13: widening the range silently would turn a statement that
-was true when written into a different claim without anyone editing it.
+§12.7, §14, §15, §17 and §19 are named rather than folded into the range because they
+landed after this SDK already claimed §1–§13: widening the range silently would turn a
+statement that was true when written into a different claim without anyone editing it.
+
+### Retry policy (§16)
+
+Read-only authorization checks — `check_access`, `check_access_as`, `can`, `batch_check`
+— retry transient failures under the contract's normative table: **3 attempts** (1 initial
++ 2 retries), 200 ms base, 5 s cap, **full jitter** (uniform over `[0, backoff]`), and
+`Retry-After` honored as a **floor**.
+
+Only failures that could plausibly succeed on a second attempt are retried — transport
+errors, `408`, `429`, `5xx`. A `401` or `403` is an answer, not a transport failure, and
+is surfaced after exactly one attempt.
+
+Nothing that changes server state is ever retried. `login`, `verify_mfa`, `refresh`,
+`logout`, `oidc_exchange`, `device_authorize`, `device_login`, `token_exchange` and
+`oidc_revoke` all make exactly one attempt, for two independent reasons: a transient
+failure *after* the server committed is indistinguishable at the client from one before
+it, and their credentials are single-use, so a retry replays a spent credential into a
+hard `invalid_grant`.
+
+```rust
+// Turn it off if you own your own retry layer — you know your deadline, this SDK doesn't.
+let client = AxiamClient::builder()
+    .base_url("https://axiam.example.com")?
+    .tenant_slug("acme")
+    .retry_enabled(false)
+    .build()?;
+```
+
+There is deliberately no knob for the attempt cap, base delay or delay cap: §16.1 forbids
+raising them, and eleven SDKs agreeing on one table is the point of the section.
+
+### Deterministic shutdown (§18)
+
+`AxiamClient::close()` releases the client's local resources. It is idempotent, and any
+call afterwards fails with an `AxiamError::Network` naming the cause rather than silently
+reconnecting.
+
+**`close()` does not log out.** It never reaches the network. The server-side session
+deliberately outlives the client object — that is what lets a process restart and resume —
+so a `close()` that logged out would silently end every user's session on each deploy.
+Call `logout()` first if ending the session is what you want.
+
+```rust
+client.close().await;                  // local teardown only
+assert!(client.can("read", id, None).await.is_err());
+```
+
+### Telemetry hooks (§19)
+
+Wire metrics without this crate depending on any metrics library:
+
+```rust
+use axiam_sdk::telemetry::TelemetryEvent;
+
+let client = AxiamClient::builder()
+    .base_url("https://axiam.example.com")?
+    .tenant_slug("acme")
+    .telemetry_hook(|event: &TelemetryEvent| match event {
+        TelemetryEvent::RequestEnd { operation, duration, outcome, .. } => {
+            metrics::histogram!("axiam.request", duration, "op" => *operation, "outcome" => format!("{outcome:?}"));
+        }
+        TelemetryEvent::Retry { operation, attempt, .. } => {
+            metrics::counter!("axiam.retry", 1, "op" => *operation, "attempt" => attempt.to_string());
+        }
+        _ => {}
+    })
+    .build()?;
+```
+
+Three properties worth knowing:
+
+- **A hook that panics cannot fail the operation that fired it.** Telemetry is not
+  permitted to fail an authorization check.
+- **No event payload can carry a token.** `TelemetryEvent` has a closed field set with no
+  escape hatch — this surface exists to be shipped to a metrics backend, which is the last
+  place a bearer token should land.
+- **Path templates, not URLs.** `/api/v1/authz/check`, never a path with ids substituted
+  in, so a metric label cannot become a cardinality bomb.
+
+One `RequestStart`/`RequestEnd` pair is emitted **per attempt**, not per logical call, so
+you can count real wire calls. The `Retry` event exists because a retried-then-succeeded
+operation is otherwise invisible — a slow success with no signal that the server is
+failing.
+
+### Decision memo (§17) — opt-in, off by default
+
+An optional TTL-bounded cache for `check_access` results. **Disabled by default**, because
+§11.2 rule 6's ban on caching authorization decisions is still the default behaviour.
+
+```rust
+let client = AxiamClient::builder()
+    .base_url("https://axiam.example.com")?
+    .tenant_slug("acme")
+    .decision_memo_ttl(Duration::from_secs(5))   // 0 = off, which is the default
+    .build()?;
+```
+
+**What you are accepting.** The staleness bound is the TTL, in *both* directions: a grant
+revoked on the server can still read as allowed for up to the TTL, and a grant just added
+can still read as denied for up to the TTL.
+
+> **Reads-your-own-writes is not guaranteed.** An admin UI that grants a role and
+> immediately re-checks is the case that breaks, and it breaks silently. If that is your
+> workload, leave this off.
+
+The TTL is clamped to 5 s rather than rejected, so asking for an hour gets you 5 s. Allows
+and denies are memoized identically — asymmetric caching would leak which outcome occurred
+through latency. Failures are never memoized: caching a transport error as a deny would
+turn a blip into a TTL-long outage. The memo is cleared on `login`, `verify_mfa`,
+`refresh` and `logout`, since entries are keyed by subject rather than by session. And the
+§11 route guard's fail-closed path never consults it, so an outage cannot be papered over
+with a stale allow.
 
 ### §10.1 minimum local-verification set
 

@@ -102,6 +102,9 @@ pub struct AxiamClientBuilder {
     /// §19 telemetry sink. `None` means no hook installed, which costs one
     /// branch per request.
     telemetry: Option<std::sync::Arc<dyn crate::telemetry::TelemetrySink>>,
+    /// §17 decision-memo TTL. `None` (and `Some(ZERO)`) mean disabled, which
+    /// is the default.
+    decision_memo_ttl: Option<Duration>,
 }
 
 impl AxiamClientBuilder {
@@ -311,6 +314,31 @@ impl AxiamClientBuilder {
         self
     }
 
+    /// Enable the CONTRACT.md §17 client-side decision memo with `ttl`.
+    /// **Default: disabled** (`Duration::ZERO`, which means off — not "cache
+    /// for zero seconds").
+    ///
+    /// # What you are accepting
+    ///
+    /// The staleness bound is `ttl`, **in both directions**. A grant revoked on
+    /// the server can still read as `allowed` for up to `ttl`, and a grant just
+    /// added can still read as denied for up to `ttl`.
+    ///
+    /// **Reads-your-own-writes is not guaranteed.** An admin UI that grants a
+    /// role and immediately re-checks is the case that breaks, and it breaks
+    /// silently. If that is your workload, leave this off.
+    ///
+    /// `ttl` is clamped to [`crate::memo::MAX_TTL`] (5 s) rather than rejected,
+    /// so asking for 60 s gets you 5 s. Allows and denies are memoized
+    /// identically (§17.1 rule 4 — asymmetric caching leaks the outcome through
+    /// latency), failures are never memoized, and the memo is cleared on
+    /// `login`/`logout`/`refresh`. The §11 route guard's fail-closed path never
+    /// consults it, so an outage cannot be papered over with a stale allow.
+    pub fn decision_memo_ttl(mut self, ttl: Duration) -> Self {
+        self.decision_memo_ttl = Some(ttl);
+        self
+    }
+
     /// Finalize the client. Fails if `base_url` or a tenant identifier is
     /// missing (§5 — never a silent default).
     pub fn build(self) -> Result<AxiamClient, AxiamError> {
@@ -446,6 +474,10 @@ reason: None,
                 // §16.1: the policy is on unless the caller turns it off.
                 retry_enabled: self.retry_enabled.unwrap_or(true),
                 telemetry: crate::telemetry::Telemetry::new(self.telemetry),
+                // §17.1 rule 1: off unless the caller asked for it.
+                decision_memo: crate::memo::DecisionMemo::new(
+                    self.decision_memo_ttl.unwrap_or(Duration::ZERO),
+                ),
                 closed: std::sync::atomic::AtomicBool::new(false),
             }),
         })
@@ -481,6 +513,8 @@ pub(crate) struct AxiamClientInner {
     pub(crate) retry_enabled: bool,
     /// CONTRACT.md §19 telemetry dispatcher. Empty unless a sink was installed.
     pub(crate) telemetry: crate::telemetry::Telemetry,
+    /// CONTRACT.md §17 decision memo. Disabled unless a TTL was configured.
+    pub(crate) decision_memo: crate::memo::DecisionMemo,
     /// CONTRACT.md §18 shutdown flag. Set once by `close()`; read on every
     /// operation so use-after-close is an error rather than a reconnect.
     pub(crate) closed: std::sync::atomic::AtomicBool,
@@ -593,6 +627,11 @@ impl AxiamClient {
     /// This client's §19 telemetry dispatcher.
     pub(crate) fn telemetry(&self) -> &crate::telemetry::Telemetry {
         &self.inner.telemetry
+    }
+
+    /// This client's §17 decision memo (disabled by default).
+    pub(crate) fn decision_memo(&self) -> &crate::memo::DecisionMemo {
+        &self.inner.decision_memo
     }
 
     /// Release this client's transport resources (CONTRACT.md §18).

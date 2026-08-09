@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::AxiamError;
 use crate::client::AxiamClient;
+use crate::memo::MemoKey;
 use crate::rest::auth::CsrfHeaderExt;
 use crate::retry::{Attempt, RetryRunner, ThreadRngJitter, TokioSleeper, parse_retry_after};
 use crate::telemetry::{Outcome, TelemetryEvent};
@@ -212,8 +213,23 @@ impl AxiamClient {
         request: &AccessCheckRequest,
     ) -> Result<AccessDecision, AxiamError> {
         self.ensure_open()?;
+
+        // §17: consult the memo first. Disabled by default, in which case
+        // `get_at` always misses and this costs one branch.
+        let memo = self.decision_memo();
+        let key = MemoKey::new(
+            request.subject_id,
+            request.resource_id,
+            &request.action,
+            request.scope.as_deref(),
+        );
+        if let Some(hit) = memo.get_at(&key, std::time::Instant::now()) {
+            return Ok(hit);
+        }
+
         let client = self.clone();
-        self.runner("check_access")
+        let decision = self
+            .runner("check_access")
             .run(|attempt| {
                 let client = client.clone();
                 async move {
@@ -222,7 +238,13 @@ impl AxiamClient {
                         .await
                 }
             })
-            .await
+            .await?;
+
+        // Only a decision the server actually returned is memoized: reaching
+        // here means `Ok`, so §17.1 rule 7's ban on negative-caching a failure
+        // is structural rather than a check that could be forgotten.
+        memo.put_at(key, &decision, std::time::Instant::now());
+        Ok(decision)
     }
 
     /// A §16 runner bound to this client's telemetry sink and retry switch.

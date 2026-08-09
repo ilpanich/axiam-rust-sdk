@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **§16 bounded read-only retry policy.** §11.2 rule 5 and §14.2 rule 6 had both been
+  *requiring* retries "under the SDK's existing bounded read-only retry policy" while no
+  such policy existed in the contract; this crate's improvisation was `backon`'s defaults
+  with `with_max_times(2)`. Contract 1.8 wrote the table down and `src/retry.rs`
+  implements it: 3 attempts, 200 ms base, 5 s cap, **full jitter** over `[0, backoff]`,
+  and `Retry-After` honored as a floor. Hand-rolled rather than reconfigured because
+  `backon`'s `with_jitter()` adds a value in `[0, min_delay)` — a much narrower
+  distribution, and partial jitter is what *causes* the thundering herd retries are meant
+  to prevent — and because it has no seam for `Retry-After`. Both non-deterministic inputs
+  are injected, so the tests pin the jitter fraction to 0.0 and 1.0 to prove the range and
+  record delays instead of sleeping.
+- **§18 deterministic shutdown.** `AxiamClient::close()`, idempotent, with use-after-close
+  raising rather than silently reconnecting. It does **not** log out and never reaches the
+  network: the server-side session outlives the client object, and a `close()` that logged
+  out would end every user's session on each deploy.
+- **§19 telemetry hooks.** `AxiamClientBuilder::telemetry_hook` and the `telemetry` module,
+  so callers can wire OpenTelemetry or Prometheus without this crate depending on either.
+  A panicking hook cannot fail the operation that fired it, and `TelemetryEvent` has a
+  closed field set so no payload can carry a token. One request pair per *attempt*, not per
+  logical call, so callers can count real wire calls.
+- **§17 client-side decision memo — opt-in, off by default.**
+  `AxiamClientBuilder::decision_memo_ttl`, TTL clamped to 5 s. Allows and denies are
+  memoized identically (asymmetric caching leaks the outcome through latency), failures
+  are never memoized, and the memo is cleared on any credential change. **Reads-your-own-
+  writes is not guaranteed** — an admin UI that grants a role and immediately re-checks is
+  the case that breaks, and it breaks silently.
+- `AxiamClientBuilder::retry_enabled` (§16.6), default on. There is deliberately no knob
+  for the attempt cap, base or delay cap: §16.1 forbids raising them.
+
+### Changed
+
+- Re-vendored `CONTRACT.md` at **1.8**. `openapi.json` is unchanged — 1.8 is docs-only.
+- `check_access`/`can`/`batch_check` now run under the §16 runner rather than `backon`, so
+  they gain full jitter and `Retry-After` handling. The retry-eligible set is unchanged and
+  remains authz reads only; no mutation became retryable.
+
+### Notes
+
+- `Retry-After` is **not** clamped to the 5 s delay cap. That cap governs the computed
+  backoff, while §16.1 makes the hint a floor with no ceiling — clamping it would retry
+  sooner than the server said it would be ready. Exposure stays bounded by the attempt cap.
+- The hint rides on an internal type rather than on `AxiamError`. §16 requires the policy
+  to *honor* `Retry-After`, not callers to read it, so the public error type is unchanged.
+- `backon` remains a dependency; removing it is a separate cleanup once the other call
+  sites migrate.
+
 ## [1.0.0-alpha24] - 2026-08-04
 
 ### Added

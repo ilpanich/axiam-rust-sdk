@@ -62,6 +62,12 @@ pub mod telemetry;
 #[cfg(feature = "rest")]
 mod retry;
 
+// CONTRACT.md §17 client-side decision memo. Internal — §17.2 makes only the
+// TTL public surface. Off by default; see the module docs for the staleness
+// bound a caller accepts by enabling it.
+#[cfg(feature = "rest")]
+mod memo;
+
 pub use error::{AxiamError, IdTokenFailureReason, OAuthProtocolError};
 pub use sensitive::Sensitive;
 
