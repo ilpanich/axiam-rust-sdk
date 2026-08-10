@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **§19 `TelemetryEvent::ConfigClamped` (contract 1.9).** The SDK now reports a clamped
+  setting at construction rather than applying it silently — currently the §17.1 rule 2 memo
+  TTL. Clamping is right; clamping *silently* is not: an operator who set a 60-second TTL
+  believes their staleness bound is 60 seconds, and it is five. Nothing is emitted for a value
+  already within its limit, or for the disabled default — an event that fires when nothing
+  happened trains its reader to ignore it.
+
+### Changed
+
+- Re-vendored `CONTRACT.md` at **1.9**.
+
+## [Unreleased]
+
+### Added
+
 - **§16 bounded read-only retry policy.** §11.2 rule 5 and §14.2 rule 6 had both been
   *requiring* retries "under the SDK's existing bounded read-only retry policy" while no
   such policy existed in the contract; this crate's improvisation was `backon`'s defaults

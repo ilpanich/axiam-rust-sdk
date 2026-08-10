@@ -473,7 +473,19 @@ reason: None,
                 oidc_refresh_inflight: crate::oidc::single_flight::OidcRefreshInflight::new(),
                 // §16.1: the policy is on unless the caller turns it off.
                 retry_enabled: self.retry_enabled.unwrap_or(true),
-                telemetry: crate::telemetry::Telemetry::new(self.telemetry),
+                telemetry: {
+                    let telemetry = crate::telemetry::Telemetry::new(self.telemetry);
+                    // §19.2 rule 6: a clamped setting is reported, not swallowed.
+                    // Emitted here because construction is the only moment an
+                    // operator can act on it.
+                    let requested = self.decision_memo_ttl.unwrap_or(Duration::ZERO);
+                    crate::memo::DecisionMemo::report_clamp(
+                        requested,
+                        requested.min(crate::memo::MAX_TTL),
+                        &telemetry,
+                    );
+                    telemetry
+                },
                 // §17.1 rule 1: off unless the caller asked for it.
                 decision_memo: crate::memo::DecisionMemo::new(
                     self.decision_memo_ttl.unwrap_or(Duration::ZERO),

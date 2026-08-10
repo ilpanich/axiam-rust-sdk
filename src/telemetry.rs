@@ -102,6 +102,32 @@ pub enum TelemetryEvent {
         /// How long the refresh (or the wait for one) took.
         duration: Duration,
     },
+    /// Emitted at construction, once per caller-supplied setting the SDK
+    /// clamped (§19.1, §19.2 rule 6).
+    ///
+    /// Two places in the contract require clamping rather than rejecting:
+    /// §16.1's attempt cap, base delay and delay cap, and §17.1 rule 2's memo
+    /// TTL. Both clamps are right — rejecting would break a caller whose
+    /// configuration was merely optimistic, and honoring would let one client
+    /// become the herd §16 exists to prevent. Doing it *silently* is the part
+    /// that is wrong.
+    ///
+    /// An operator who set a 60-second memo TTL believes they have one. They
+    /// have five seconds, and their staleness reasoning is off by a factor of
+    /// twelve with nothing anywhere to say so.
+    ///
+    /// Not emitted for a value already within its limit: an event that fires
+    /// when nothing happened trains its reader to ignore it.
+    ConfigClamped {
+        /// The setting's name, e.g. `decision_memo_ttl`.
+        setting: &'static str,
+        /// The value the caller asked for, rendered.
+        requested: String,
+        /// The value actually in force, rendered.
+        effective: String,
+        /// The §-reference for the limit, e.g. `§17.1 rule 2`.
+        contract_reference: &'static str,
+    },
 }
 
 /// A caller-supplied telemetry sink (§19).
