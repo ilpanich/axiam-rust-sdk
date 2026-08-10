@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::rest::authz::AccessDecision;
+use crate::telemetry::{Telemetry, TelemetryEvent};
 
 /// The §17.1 rule 2 ceiling. A configured TTL above this is clamped, not
 /// rejected: a caller who asked for 60 s wants caching, and silently giving
@@ -91,6 +92,26 @@ pub(crate) struct DecisionMemo {
 }
 
 impl DecisionMemo {
+    /// Report a clamped TTL through §19 (§19.2 rule 6).
+    ///
+    /// Clamping is right; clamping *silently* is not. An operator who set a
+    /// 60-second TTL believes their staleness bound is 60 seconds — it is five,
+    /// and without this event nothing anywhere says so.
+    ///
+    /// Nothing is emitted when the requested value was already inside the
+    /// limit, or when the memo is disabled.
+    pub(crate) fn report_clamp(requested: Duration, effective: Duration, telemetry: &Telemetry) {
+        if requested.is_zero() || requested == effective {
+            return;
+        }
+        telemetry.emit(TelemetryEvent::ConfigClamped {
+            setting: "decision_memo_ttl",
+            requested: format!("{requested:?}"),
+            effective: format!("{effective:?}"),
+            contract_reference: "§17.1 rule 2",
+        });
+    }
+
     /// Build a memo with `ttl`, clamped to [`MAX_TTL`] (§17.1 rule 2).
     pub(crate) fn new(ttl: Duration) -> Self {
         Self {
