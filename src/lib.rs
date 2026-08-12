@@ -105,6 +105,7 @@ pub mod middleware;
 // AMQP-only consumer already has the identical crypto stack and gating a pure
 // HMAC helper away from it would be arbitrary.
 #[cfg(any(feature = "rest", feature = "amqp"))]
+pub mod uma;
 pub mod webhook;
 
 // §11 declarative authorization helpers: re-export the proc-macro attributes
