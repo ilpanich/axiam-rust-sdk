@@ -76,13 +76,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("no WWW-Authenticate header: this refusal is not actionable.");
         return Ok(());
     };
-    println!("challenge: {header}");
 
     // ---- 2. Parse, and only parse ----
     let Some(challenge) = uma_parse_challenge(&header) else {
         println!("the challenge is not a UMA one; nothing to redeem.");
         return Ok(());
     };
+
+    // Nothing from the challenge is echoed, and there are two separate reasons.
+    //
+    // The ticket, because §20.6 says so: its 60-second life does not make it
+    // harmless — for those 60 seconds it IS the credential that converts into an
+    // RPT, so a header in a log line is a live credential in a log line.
+    //
+    // The realm and as_uri, because they are strings a *remote* server chose.
+    // They are not secrets, but echoing attacker-controlled text into a terminal
+    // or a log file is its own small hazard (escape sequences, log forging), and
+    // an example is the last place to teach the habit. What matters here is the
+    // shape of the challenge, not its contents.
+    println!(
+        "challenge parsed: as_uri present={}, ticket present={}",
+        challenge.as_uri.is_some(),
+        challenge.ticket.is_some()
+    );
+
     let Some(ticket) = challenge.ticket else {
         println!("the challenge names no ticket; nothing to redeem.");
         return Ok(());
@@ -105,8 +122,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(as_uri) if as_uri.trim_end_matches('/') == trusted_issuer.trim_end_matches('/') => {
             println!("as_uri matches the issuer we already trust; redeeming.");
         }
-        Some(as_uri) => {
-            println!("refusing to redeem: as_uri {as_uri} is not our issuer {trusted_issuer}.");
+        Some(_) => {
+            // The nominated value is deliberately not echoed — see above. Our own
+            // issuer is ours to print, and it is the half a reader needs to debug
+            // the mismatch.
+            println!(
+                "refusing to redeem: the challenge nominates a server that is not {trusted_issuer}."
+            );
             println!("this is the auto-exchange §20.3 forbids, and why it forbids it.");
             return Ok(());
         }
