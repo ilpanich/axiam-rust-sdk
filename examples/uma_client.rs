@@ -76,13 +76,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("no WWW-Authenticate header: this refusal is not actionable.");
         return Ok(());
     };
-    println!("challenge: {header}");
 
     // ---- 2. Parse, and only parse ----
     let Some(challenge) = uma_parse_challenge(&header) else {
         println!("the challenge is not a UMA one; nothing to redeem.");
         return Ok(());
     };
+
+    // Print the *parsed* fields, never the raw header. The header contains
+    // `ticket="..."`, and §20.6 is explicit that the ticket's 60-second life
+    // does not make it harmless: for those 60 seconds it is the credential that
+    // converts into an RPT, so a header in a log line is a live credential in a
+    // log line. `realm` and `as_uri` are not secrets and are the two fields you
+    // actually need to look at.
+    println!(
+        "challenge: realm={:?} as_uri={:?} ticket=[REDACTED]",
+        challenge.realm, challenge.as_uri
+    );
+
     let Some(ticket) = challenge.ticket else {
         println!("the challenge names no ticket; nothing to redeem.");
         return Ok(());
