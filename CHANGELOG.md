@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **§20.3 challenge emission wired into the §11 route guard.** `RequireAccess::with_uma_challenge`
+  takes a new `middleware::UmaChallenger`; on denial the guard mints a permission ticket for
+  the action it just refused and returns `WWW-Authenticate: UMA` alongside the 403. New
+  `AuthzGuardError::DeniedWithChallenge` carries the formatted header, because minting is a
+  wire call and `ResponseError::error_response` is synchronous — by the time the variant
+  exists the ticket is already in hand.
+
+  **Opt-in by construction.** Emitting a challenge means minting a credential, so a guard
+  that did it by default would turn every unauthorized request into a Protection API call.
+  And **failure is not escalation**: if minting fails the denial still surfaces as a plain
+  403, because a caller who was going to be refused is refused either way and an outage must
+  not turn a deny into a 500 — still less into an allow.
+
+- **A runnable UMA example pair**: [`examples/uma_resource_server.rs`](examples/uma_resource_server.rs)
+  mints a PAT, registers a resource and guards a route with the challenger;
+  [`examples/uma_client.rs`](examples/uma_client.rs) catches the refusal, parses the
+  challenge, **makes the trust decision about `as_uri` explicitly**, exchanges the ticket and
+  retries with the RPT. The client half exists partly to show what §20.3 is protecting: the
+  `as_uri` is chosen by the server you just failed against, and the example refuses to redeem
+  against a host that is not the issuer it already trusts.
+
 - **§20 UMA 2.0 — Protection API and ticket grant (contract 1.10).** New `uma` module:
   `uma_register_resource` / `uma_read_resource` / `uma_update_resource` /
   `uma_delete_resource` / `uma_list_resources`, `uma_request_ticket`,

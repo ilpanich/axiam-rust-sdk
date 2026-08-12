@@ -261,3 +261,11 @@ required-features = ["actix", "macros"]
 name = "jwks_verify"
 harness = false
 required-features = ["rest"]
+
+[[example]]
+name = "uma_resource_server"
+required-features = ["rest", "actix"]
+
+[[example]]
+name = "uma_client"
+required-features = ["rest"]

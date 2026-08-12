@@ -53,6 +53,14 @@ pub enum AuthzGuardError {
     Unauthenticated(String),
     /// The authorization check denied the request — 403 `authorization_denied`.
     Denied(String),
+    /// Denied, and a `WWW-Authenticate: UMA` challenge was minted for the
+    /// caller — 403 `authorization_denied` with the §20.3 header attached.
+    ///
+    /// Carries `(message, header_value)`. The header is built during the async
+    /// [`RequireAccess::check`], because minting a ticket is a wire call and
+    /// [`actix_web::ResponseError::error_response`] is synchronous; by the time
+    /// this variant exists the ticket is already in hand.
+    DeniedWithChallenge(String, String),
     /// The resource id could not be resolved to a UUID — 400 `invalid_request`.
     InvalidResource(String),
     /// The authorization service could not be reached (fail closed) — 503
@@ -72,6 +80,20 @@ impl AuthzGuardError {
     /// Build a 403 `authorization_denied` error with `message`.
     pub fn denied(message: impl Into<String>) -> Self {
         Self::Denied(message.into())
+    }
+
+    /// Build a 403 `authorization_denied` error that also carries a
+    /// `WWW-Authenticate: UMA` challenge (§20.3).
+    ///
+    /// `header_value` is the complete header value, already formatted by
+    /// [`crate::uma::uma_challenge_header`] — the ticket inside it is a live
+    /// credential for its 60-second life, so it is built once, here, and never
+    /// re-derived on a later render of the response.
+    pub fn denied_with_challenge(
+        message: impl Into<String>,
+        header_value: impl Into<String>,
+    ) -> Self {
+        Self::DeniedWithChallenge(message.into(), header_value.into())
     }
 
     /// Build a 400 `invalid_request` error with `message`, for a resource id
@@ -96,7 +118,7 @@ impl AuthzGuardError {
     fn code(&self) -> &'static str {
         match self {
             Self::Unauthenticated(_) => "authentication_failed",
-            Self::Denied(_) => "authorization_denied",
+            Self::Denied(_) | Self::DeniedWithChallenge(..) => "authorization_denied",
             Self::InvalidResource(_) => "invalid_request",
             Self::Unavailable(_) => "authz_unavailable",
             Self::Misconfigured(_) => "internal_error",
@@ -108,6 +130,7 @@ impl AuthzGuardError {
         match self {
             Self::Unauthenticated(m)
             | Self::Denied(m)
+            | Self::DeniedWithChallenge(m, _)
             | Self::InvalidResource(m)
             | Self::Unavailable(m)
             | Self::Misconfigured(m) => m,
@@ -133,7 +156,7 @@ impl actix_web::ResponseError for AuthzGuardError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
-            Self::Denied(_) => StatusCode::FORBIDDEN,
+            Self::Denied(_) | Self::DeniedWithChallenge(..) => StatusCode::FORBIDDEN,
             Self::InvalidResource(_) => StatusCode::BAD_REQUEST,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Misconfigured(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -141,7 +164,14 @@ impl actix_web::ResponseError for AuthzGuardError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code()).json(ErrorBody {
+        let mut builder = HttpResponse::build(self.status_code());
+        if let Self::DeniedWithChallenge(_, header) = self {
+            // §20.3: tell the caller where to redeem authority. The body is the
+            // unchanged §11.5 shape — the challenge is additive, so a client
+            // that does not speak UMA sees exactly the 403 it saw before.
+            builder.insert_header((actix_web::http::header::WWW_AUTHENTICATE, header.as_str()));
+        }
+        builder.json(ErrorBody {
             error: self.code(),
             message: self.message(),
         })
@@ -217,6 +247,70 @@ pub fn require_role_check(user: &AxiamUser, required: &[&str]) -> Result<(), Aut
     }
 }
 
+/// A configured `WWW-Authenticate: UMA` challenge emitter (§20.3, emit half).
+///
+/// Attach one to a [`RequireAccess`] with
+/// [`RequireAccess::with_uma_challenge`] and a denial stops being a bare 403:
+/// the guard mints a fresh permission ticket for the pairs the caller lacked
+/// and returns it in the header, so a UMA-aware client knows where to go for
+/// authority instead of only being told "no".
+///
+/// **Opt-in, and deliberately so.** Emitting a challenge means minting a
+/// credential — a wire call to the Protection API, and a live ticket, produced
+/// on a path the caller did not explicitly request. A guard that did that on
+/// every denial by default would turn each unauthorized request into a
+/// Protection API call, which is a denial-of-service amplifier pointed at your
+/// own authorization server. So it happens only where an application has said
+/// it wants UMA semantics on this route.
+///
+/// # Failure is not escalation
+///
+/// If minting fails — the PAT expired, the Protection API is down, the
+/// resource declares none of the requested scopes — the denial still surfaces
+/// as an ordinary 403 without a challenge. A caller who was going to be refused
+/// is refused either way; letting a Protection API outage turn a deny into a
+/// 500 would hand the outage a second consequence, and letting it turn into an
+/// allow would be a security bug.
+#[derive(Clone)]
+pub struct UmaChallenger {
+    realm: String,
+    as_uri: String,
+    pat: crate::sensitive::Sensitive<String>,
+}
+
+impl UmaChallenger {
+    /// Build a challenger.
+    ///
+    /// `realm` is the protection realm to name, `as_uri` the authorization
+    /// server to send the caller to — normally this deployment's issuer, read
+    /// from `/.well-known/uma2-configuration` rather than concatenated by hand.
+    /// `pat` is a Protection API Token: a *client-credentials* token carrying
+    /// the `uma_protection` scope (§20.2 rule 1).
+    pub fn new(
+        realm: impl Into<String>,
+        as_uri: impl Into<String>,
+        pat: crate::sensitive::Sensitive<String>,
+    ) -> Self {
+        Self {
+            realm: realm.into(),
+            as_uri: as_uri.into(),
+            pat,
+        }
+    }
+}
+
+impl std::fmt::Debug for UmaChallenger {
+    /// Renders without the PAT (§7): a challenger is configuration a caller may
+    /// reasonably log, and the credential inside it is not.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UmaChallenger")
+            .field("realm", &self.realm)
+            .field("as_uri", &self.as_uri)
+            .field("pat", &self.pat)
+            .finish()
+    }
+}
+
 /// Programmatic, framework-agnostic form of the §11 `require_access` check.
 ///
 /// This is the builder the `#[require_access]` attribute macro expands to; it
@@ -245,6 +339,7 @@ pub fn require_role_check(user: &AxiamUser, required: &[&str]) -> Result<(), Aut
 pub struct RequireAccess {
     action: String,
     scope: Option<String>,
+    challenger: Option<UmaChallenger>,
 }
 
 impl RequireAccess {
@@ -253,7 +348,20 @@ impl RequireAccess {
         Self {
             action: action.into(),
             scope: None,
+            challenger: None,
         }
+    }
+
+    /// On denial, mint a permission ticket and emit the `WWW-Authenticate: UMA`
+    /// challenge (§20.3) alongside the 403.
+    ///
+    /// The UMA scope requested is this check's **action** — the same mapping
+    /// the server uses, so a deny rule vetoes an RPT exactly as it vetoes this
+    /// check. See [`UmaChallenger`] for why this is opt-in and what happens
+    /// when minting fails.
+    pub fn with_uma_challenge(mut self, challenger: UmaChallenger) -> Self {
+        self.challenger = Some(challenger);
+        self
     }
 
     /// Narrow the check to `scope`, passed through to `check_access` verbatim
@@ -287,20 +395,46 @@ impl RequireAccess {
             .await;
         match outcome {
             Ok(decision) if decision.allowed => Ok(()),
-            Ok(_) => Err(AuthzGuardError::denied(format!(
-                "access denied for action '{}'",
-                self.action
-            ))),
-            Err(AxiamError::Authz { .. }) => Err(AuthzGuardError::denied(format!(
-                "access denied for action '{}'",
-                self.action
-            ))),
+            Ok(_) => Err(self.deny(client, resource_id).await),
+            Err(AxiamError::Authz { .. }) => Err(self.deny(client, resource_id).await),
             Err(AxiamError::Auth { .. }) => Err(AuthzGuardError::unauthenticated(
                 "authentication rejected by the authorization service".to_string(),
             )),
             Err(AxiamError::Network { .. }) => Err(AuthzGuardError::unavailable(
                 "authorization service unavailable".to_string(),
             )),
+        }
+    }
+
+    /// Build the denial, minting a §20.3 challenge when one was configured.
+    ///
+    /// Only ever called on a path that has already decided to refuse, so the
+    /// mint cannot change the outcome — at worst it fails and the caller gets
+    /// the plain 403 they would have got anyway.
+    async fn deny(&self, client: &AxiamClient, resource_id: Uuid) -> AuthzGuardError {
+        let message = format!("access denied for action '{}'", self.action);
+        let Some(challenger) = self.challenger.as_ref() else {
+            return AuthzGuardError::denied(message);
+        };
+
+        // §20.2: the UMA scope is the AXIAM *action*, which is what makes the
+        // ticket ask for exactly the authority this check just refused.
+        let permission = crate::uma::RequestedPermission {
+            resource_id,
+            resource_scopes: vec![self.action.clone()],
+        };
+        match client
+            .uma_request_ticket(&challenger.pat, std::slice::from_ref(&permission))
+            .await
+        {
+            Ok(ticket) => AuthzGuardError::denied_with_challenge(
+                message,
+                crate::uma::uma_challenge_header(&challenger.realm, &challenger.as_uri, &ticket),
+            ),
+            // Deliberately swallowed: see UmaChallenger's "failure is not
+            // escalation" note. The reason is not logged here either, because
+            // this module never writes the token or the ticket anywhere (§11.8).
+            Err(_) => AuthzGuardError::denied(message),
         }
     }
 }
