@@ -19,12 +19,12 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19 (including §6.1
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20 (including §6.1
 mTLS, the §10.1 minimum local-verification set, and §13 webhook signature verification).
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§12.7, §14, §15, §17 and §19 are named rather than folded into the range because they
+§12.7, §14, §15, §17, §19 and §20 are named rather than folded into the range because they
 landed after this SDK already claimed §1–§13: widening the range silently would turn a
 statement that was true when written into a different claim without anyone editing it.
 
@@ -497,6 +497,75 @@ legitimately arrives twice; the SDK has no durable store and an in-memory guard 
 silently drop a real second logout after a restart.
 
 See [`examples/logout.rs`](examples/logout.rs).
+
+### UMA 2.0 — Protection API and ticket grant (`rest`, `actix`)
+
+The resource-server side of User-Managed Access: register what you guard, ask the
+authorization server what a caller would need, and redeem the resulting ticket.
+
+The two runnable halves are [`examples/uma_resource_server.rs`](examples/uma_resource_server.rs)
+and [`examples/uma_client.rs`](examples/uma_client.rs) — run the first, then the second
+against it.
+
+**Guarding a route so a denial is actionable** (needs `actix`):
+
+```rust,no_run
+# use axiam_sdk::client::AxiamClient;
+# use axiam_sdk::middleware::{AuthzGuardError, AxiamUser, RequireAccess, UmaChallenger};
+# use uuid::Uuid;
+# async fn handler(client: &AxiamClient, user: &AxiamUser, id: Uuid, challenger: UmaChallenger)
+#     -> Result<(), AuthzGuardError> {
+RequireAccess::new("invoices:read")
+    .with_uma_challenge(challenger)
+    .check(client, user, id)
+    .await?;
+# Ok(())
+# }
+```
+
+Without `with_uma_challenge` this is an ordinary §11 check and a denial is a bare 403. With
+it, the guard mints a permission ticket for the action it just refused and returns
+`WWW-Authenticate: UMA realm=…, as_uri=…, ticket=…` alongside the 403 — so a UMA-aware
+client knows where to obtain authority instead of only being told no. The body is unchanged,
+so a client that does not speak UMA sees exactly the 403 it saw before.
+
+**It is opt-in, and that is a design decision rather than an oversight.** Emitting a
+challenge means minting a credential: a wire call to the Protection API and a live ticket,
+produced on a path the caller did not explicitly request. A guard that did that on every
+denial by default would turn each unauthorized request into a Protection API call — a
+denial-of-service amplifier pointed at your own authorization server.
+
+**Failure is not escalation.** If minting fails — expired PAT, Protection API down, a scope
+the resource never declared — the denial still surfaces as a plain 403 with no challenge. A
+caller who was going to be refused is refused either way; letting an outage turn a deny into
+a 500 would give it a second consequence, and letting it turn into an allow would be a
+security bug.
+
+**Consuming the challenge**, client side:
+
+```rust,no_run
+# use axiam_sdk::Sensitive;
+# use axiam_sdk::client::AxiamClient;
+use axiam_sdk::uma::uma_parse_challenge;
+
+# async fn demo(client: &AxiamClient, header: &str, user_token: String)
+#     -> Result<(), Box<dyn std::error::Error>> {
+let challenge = uma_parse_challenge(header).ok_or("not a UMA challenge")?;
+let ticket = challenge.ticket.ok_or("no ticket")?;
+// Deciding whether to trust challenge.as_uri is YOUR call — parsing performed no
+// exchange, deliberately (§20.3).
+let rpt = client
+    .uma_exchange_ticket(&ticket, &Sensitive::new(user_token))
+    .await?;
+# let _ = rpt;
+# Ok(())
+# }
+```
+
+The rest of the surface — `uma_register_resource`, the other four `rreg` operations,
+`uma_request_ticket`, `uma_exchange_ticket` — plus the rules they enforce (a ticket is never
+retried, the RPT is never adopted, an update replaces the scope list rather than merging it)
+is documented on the [`uma`](https://docs.rs/axiam-sdk/latest/axiam_sdk/uma/) module.
 
 ### Webhook signature verification (`rest` or `amqp`)
 
