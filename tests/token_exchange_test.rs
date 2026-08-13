@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use axiam_sdk::AxiamError;
 use axiam_sdk::Sensitive;
-use axiam_sdk::oidc::TokenExchangeParams;
+use axiam_sdk::oidc::{JWT_TOKEN_TYPE, TokenExchangeParams};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -471,4 +471,281 @@ async fn a_failed_exchange_never_echoes_the_subject_token() {
     let rendered = format!("{err}{err:?}");
     assert!(!rendered.contains(SUBJECT_TOKEN));
     assert!(!rendered.contains(ACTOR_TOKEN));
+}
+
+// ---------------------------------------------------------------------------
+// §15.7 — external-IdP subject tokens (X4)
+//
+// No new operation: the same `token_exchange` carries a partner IdP's token.
+// What changes is which subject tokens the server accepts and what its
+// refusals mean, so these tests are about not getting in the way of either.
+// ---------------------------------------------------------------------------
+
+/// A token minted by a partner's IdP. Opaque to the SDK — deliberately not a
+/// well-formed JWT, because nothing here may decode it.
+const EXTERNAL_SUBJECT_TOKEN: &str = "partner-idp-subject-token";
+
+/// The one normative `error_description` (§15.7). It means "fix the AXIAM
+/// trust configuration", not "fix your token".
+const ISSUER_NOT_CONFIGURED: &str =
+    "the subject token's issuer is not configured for token exchange";
+
+fn oauth_error_with_description(code: &str, description: &str) -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(json!({
+        "error": code,
+        "error_description": description,
+    }))
+}
+
+#[tokio::test]
+async fn an_external_subject_token_type_is_sent_verbatim() {
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    let forms = mount_exchange(
+        &server,
+        ResponseTemplate::new(200).set_body_json(exchange_response(json!({
+            "scope": "read:orders",
+        }))),
+    )
+    .await;
+
+    let client = build_client(&server.uri(), true);
+    let result = client
+        .token_exchange(TokenExchangeParams {
+            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
+            scopes: Some(vec!["read:orders".into()]),
+            audience: Some("https://orders.internal".into()),
+            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+        })
+        .await
+        .expect("exchange succeeds");
+
+    let form = forms.lock().unwrap()[0].clone();
+    // The caller named …:jwt, so …:jwt goes on the wire. §15.7: the SDK must
+    // not inspect the subject token to pick this, and must not override it.
+    assert_eq!(
+        form.get("subject_token_type").map(String::as_str),
+        Some("urn:ietf:params:oauth:token-type:jwt")
+    );
+    assert_eq!(
+        form.get("subject_token").map(String::as_str),
+        Some(EXTERNAL_SUBJECT_TOKEN)
+    );
+    // Delegation across a trust boundary is unsupported; nothing may add one.
+    assert!(
+        !form.contains_key("actor_token"),
+        "§15.7: no actor_token may be invented for an external exchange"
+    );
+
+    // The cross-domain path is not a different result shape, and §15.2
+    // rules 6-7 still hold.
+    assert_eq!(result.access_token.expose(), ISSUED_TOKEN);
+    assert_eq!(
+        result.issued_token_type,
+        "urn:ietf:params:oauth:token-type:access_token"
+    );
+    assert_eq!(result.scope.as_deref(), Some("read:orders"));
+}
+
+#[tokio::test]
+async fn the_subject_token_type_is_never_inferred_from_the_token() {
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    let forms = mount_exchange(
+        &server,
+        ResponseTemplate::new(200).set_body_json(exchange_response(json!({}))),
+    )
+    .await;
+
+    // A subject token that *looks* exactly like a JWT. An SDK that sniffed
+    // the token would send …:jwt here; §15.7 says it must not look, so the
+    // caller's silence still means the §15.1 same-domain default.
+    let jwt_shaped = "eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJodHRwczovL3BhcnRuZXIuZXhhbXBsZS8ifQ.sig";
+    let client = build_client(&server.uri(), true);
+    client
+        .token_exchange(TokenExchangeParams::new(Sensitive::new(jwt_shaped.into())))
+        .await
+        .expect("exchange succeeds");
+
+    assert_eq!(
+        forms.lock().unwrap()[0]
+            .get("subject_token_type")
+            .map(String::as_str),
+        Some("urn:ietf:params:oauth:token-type:access_token"),
+        "§15.7: the token's shape must not pick the type"
+    );
+}
+
+#[tokio::test]
+async fn an_actor_token_with_an_external_subject_token_is_refused_without_retry() {
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    let forms = mount_exchange(
+        &server,
+        oauth_error_with_description(
+            "invalid_request",
+            "actor_token is not supported for an external subject token",
+        ),
+    )
+    .await;
+
+    let client = build_client(&server.uri(), true);
+    let err = client
+        .token_exchange(TokenExchangeParams {
+            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
+            actor_token: Some(Sensitive::new(ACTOR_TOKEN.into())),
+            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+        })
+        .await
+        .expect_err("refusal");
+
+    assert_eq!(err.oauth_error_code(), Some("invalid_request"));
+
+    // §15.7: no retry, and no rewriting. Dropping the actor token and
+    // re-sending would turn a delegation the caller asked for into an
+    // impersonation they did not.
+    let forms = forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 1, "exactly one request");
+    assert_eq!(
+        forms[0].get("actor_token").map(String::as_str),
+        Some(ACTOR_TOKEN),
+        "the request must be sent as written, actor token included"
+    );
+    assert_eq!(
+        forms[0].get("subject_token_type").map(String::as_str),
+        Some("urn:ietf:params:oauth:token-type:jwt"),
+        "subject_token_type must not be rewritten"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_subject_token_type_is_never_retried_as_another() {
+    // A refresh token is a re-authentication credential and an ID token is an
+    // assertion to a client about a login; neither is a bearer credential for
+    // an API, so both are refused BY NAME. Retrying as …:jwt would present one
+    // as if it were.
+    for refused in [
+        "urn:ietf:params:oauth:token-type:refresh_token",
+        "urn:ietf:params:oauth:token-type:id_token",
+    ] {
+        let server = MockServer::start().await;
+        mount_discovery(&server).await;
+        let forms = mount_exchange(
+            &server,
+            oauth_error_with_description(
+                "invalid_request",
+                &format!("unsupported subject_token_type {refused}"),
+            ),
+        )
+        .await;
+
+        let client = build_client(&server.uri(), true);
+        client
+            .token_exchange(TokenExchangeParams {
+                subject_token_type: Some(refused.into()),
+                ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+            })
+            .await
+            .expect_err("refusal");
+
+        let forms = forms.lock().unwrap().clone();
+        assert_eq!(forms.len(), 1, "no retry after a refused type");
+        assert_eq!(
+            forms[0].get("subject_token_type").map(String::as_str),
+            Some(refused),
+            "§15.7: the refused type must be sent as named, not swapped"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_issuer_not_configured_description_reaches_the_caller_intact() {
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    mount_exchange(
+        &server,
+        oauth_error_with_description("invalid_grant", ISSUER_NOT_CONFIGURED),
+    )
+    .await;
+
+    let client = build_client(&server.uri(), true);
+    let err = client
+        .token_exchange(TokenExchangeParams {
+            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
+            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+        })
+        .await
+        .expect_err("refusal");
+
+    assert_eq!(err.oauth_error_code(), Some("invalid_grant"));
+    // This is the ONLY distinguishable external failure, and the whole point
+    // of it is that an integrator can tell "fix the AXIAM trust config" from
+    // "fix your token". Truncating or rewording it destroys that.
+    assert!(
+        err.to_string().contains(ISSUER_NOT_CONFIGURED),
+        "the normative description must reach the caller intact, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn no_helper_re_exchanges_an_externally_exchanged_token() {
+    // Tokens minted from an external subject token carry `ext_exchange`, and
+    // BOTH exchange paths refuse a subject token bearing it: exchanges do not
+    // compose. The SDK's part is to never feed a result back in by itself.
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&exchanges);
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(move |_: &Request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(exchange_response(json!({})))
+        })
+        .mount(&server)
+        .await;
+
+    let captured: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/authz/check"))
+        .respond_with(move |req: &Request| {
+            *sink.lock().unwrap() = Some(
+                req.headers
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap().to_string()),
+            );
+            ResponseTemplate::new(200).set_body_json(json!({ "allowed": true }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri(), true);
+    let exchanged = client
+        .token_exchange(TokenExchangeParams {
+            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
+            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+        })
+        .await
+        .expect("exchange");
+    assert_eq!(exchanged.access_token.expose(), ISSUED_TOKEN);
+
+    let _ = client.can("read", uuid::Uuid::new_v4(), None).await;
+
+    // Exactly one exchange happened: nothing looped the result back in.
+    assert_eq!(
+        exchanges.load(Ordering::SeqCst),
+        1,
+        "exactly one exchange — no helper re-exchanged the issued token"
+    );
+    // §15.2 rule 5 restated for the cross-domain path: had the result been
+    // adopted, the next call would carry it — and the next exchange would
+    // carry it as a *subject* token, which is exactly the re-exchange §15.7
+    // forbids, arrived at by accident rather than by decision.
+    let sent = captured.lock().unwrap().clone().flatten();
+    assert!(
+        !sent.is_some_and(|h| h.contains(ISSUED_TOKEN)),
+        "an externally exchanged token must never become this client's credential"
+    );
 }

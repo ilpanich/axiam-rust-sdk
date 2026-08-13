@@ -21,8 +21,16 @@ use crate::sensitive::Sensitive;
 /// `grant_type` of an RFC 8693 exchange.
 pub const TOKEN_EXCHANGE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
-/// The only `subject_token_type` / `actor_token_type` AXIAM accepts.
+/// The `actor_token_type` this SDK sends, and the `subject_token_type` it
+/// sends when the caller names none — an AXIAM-issued access token (§15.1).
 pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+
+/// A JWT from a trusted external issuer — the cross-domain exchange of §15.7.
+///
+/// Pass it as [`TokenExchangeParams::subject_token_type`] to exchange a partner
+/// IdP's token. AXIAM also accepts [`ACCESS_TOKEN_TYPE`] for an external
+/// issuer, and refuses refresh and ID token types **by name**.
+pub const JWT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
 
 #[derive(Serialize)]
 struct TokenExchangeForm<'a> {
@@ -61,6 +69,17 @@ struct TokenExchangeResponseWire {
 pub struct TokenExchangeParams {
     /// The token being exchanged (§15.5 secret).
     pub subject_token: Sensitive<String>,
+    /// What kind of token [`Self::subject_token`] is.
+    ///
+    /// `None` sends [`ACCESS_TOKEN_TYPE`], the same-domain exchange of §15.1.
+    /// To exchange a token from a **trusted external issuer** (§15.7), set
+    /// this explicitly — normally to [`JWT_TOKEN_TYPE`].
+    ///
+    /// The SDK never reads [`Self::subject_token`] to decide this value
+    /// (§15.7). Which kind of token you hold is something only you know;
+    /// AXIAM refuses refresh and ID token types by name, and the SDK will not
+    /// retry a refusal as a different type.
+    pub subject_token_type: Option<String>,
     /// The acting party, when this is a **delegation** (§15.2 rule 1).
     ///
     /// Its absence selects **impersonation**, which is a different operation
@@ -88,6 +107,7 @@ impl TokenExchangeParams {
     pub fn new(subject_token: Sensitive<String>) -> Self {
         Self {
             subject_token,
+            subject_token_type: None,
             actor_token: None,
             scopes: None,
             audience: None,
@@ -175,7 +195,15 @@ impl AxiamClient {
         let form = TokenExchangeForm {
             grant_type: TOKEN_EXCHANGE_GRANT_TYPE,
             subject_token: params.subject_token.expose().as_str(),
-            subject_token_type: ACCESS_TOKEN_TYPE,
+            // Whatever the caller named, verbatim. The subject token is
+            // NEVER decoded to pick this (§15.7): which kind of token the
+            // caller holds is the caller's to know, and a guess here is the
+            // difference between a request that is refused and one that is
+            // silently reinterpreted.
+            subject_token_type: params
+                .subject_token_type
+                .as_deref()
+                .unwrap_or(ACCESS_TOKEN_TYPE),
             actor_token: actor,
             // Sent exactly when `actor_token` is: RFC 8693 §2.1 requires the
             // pair, and sending the type alone would be a malformed request

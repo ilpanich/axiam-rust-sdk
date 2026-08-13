@@ -87,5 +87,6 @@ pub use logout::{
 };
 pub use state::{MemoryOidcStateStore, OIDC_STATE_TTL, OidcStateEntry, OidcStateStore};
 pub use token_exchange::{
-    ACCESS_TOKEN_TYPE, ExchangedToken, TOKEN_EXCHANGE_GRANT_TYPE, TokenExchangeParams,
+    ACCESS_TOKEN_TYPE, ExchangedToken, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE,
+    TokenExchangeParams,
 };
