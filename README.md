@@ -470,6 +470,39 @@ Most of what this method does is refuse to be helpful, and each refusal is delib
 
 See [`examples/token_exchange.rs`](examples/token_exchange.rs).
 
+#### External-IdP subject tokens (CONTRACT.md §15.7)
+
+The same method exchanges a token minted by a **trusted external IdP** — a
+partner's Entra, Okta or Keycloak — for an AXIAM token scoped to what the
+resolved AXIAM user may actually do. There is no separate operation:
+
+```rust,ignore
+let exchanged = client
+    .token_exchange(TokenExchangeParams {
+        subject_token_type: Some(JWT_TOKEN_TYPE.into()), // named, never guessed
+        scopes: Some(vec!["read:orders".into()]),
+        audience: Some("https://orders.internal".into()),
+        ..TokenExchangeParams::new(Sensitive::new(partner_token))
+    })
+    .await?;
+```
+
+- **`subject_token_type` is yours to state.** The SDK never decodes the subject
+  token to pick it, and never overrides what you named. `None` still means
+  [`ACCESS_TOKEN_TYPE`], the same-domain exchange above.
+- **No actor token.** Delegation across a trust boundary is unsupported in v1;
+  sending one is `invalid_request`, which the SDK will not work around by
+  dropping it and re-sending.
+- **One refusal is distinguishable.** `invalid_grant` whose description is
+  `the subject token's issuer is not configured for token exchange` means *fix
+  the AXIAM trust configuration*. Every other `invalid_grant` means *fix your
+  token*, and is deliberately generic.
+- **Forward the result as-is.** It carries an `ext_exchange` claim naming the
+  partner issuer; never strip it, and never read it as an authorization input.
+  It also cannot be exchanged again — exchanges do not compose.
+
+The operator guide is `docs/api/federated-token-exchange.md`.
+
 ### Logout — RP-initiated and back-channel (`rest`)
 
 CONTRACT.md §12.7. `logout_url` builds the redirect (pure local computation);
