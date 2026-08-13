@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (contract 1.13): `TokenExchangeParams::subject_token_type` is now required**, and
+  its type narrows from `Option<String>` to `String`. `TokenExchangeParams::new` takes it as a
+  second argument.
+
+  It shipped optional, defaulting to `ACCESS_TOKEN_TYPE` when `None` — which satisfied §15.7's
+  "never inspect the subject token" while leaving the rule it serves unenforced: an optional
+  field with a default *is* a default the SDK applies whenever the caller says nothing. §15.1
+  now makes it required.
+
+  **Dropping the `Option` is the point rather than a side effect.** A field that can hold "no
+  answer" forces the SDK to have an answer ready for that case, and any answer it picks is the
+  guess §15.7 forbids. A plain `String` cannot represent "the caller declined to say", so the
+  type system carries the rule and omitting it does not compile — asserted by a `compile_fail`
+  doc-test, which will fail the build if a default is ever reintroduced. (A `trybuild` UI case
+  would have been the other option, but this repo's UI suite deliberately avoids depending on
+  rustc's diagnostic formatting.)
+
+  **Migration** — one argument, naming what you were previously getting by silence:
+
+  ```rust
+  let params = TokenExchangeParams::new(
+      Sensitive::new(user_token),
+      ACCESS_TOKEN_TYPE,          // <- add this
+  );
+  ```
+
+  This closes a gap rather than opening one: `subject_token_type` has always been required *on
+  the wire*, and the SDK was covering for that with a constant which stopped being the only
+  legal value when X4 landed. For a caller who actually held a refresh token, the old default
+  traded the `invalid_request` that names the type for a generic `invalid_grant`.
+
 ### Added
 
 - **§15.7 external-IdP subject tokens (X4).** `token_exchange` can now exchange a token minted
@@ -18,9 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **The type is the caller's to name, never the SDK's to guess.** §15.7 forbids inspecting the
   subject token to pick it, because which kind of token you hold is something only you know and
   a wrong guess is the difference between a request that is refused and one that is silently
-  reinterpreted. `None` still sends `…:access_token`, so every existing caller is unaffected —
-  `TokenExchangeParams::new` and the `..Default`-style struct update both keep compiling — and a
-  JWT-shaped subject token does **not** change what is sent, which is asserted by a test.
+  reinterpreted. A JWT-shaped subject token does **not** change what is sent, which is asserted
+  by a test. (This shipped with an `…:access_token` default; contract 1.13 removed it — see
+  *Changed* above.)
 
   Also asserted: an `actor_token` alongside an external subject token surfaces `invalid_request`
   with no retry and no request rewriting; a refused refresh or ID token type is never retried as

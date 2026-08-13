@@ -21,8 +21,9 @@ use crate::sensitive::Sensitive;
 /// `grant_type` of an RFC 8693 exchange.
 pub const TOKEN_EXCHANGE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 
-/// The `actor_token_type` this SDK sends, and the `subject_token_type` it
-/// sends when the caller names none — an AXIAM-issued access token (§15.1).
+/// The `actor_token_type` this SDK sends, and the `subject_token_type` a caller
+/// names for the same-domain exchange of §15.1. There is no default: the type
+/// is a required field of [`TokenExchangeParams`].
 pub const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
 /// A JWT from a trusted external issuer — the cross-domain exchange of §15.7.
@@ -69,17 +70,22 @@ struct TokenExchangeResponseWire {
 pub struct TokenExchangeParams {
     /// The token being exchanged (§15.5 secret).
     pub subject_token: Sensitive<String>,
-    /// What kind of token [`Self::subject_token`] is.
+    /// What kind of token [`Self::subject_token`] is. **Required** (§15.1).
     ///
-    /// `None` sends [`ACCESS_TOKEN_TYPE`], the same-domain exchange of §15.1.
-    /// To exchange a token from a **trusted external issuer** (§15.7), set
-    /// this explicitly — normally to [`JWT_TOKEN_TYPE`].
+    /// There is no default, and deliberately no `Option`: while this could
+    /// hold "no answer", the SDK would need an answer ready for that case,
+    /// and any answer it picks is the guess §15.7 forbids. Use
+    /// [`ACCESS_TOKEN_TYPE`] for the same-domain exchange of §15.1, or
+    /// [`JWT_TOKEN_TYPE`] for a trusted external issuer's JWT (§15.7).
+    ///
+    /// [`TokenExchangeParams::new`] takes it alongside the subject token, so
+    /// the struct-update idiom cannot leave it unset.
     ///
     /// The SDK never reads [`Self::subject_token`] to decide this value
     /// (§15.7). Which kind of token you hold is something only you know;
     /// AXIAM refuses refresh and ID token types by name, and the SDK will not
     /// retry a refusal as a different type.
-    pub subject_token_type: Option<String>,
+    pub subject_token_type: String,
     /// The acting party, when this is a **delegation** (§15.2 rule 1).
     ///
     /// Its absence selects **impersonation**, which is a different operation
@@ -103,11 +109,40 @@ pub struct TokenExchangeParams {
 }
 
 impl TokenExchangeParams {
-    /// A minimal exchange: just the subject token, everything else defaulted.
-    pub fn new(subject_token: Sensitive<String>) -> Self {
+    /// A minimal exchange: the subject token and its type, everything else
+    /// defaulted.
+    ///
+    /// The type is a parameter rather than a default because §15.1 makes it
+    /// required — see [`TokenExchangeParams::subject_token_type`].
+    ///
+    /// Naming no type does not compile, which is the whole enforcement
+    /// mechanism §15.7 asks for. This doc-test asserts that, so reintroducing
+    /// a default would fail the build rather than pass silently:
+    ///
+    /// ```compile_fail
+    /// use axiam_sdk::Sensitive;
+    /// use axiam_sdk::oidc::TokenExchangeParams;
+    ///
+    /// // §15.1: subject_token_type is required.
+    /// let _ = TokenExchangeParams::new(Sensitive::new("a-token".to_string()));
+    /// ```
+    ///
+    /// Naming one does:
+    ///
+    /// ```
+    /// use axiam_sdk::Sensitive;
+    /// use axiam_sdk::oidc::{ACCESS_TOKEN_TYPE, TokenExchangeParams};
+    ///
+    /// let params = TokenExchangeParams::new(
+    ///     Sensitive::new("a-token".to_string()),
+    ///     ACCESS_TOKEN_TYPE,
+    /// );
+    /// assert_eq!(params.subject_token_type, ACCESS_TOKEN_TYPE);
+    /// ```
+    pub fn new(subject_token: Sensitive<String>, subject_token_type: impl Into<String>) -> Self {
         Self {
             subject_token,
-            subject_token_type: None,
+            subject_token_type: subject_token_type.into(),
             actor_token: None,
             scopes: None,
             audience: None,
@@ -200,10 +235,7 @@ impl AxiamClient {
             // caller holds is the caller's to know, and a guess here is the
             // difference between a request that is refused and one that is
             // silently reinterpreted.
-            subject_token_type: params
-                .subject_token_type
-                .as_deref()
-                .unwrap_or(ACCESS_TOKEN_TYPE),
+            subject_token_type: params.subject_token_type.as_str(),
             actor_token: actor,
             // Sent exactly when `actor_token` is: RFC 8693 §2.1 requires the
             // pair, and sending the type alone would be a malformed request

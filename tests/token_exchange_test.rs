@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use axiam_sdk::AxiamError;
 use axiam_sdk::Sensitive;
-use axiam_sdk::oidc::{JWT_TOKEN_TYPE, TokenExchangeParams};
+use axiam_sdk::oidc::{ACCESS_TOKEN_TYPE, JWT_TOKEN_TYPE, TokenExchangeParams};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -99,7 +99,7 @@ async fn exchange_sends_the_rfc_8693_grant_and_authenticates() {
         .token_exchange(TokenExchangeParams {
             scopes: Some(vec!["orders:read".into(), "orders:write".into()]),
             audience: Some("orders-service".into()),
-            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
         })
         .await
         .expect("exchange succeeds");
@@ -147,9 +147,10 @@ async fn a_public_client_fails_before_any_wire_call() {
 
     let client = build_client(&server.uri(), false);
     let err = client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(
-            SUBJECT_TOKEN.into(),
-        )))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(SUBJECT_TOKEN.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect_err("a client with no secret cannot exchange");
 
@@ -173,9 +174,10 @@ async fn absent_actor_token_is_sent_as_absent_never_defaulted() {
 
     let client = build_client(&server.uri(), true);
     client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(
-            SUBJECT_TOKEN.into(),
-        )))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(SUBJECT_TOKEN.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect("exchange");
 
@@ -203,7 +205,7 @@ async fn actor_token_and_its_type_are_sent_as_a_pair() {
     client
         .token_exchange(TokenExchangeParams {
             actor_token: Some(Sensitive::new(ACTOR_TOKEN.into())),
-            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
         })
         .await
         .expect("exchange");
@@ -243,7 +245,7 @@ async fn invalid_scope_is_not_retried_with_fewer_scopes() {
     let err = client
         .token_exchange(TokenExchangeParams {
             scopes: Some(vec!["orders:read".into(), "orders:admin".into()]),
-            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
         })
         .await
         .expect_err("invalid_scope");
@@ -265,9 +267,10 @@ async fn unauthorized_client_is_surfaced_verbatim_and_not_downgraded() {
 
     let client = build_client(&server.uri(), true);
     let err = client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(
-            SUBJECT_TOKEN.into(),
-        )))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(SUBJECT_TOKEN.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect_err("unauthorized_client");
 
@@ -300,9 +303,10 @@ async fn the_six_error_codes_reach_the_caller_unchanged() {
 
         let client = build_client(&server.uri(), true);
         let err = client
-            .token_exchange(TokenExchangeParams::new(Sensitive::new(
-                SUBJECT_TOKEN.into(),
-            )))
+            .token_exchange(TokenExchangeParams::new(
+                Sensitive::new(SUBJECT_TOKEN.into()),
+                ACCESS_TOKEN_TYPE,
+            ))
             .await
             .expect_err("refusal");
 
@@ -335,9 +339,10 @@ async fn a_server_sent_refresh_token_is_not_surfaced() {
 
     let client = build_client(&server.uri(), true);
     let result = client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(
-            SUBJECT_TOKEN.into(),
-        )))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(SUBJECT_TOKEN.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect("exchange");
 
@@ -377,9 +382,10 @@ async fn the_exchanged_token_does_not_become_the_clients_own_credential() {
 
     let client = build_client(&server.uri(), true);
     let exchanged = client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(
-            SUBJECT_TOKEN.into(),
-        )))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(SUBJECT_TOKEN.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect("exchange");
     assert_eq!(exchanged.access_token.expose(), ISSUED_TOKEN);
@@ -413,7 +419,7 @@ async fn the_granted_scope_is_readable_when_narrower_than_requested() {
     let result = client
         .token_exchange(TokenExchangeParams {
             scopes: Some(vec!["orders:read".into(), "orders:write".into()]),
-            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
         })
         .await
         .expect("exchange");
@@ -439,9 +445,10 @@ async fn tokens_are_redacted_in_debug_output() {
 
     let client = build_client(&server.uri(), true);
     let result = client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(
-            SUBJECT_TOKEN.into(),
-        )))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(SUBJECT_TOKEN.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect("exchange");
 
@@ -463,7 +470,7 @@ async fn a_failed_exchange_never_echoes_the_subject_token() {
     let err = client
         .token_exchange(TokenExchangeParams {
             actor_token: Some(Sensitive::new(ACTOR_TOKEN.into())),
-            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
         })
         .await
         .expect_err("invalid_grant");
@@ -512,10 +519,13 @@ async fn an_external_subject_token_type_is_sent_verbatim() {
     let client = build_client(&server.uri(), true);
     let result = client
         .token_exchange(TokenExchangeParams {
-            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
+            subject_token_type: JWT_TOKEN_TYPE.into(),
             scopes: Some(vec!["read:orders".into()]),
             audience: Some("https://orders.internal".into()),
-            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(
+                Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()),
+                ACCESS_TOKEN_TYPE,
+            )
         })
         .await
         .expect("exchange succeeds");
@@ -557,13 +567,17 @@ async fn the_subject_token_type_is_never_inferred_from_the_token() {
     )
     .await;
 
-    // A subject token that *looks* exactly like a JWT. An SDK that sniffed
-    // the token would send …:jwt here; §15.7 says it must not look, so the
-    // caller's silence still means the §15.1 same-domain default.
+    // A subject token that *looks* exactly like a JWT, presented as an access
+    // token. An SDK that sniffed the token would "correct" this to …:jwt;
+    // §15.7 says it must not look, so what the caller named is what goes out.
+    // Being able to hold this wrong is the point: only the caller knows.
     let jwt_shaped = "eyJhbGciOiJFZERTQSJ9.eyJpc3MiOiJodHRwczovL3BhcnRuZXIuZXhhbXBsZS8ifQ.sig";
     let client = build_client(&server.uri(), true);
     client
-        .token_exchange(TokenExchangeParams::new(Sensitive::new(jwt_shaped.into())))
+        .token_exchange(TokenExchangeParams::new(
+            Sensitive::new(jwt_shaped.into()),
+            ACCESS_TOKEN_TYPE,
+        ))
         .await
         .expect("exchange succeeds");
 
@@ -592,9 +606,12 @@ async fn an_actor_token_with_an_external_subject_token_is_refused_without_retry(
     let client = build_client(&server.uri(), true);
     let err = client
         .token_exchange(TokenExchangeParams {
-            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
+            subject_token_type: JWT_TOKEN_TYPE.into(),
             actor_token: Some(Sensitive::new(ACTOR_TOKEN.into())),
-            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+            ..TokenExchangeParams::new(
+                Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()),
+                ACCESS_TOKEN_TYPE,
+            )
         })
         .await
         .expect_err("refusal");
@@ -642,8 +659,11 @@ async fn a_refused_subject_token_type_is_never_retried_as_another() {
         let client = build_client(&server.uri(), true);
         client
             .token_exchange(TokenExchangeParams {
-                subject_token_type: Some(refused.into()),
-                ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+                subject_token_type: refused.into(),
+                ..TokenExchangeParams::new(
+                    Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()),
+                    ACCESS_TOKEN_TYPE,
+                )
             })
             .await
             .expect_err("refusal");
@@ -671,8 +691,11 @@ async fn the_issuer_not_configured_description_reaches_the_caller_intact() {
     let client = build_client(&server.uri(), true);
     let err = client
         .token_exchange(TokenExchangeParams {
-            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
-            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+            subject_token_type: JWT_TOKEN_TYPE.into(),
+            ..TokenExchangeParams::new(
+                Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()),
+                ACCESS_TOKEN_TYPE,
+            )
         })
         .await
         .expect_err("refusal");
@@ -724,8 +747,11 @@ async fn no_helper_re_exchanges_an_externally_exchanged_token() {
     let client = build_client(&server.uri(), true);
     let exchanged = client
         .token_exchange(TokenExchangeParams {
-            subject_token_type: Some(JWT_TOKEN_TYPE.into()),
-            ..TokenExchangeParams::new(Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()))
+            subject_token_type: JWT_TOKEN_TYPE.into(),
+            ..TokenExchangeParams::new(
+                Sensitive::new(EXTERNAL_SUBJECT_TOKEN.into()),
+                ACCESS_TOKEN_TYPE,
+            )
         })
         .await
         .expect("exchange");
