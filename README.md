@@ -479,7 +479,7 @@ resolved AXIAM user may actually do. There is no separate operation:
 ```rust,ignore
 let exchanged = client
     .token_exchange(TokenExchangeParams {
-        subject_token_type: Some(JWT_TOKEN_TYPE.into()), // named, never guessed
+        subject_token_type: JWT_TOKEN_TYPE.into(), // required; named, never guessed
         scopes: Some(vec!["read:orders".into()]),
         audience: Some("https://orders.internal".into()),
         ..TokenExchangeParams::new(Sensitive::new(partner_token))
@@ -487,9 +487,11 @@ let exchanged = client
     .await?;
 ```
 
-- **`subject_token_type` is yours to state.** The SDK never decodes the subject
-  token to pick it, and never overrides what you named. `None` still means
-  [`ACCESS_TOKEN_TYPE`], the same-domain exchange above.
+- **`subject_token_type` is yours to state, and is required** (§15.1). The SDK
+  never decodes the subject token to pick it, and never overrides what you
+  named. There is deliberately no `Option`: a field that can hold "no answer"
+  forces the SDK to have one ready, and any answer it picks is the guess §15.7
+  forbids. `TokenExchangeParams::new` takes it alongside the subject token.
 - **No actor token.** Delegation across a trust boundary is unsupported in v1;
   sending one is `invalid_request`, which the SDK will not work around by
   dropping it and re-sending.

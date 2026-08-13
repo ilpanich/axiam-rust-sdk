@@ -12,7 +12,7 @@
 
 use axiam_sdk::Sensitive;
 use axiam_sdk::client::AxiamClient;
-use axiam_sdk::oidc::TokenExchangeParams;
+use axiam_sdk::oidc::{ACCESS_TOKEN_TYPE, TokenExchangeParams};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .token_exchange(TokenExchangeParams {
             scopes: Some(vec!["orders:read".to_string()]),
             audience: Some("orders-service".to_string()),
-            ..TokenExchangeParams::new(Sensitive::new(user_token))
+            ..TokenExchangeParams::new(Sensitive::new(user_token), ACCESS_TOKEN_TYPE)
         })
         .await?;
 
