@@ -20,7 +20,9 @@ mod oidc_support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
+use axiam_sdk::client::AxiamClient;
 use axiam_sdk::Sensitive;
 use axiam_sdk::uma::{RequestedPermission, ResourceSet, uma_parse_challenge};
 use serde_json::json;
@@ -85,6 +87,57 @@ async fn a_5xx_on_the_ticket_grant_is_not_retried() {
         1,
         "the ticket grant must issue exactly one request — retrying a spent \
          ticket is the concurrent redemption ilpanich/axiam#302 describes"
+    );
+}
+
+/// A **timeout** must not be retried either. §20.7 names it alongside `5xx`
+/// and `invalid_grant`, and it is the case most tempting to treat as "the
+/// request never happened" — a §16 retry runner will normally re-send a
+/// request that produced no response at all.
+///
+/// It is the wrong instinct here. A timeout says nothing about whether the
+/// server saw the exchange; it may well have arrived and spent the ticket, and
+/// silence is not evidence that it did not. Re-sending is then the second
+/// redemption.
+///
+/// The server answers far later than the client is willing to wait, so the
+/// timeout is deterministic rather than a race against a sleeping test.
+#[tokio::test]
+async fn a_timeout_on_the_ticket_grant_is_not_retried() {
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    let calls = mount_token_counting(
+        &server,
+        ResponseTemplate::new(200).set_delay(Duration::from_secs(30)),
+    )
+    .await;
+
+    let client = AxiamClient::builder()
+        .base_url(&server.uri())
+        .expect("valid base url")
+        .tenant_id(oidc_support::tenant_id())
+        .org_id(oidc_support::org_id())
+        .oidc_client_id(oidc_support::CLIENT_ID)
+        .oidc_client_secret(oidc_support::CLIENT_SECRET)
+        .request_timeout(Duration::from_millis(250))
+        .build()
+        .expect("client builds");
+
+    let result = client
+        .uma_exchange_ticket(
+            &Sensitive::new(TICKET.to_string()),
+            &Sensitive::new(CLAIM_TOKEN.to_string()),
+        )
+        .await;
+
+    assert!(result.is_err(), "a timeout must surface as an error");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the ticket grant must issue exactly one request even when it times \
+         out — a timed-out exchange may already have spent the ticket, so a \
+         retry is the concurrent redemption a server whose storage engine \
+         this SDK cannot attest may admit twice"
     );
 }
 
