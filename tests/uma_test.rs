@@ -113,7 +113,7 @@ async fn a_timeout_on_the_ticket_grant_is_not_retried() {
     .await;
 
     let client = AxiamClient::builder()
-        .base_url(&server.uri())
+        .base_url(server.uri())
         .expect("valid base url")
         .tenant_id(oidc_support::tenant_id())
         .org_id(oidc_support::org_id())
