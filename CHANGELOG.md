@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CONTRACT.md §10.1 rule 9 — sender-constrained (certificate-bound) access tokens**
+  (contract 1.15, RFC 8705 §3 / RFC 7800). AXIAM can now issue tokens carrying a
+  `cnf.x5t#S256` confirmation naming the client certificate they were issued to. Such a
+  token is **not** a bearer token, and a guard that accepts it without checking has
+  silently converted it back into one.
+  - `Claims::cnf` (`CnfClaim`) — the decoded confirmation claim.
+  - `Claims::verify_certificate_binding(Option<&str>)` — the rule, standalone. Available
+    with **no features enabled**: it is pure claim logic, and a `--no-default-features`
+    consumer must be able to apply it to a token it obtained through its own transport.
+  - `JwksVerifier::verify_sender_constrained(token, presented_thumbprint)` — the guard
+    entry point for a resource server that accepts bound tokens.
+  - `certificate_thumbprint_s256(der)` — RFC 8705 §3.1 `x5t#S256`: base64url, **unpadded**,
+    SHA-256 over the DER certificate. Feature-gated (`rest`/`actix`/`amqp`) because it needs
+    `sha2` and `base64`; most callers already have the thumbprint from their TLS stack.
+
+  **This is not a breaking change and does not make certificates mandatory.** An *unbound*
+  token is still accepted with or without a certificate present — asserted directly by
+  `an_unbound_token_is_accepted_with_or_without_a_certificate`, because the likeliest wrong
+  implementation of this rule is one that starts demanding certificates from every caller.
+
+  Two design points worth knowing at the call site:
+
+  - **`verify()` does not enforce rule 9**, deliberately: it has no transport to ask, and
+    folding an `Option<&str>` into it would have every existing caller pass `None`, which
+    reads as "no certificate" and rejects every bound token. Use
+    `verify_sender_constrained` where bound tokens are in play.
+  - **The thumbprint must come from the transport** — the TLS peer certificate, or a value
+    a *trusted* terminating proxy forwarded over a channel you control. Never from a
+    caller-settable request header; a forgeable input makes the mechanism decorative.
+
+  A `cnf` naming a confirmation method this SDK cannot check (a DPoP `jkt`, say) is
+  **rejected**, never read as "unconstrained" — otherwise a sender-constrained token
+  silently degrades to a bearer token the day a newer AXIAM issues a constraint this SDK
+  predates.
+
+- **CONTRACT.md §21** — the FAPI 2.0 posture as an SDK sees it: client-registration fields
+  (`profile`, `token_endpoint_auth_method`, the `tls_client_auth_*` parameters,
+  certificate binding), RFC 9207 `iss` on authorization responses, and the discovery
+  additions. Only rule 9 above is normative for this SDK; the rest is informative.
+
 ### Changed
+
+- **Re-sync vendored `CONTRACT.md` / `openapi.json` to contract 1.15.** The spec gains the
+  `ClientProfile`, `ClientAuthMethod` and `CnfClaim` schemas and seven client-registration
+  fields.
 
 - **Re-sync vendored `CONTRACT.md` to contract 1.14** — documentation only, no code change.
   §20.2 rule 6 (a permission ticket MUST NOT be retried) cited a "measured residual
