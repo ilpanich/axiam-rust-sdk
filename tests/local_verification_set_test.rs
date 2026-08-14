@@ -464,3 +464,142 @@ async fn signature_only_unchecked_still_rejects_a_bad_signature() {
         .await
         .expect_err("a bad signature is rejected even by the raw primitive");
 }
+
+// ------------------------------------- rule 9: sender-constrained tokens --
+//
+// CONTRACT.md §10.1 rule 9 (contract 1.15, RFC 8705 §3). A token carrying
+// `cnf` is not a bearer token and must not be accepted as one.
+//
+// The required set is three negatives and one positive, and the POSITIVE is
+// the one that matters most: rule 9 must not turn into "every caller must
+// present a certificate", which would break every deployment that does not
+// use mTLS at all.
+
+/// A real 43-character base64url `x5t#S256`, and a different one.
+const THUMBPRINT: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+const OTHER_THUMBPRINT: &str = "bWluZS1ub3QteW91cnMtdGhpcy1pcy00My1jaGFyc18";
+
+fn bound_claims(thumbprint: &str) -> Value {
+    let mut claims = good_claims();
+    claims["cnf"] = json!({ "x5t#S256": thumbprint });
+    claims
+}
+
+/// The regression test that keeps rule 9 from becoming a certificate mandate.
+#[tokio::test]
+async fn an_unbound_token_is_accepted_with_or_without_a_certificate() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&good_claims());
+
+    verifier
+        .verify_sender_constrained(&token, None)
+        .await
+        .expect("an unbound token must still be accepted when no cert is presented");
+    verifier
+        .verify_sender_constrained(&token, Some(THUMBPRINT))
+        .await
+        .expect("an unbound token must still be accepted when a cert IS presented");
+}
+
+#[tokio::test]
+async fn a_bound_token_is_accepted_with_its_own_certificate() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&bound_claims(THUMBPRINT));
+
+    let claims = verifier
+        .verify_sender_constrained(&token, Some(THUMBPRINT))
+        .await
+        .expect("the bound token's own certificate must be accepted");
+    assert_eq!(
+        claims.cnf.and_then(|c| c.x5t_s256),
+        Some(THUMBPRINT.to_string()),
+        "the cnf claim must survive decoding"
+    );
+}
+
+#[tokio::test]
+async fn a_bound_token_is_rejected_with_no_certificate() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&bound_claims(THUMBPRINT));
+
+    let err = verifier
+        .verify_sender_constrained(&token, None)
+        .await
+        .expect_err("a certificate-bound token with no certificate must be rejected");
+    assert_auth_error_containing(err, "no client certificate was presented");
+}
+
+#[tokio::test]
+async fn a_bound_token_is_rejected_with_a_different_certificate() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&bound_claims(THUMBPRINT));
+
+    let err = verifier
+        .verify_sender_constrained(&token, Some(OTHER_THUMBPRINT))
+        .await
+        .expect_err("a certificate-bound token used with another certificate must be rejected");
+    assert_auth_error_containing(err, "bound to a different client certificate");
+}
+
+/// The subtle one. A `cnf` naming a confirmation method this SDK cannot check
+/// — a DPoP `jkt`, say — is an *unverifiable constraint*, never *no
+/// constraint*. Reading it the other way silently downgrades a
+/// sender-constrained token to a bearer token the day a newer AXIAM issues a
+/// confirmation this SDK predates.
+#[tokio::test]
+async fn a_cnf_naming_an_unimplemented_method_is_rejected_not_ignored() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let mut claims = good_claims();
+    claims["cnf"] = json!({ "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I" });
+    let token = sign_eddsa(&claims);
+
+    for presented in [None, Some(THUMBPRINT)] {
+        let err = verifier
+            .verify_sender_constrained(&token, presented)
+            .await
+            .expect_err("an unverifiable confirmation must fail closed");
+        assert_auth_error_containing(err, "cannot verify");
+    }
+}
+
+/// `verify` is deliberately NOT a sender-constraining guard — it has no
+/// transport to ask. Documented, and asserted here so the split cannot be
+/// removed by accident: a resource server accepting bound tokens must call
+/// `verify_sender_constrained`.
+#[tokio::test]
+async fn plain_verify_does_not_enforce_the_binding_and_says_so() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&bound_claims(THUMBPRINT));
+
+    let claims = verifier
+        .verify(&token)
+        .await
+        .expect("verify() checks rules 1-8, not rule 9");
+    // ...but the claim is right there for a caller that wants to apply rule 9
+    // itself, which is exactly what the standalone method is for.
+    claims
+        .verify_certificate_binding(Some(THUMBPRINT))
+        .expect("the standalone rule-9 check accepts the right certificate");
+    claims
+        .verify_certificate_binding(None)
+        .expect_err("...and rejects an absent one");
+}
+
+/// The thumbprint helper must produce RFC 7515 §2 base64url: unpadded, and
+/// using `-`/`_` rather than `+`/`/`. A padded or standard-base64 value will
+/// not compare equal to what AXIAM put in the token.
+#[test]
+fn thumbprint_helper_produces_unpadded_base64url() {
+    let der = vec![0x42u8; 512];
+    let tp = axiam_sdk::token::certificate_thumbprint_s256(&der);
+    assert_eq!(tp.len(), 43, "SHA-256 in unpadded base64url is 43 chars");
+    assert!(!tp.contains('='), "must not be padded");
+    assert!(!tp.contains('+') && !tp.contains('/'), "must be base64URL");
+    assert_eq!(tp, axiam_sdk::token::certificate_thumbprint_s256(&der));
+}

@@ -19,8 +19,9 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20 (including §6.1
-mTLS, the §10.1 minimum local-verification set, and §13 webhook signature verification).
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21 (including §6.1
+mTLS, the §10.1 minimum local-verification set — **including rule 9, sender-constrained
+tokens** — and §13 webhook signature verification).
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 

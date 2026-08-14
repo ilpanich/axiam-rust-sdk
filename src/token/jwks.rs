@@ -21,7 +21,10 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(feature = "rest", feature = "actix"))]
+// Unconditional: `Claims::verify_certificate_binding` (CONTRACT.md §10.1
+// rule 9) returns this and is deliberately available with no features, so a
+// `--no-default-features` consumer can apply the rule to a token it obtained
+// through its own transport.
 use crate::AxiamError;
 
 /// The AXIAM JWKS endpoint path — organization-wide, not tenant-scoped
@@ -78,6 +81,164 @@ pub struct Claims {
     /// OAuth2 scopes (space-separated string), if any.
     #[serde(default)]
     pub scope: Option<String>,
+    /// RFC 7800 / RFC 8705 §3.1 confirmation claim — present **only** on a
+    /// sender-constrained token (CONTRACT.md §10.1 rule 9, contract 1.15).
+    ///
+    /// Its presence changes what the token *is*. A token without `cnf` is a
+    /// bearer credential: whoever holds it may use it. A token with `cnf`
+    /// names a key, and accepting it without proving the caller holds that key
+    /// converts it back into a bearer token — discarding the whole protection
+    /// the operator turned on.
+    ///
+    /// [`JwksVerifier::verify`] does **not** check it, because it cannot: the
+    /// check needs the client certificate for *this connection*, which a
+    /// claims-only API has no access to. Use
+    /// [`JwksVerifier::verify_sender_constrained`], or call
+    /// [`Claims::verify_certificate_binding`] yourself with the thumbprint your
+    /// transport gives you.
+    #[serde(default)]
+    pub cnf: Option<CnfClaim>,
+}
+
+/// RFC 7800 confirmation claim.
+///
+/// Deliberately a struct with one optional field rather than an enum: RFC 7800
+/// permits confirmation methods this SDK does not implement, and such a token
+/// must still *decode* — what it must not do is validate. See
+/// [`Self::certificate_thumbprint`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CnfClaim {
+    /// RFC 8705 §3.1 `x5t#S256` — base64url (unpadded) SHA-256 of the DER
+    /// client certificate the token was issued to.
+    #[serde(rename = "x5t#S256", default, skip_serializing_if = "Option::is_none")]
+    pub x5t_s256: Option<String>,
+}
+
+impl CnfClaim {
+    /// The certificate thumbprint this token is bound to, or `None` when the
+    /// confirmation names some other method.
+    ///
+    /// A caller that gets `None` from a claim that *exists* is looking at a
+    /// constraint it cannot check and MUST reject the token. It must never
+    /// read that as "unconstrained".
+    pub fn certificate_thumbprint(&self) -> Option<&str> {
+        self.x5t_s256.as_deref()
+    }
+}
+
+impl Claims {
+    /// CONTRACT.md §10.1 rule 9 — enforce this token's sender constraint
+    /// against the certificate the caller presented on **this** connection.
+    ///
+    /// `presented_thumbprint` is the RFC 8705 §3.1 `x5t#S256` of the peer
+    /// certificate: base64url, **unpadded**, SHA-256 over the **DER** encoding.
+    /// [`certificate_thumbprint_s256`] computes it from DER bytes.
+    ///
+    /// # The four cases
+    ///
+    /// | this token's `cnf` | `presented_thumbprint` | result |
+    /// |---|---|---|
+    /// | absent | anything | `Ok` — an ordinary bearer token |
+    /// | `x5t#S256` | equal | `Ok` |
+    /// | `x5t#S256` | different, or `None` | `Err` |
+    /// | present, no `x5t#S256` | anything | `Err` |
+    ///
+    /// The first row is why a guard that adopts this rule does not break
+    /// existing deployments: an unbound token is still accepted whether or not
+    /// a certificate is present. The last row is the one that is easy to get
+    /// wrong — a `cnf` naming a method this SDK cannot check is an
+    /// *unverifiable constraint*, never *no constraint*.
+    ///
+    /// # The thumbprint must come from the transport
+    ///
+    /// Take it from the TLS peer certificate, or from a value a **trusted**
+    /// terminating proxy forwarded over a channel your application controls.
+    /// Never from a request header the caller can set: a forgeable input makes
+    /// the whole mechanism decorative.
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Auth`] on any of the three rejecting rows.
+    pub fn verify_certificate_binding(
+        &self,
+        presented_thumbprint: Option<&str>,
+    ) -> Result<(), AxiamError> {
+        let Some(cnf) = self.cnf.as_ref() else {
+            return Ok(());
+        };
+
+        let auth = |message: &str| AxiamError::Auth {
+            message: message.to_owned(),
+            oauth: None,
+            reason: None,
+        };
+
+        let Some(expected) = cnf.certificate_thumbprint() else {
+            return Err(auth(
+                "token carries a cnf confirmation naming a method this SDK cannot verify                  (CONTRACT.md §10.1 rule 9 — an unverifiable constraint is not an absent one)",
+            ));
+        };
+
+        let Some(presented) = presented_thumbprint else {
+            return Err(auth(
+                "token is certificate-bound but no client certificate was presented",
+            ));
+        };
+
+        if constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
+            Ok(())
+        } else {
+            Err(auth(
+                "token is bound to a different client certificate than the one presented",
+            ))
+        }
+    }
+}
+
+/// Constant-time byte comparison, hand-rolled so that
+/// [`Claims::verify_certificate_binding`] stays available with **no features
+/// enabled**.
+///
+/// `subtle` would be the natural choice, but it is an optional dependency of
+/// this crate gated behind `rest`/`amqp`/`actix`, and rule 9 is pure claim
+/// logic that a `--no-default-features` consumer must be able to apply to a
+/// token it obtained some other way. Fifteen lines here beats making a
+/// normative rule conditional on a feature flag.
+///
+/// The thumbprint is usually public — it derives from a certificate sent in
+/// the clear during the handshake — so this is defence in depth. It matters
+/// most for a self-signed client, where the registered thumbprint is the whole
+/// credential.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Length inequality short-circuits, leaking only the length. Both operands
+    // are fixed-length base64url SHA-256 digests whenever either is well-formed.
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Compute the RFC 8705 §3.1 `x5t#S256` thumbprint of a DER client
+/// certificate: base64url-encoded SHA-256, **without** padding.
+///
+/// Unpadded is not a style choice — RFC 7515 §2 defines base64url in JOSE as
+/// omitting `=`, and a padded value will not compare equal to what AXIAM put
+/// in the token.
+///
+/// Feature-gated because it needs `sha2` and `base64`, which are optional here.
+/// [`Claims::verify_certificate_binding`] deliberately is **not** gated: a
+/// consumer that already has the thumbprint from its TLS stack (most do —
+/// rustls, OpenSSL and Go's `crypto/tls` all expose the peer certificate) can
+/// apply the rule without pulling either crate in.
+#[cfg(any(feature = "rest", feature = "actix", feature = "amqp"))]
+pub fn certificate_thumbprint_s256(der: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(der))
 }
 
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -346,6 +507,41 @@ impl JwksVerifier {
     pub async fn verify(&self, token: &str) -> Result<Claims, AxiamError> {
         let claims = self.verify_claims(token).await?;
         self.assert_tenant(&claims)?;
+        Ok(claims)
+    }
+
+    /// [`Self::verify`] plus CONTRACT.md §10.1 **rule 9** — the sender
+    /// constraint (RFC 8705 §3, contract 1.15).
+    ///
+    /// This is the guard entry point for a resource server that accepts
+    /// **certificate-bound** access tokens. Pass the `x5t#S256` thumbprint of
+    /// the client certificate on the current connection, or `None` if there is
+    /// none; [`certificate_thumbprint_s256`] computes it from DER bytes.
+    ///
+    /// It is a separate method rather than a parameter on [`Self::verify`]
+    /// because the two have different *inputs*: `verify` needs only a token,
+    /// and a great many integrations have no transport-level certificate to
+    /// offer. Folding the thumbprint into `verify` would have forced every
+    /// caller to thread an `Option<&str>` they do not have, and the usual
+    /// result of that is `None` everywhere — which reads as "no certificate"
+    /// and rejects every bound token.
+    ///
+    /// **An unbound token is still accepted** here, with or without a
+    /// certificate. Rule 9 constrains tokens that claim a constraint; it does
+    /// not make certificates mandatory.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::verify`] returns, plus [`AxiamError::Auth`] when the
+    /// token's `cnf` does not match what was presented — see
+    /// [`Claims::verify_certificate_binding`] for the exact table.
+    pub async fn verify_sender_constrained(
+        &self,
+        token: &str,
+        presented_thumbprint: Option<&str>,
+    ) -> Result<Claims, AxiamError> {
+        let claims = self.verify(token).await?;
+        claims.verify_certificate_binding(presented_thumbprint)?;
         Ok(claims)
     }
 
@@ -750,6 +946,7 @@ mod tests {
             jti: None,
             aud: None,
             scope: None,
+            cnf: None,
         };
         let token = jsonwebtoken::encode(
             &Header::new(Algorithm::HS256),
