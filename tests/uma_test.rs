@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axiam_sdk::client::AxiamClient;
 use axiam_sdk::Sensitive;
+use axiam_sdk::client::AxiamClient;
 use axiam_sdk::uma::{RequestedPermission, ResourceSet, uma_parse_challenge};
 use serde_json::json;
 use uuid::Uuid;
