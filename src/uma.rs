@@ -12,9 +12,14 @@
 //! evaluated, so a failed exchange has already spent it.
 //!
 //! That alone would make retrying useless. What makes it unsafe is that
-//! single-use rests on a mechanism with a **measured residual** of roughly 1 in
-//! 640 under concurrency (ilpanich/axiam#302) — so a client that retries is
-//! deliberately generating the concurrent redemption that residual describes.
+//! single-use is a property of the *server's deployment* rather than of the
+//! protocol (ilpanich/axiam#302): the server decides the race with a
+//! transaction its storage engine must arbitrate, plus a redemption nonce read
+//! back after that transaction commits. That holds on a persistent engine —
+//! but this SDK is talking to a server it did not deploy and **cannot attest**,
+//! and against one running an in-memory datastore the guarantee does not hold,
+//! so a client that retries is deliberately generating a concurrent redemption
+//! such a server can admit twice.
 //! [`AxiamClient::uma_exchange_ticket`] therefore issues **exactly one** request
 //! and is excluded from the §16 retry runner, on every failure class including
 //! timeout and `5xx`.
@@ -365,9 +370,9 @@ impl AxiamClient {
     /// runner — not on `5xx`, not on timeout, not on any transport failure
     /// (§20.2 rule 6). The ticket is consumed before the request is evaluated,
     /// so a failed exchange has already spent it: a retry cannot succeed, and
-    /// under concurrency it is precisely the second redemption that
-    /// ilpanich/axiam#302's measured residual describes. On failure, request a
-    /// **new** ticket.
+    /// under concurrency it is precisely the concurrent redemption a server
+    /// whose storage engine this SDK cannot attest may admit twice
+    /// (ilpanich/axiam#302). On failure, request a **new** ticket.
     ///
     /// # What this method deliberately does not do
     ///

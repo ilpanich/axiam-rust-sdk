@@ -7,9 +7,9 @@
 //! That rule is the one §16 exception in the contract, and the only way to
 //! assert it is to count requests. A ticket is consumed *before* the request is
 //! evaluated, so a failed exchange has already spent it — and under concurrency
-//! a retry is precisely the second redemption that ilpanich/axiam#302's measured
-//! residual describes. "Exactly one request" is therefore a security assertion,
-//! not a performance one.
+//! a retry is precisely the concurrent redemption a server whose storage engine
+//! this SDK cannot attest may admit twice (ilpanich/axiam#302). "Exactly one
+//! request" is therefore a security assertion, not a performance one.
 //!
 //! Every test is named after the thing it stops.
 
