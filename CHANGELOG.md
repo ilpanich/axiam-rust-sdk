@@ -52,6 +52,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Re-sync vendored `CONTRACT.md`, `openapi.json` and `proto/` to contract 1.19**
+  (upstream **R5.8**). The vendored copies had been pinned at the 1.15-era artifacts
+  and drifted three contract revisions behind `ilpanich/axiam@main`. All five files are
+  now byte-identical to upstream, and `proto/axiam/v1/reactor.proto` (contract 1.18
+  §22, the AMQP reactor protocol) is vendored here for the first time.
+
+- **CONTRACT.md §11.2 rule 9 — the gRPC decision reads `reason`, not `deny_reason`**
+  (**SDK-Q10**, contract 1.19). `CheckAccessResponse` gains `reason` (field 4, explicit
+  presence) carrying the same string the REST decision body has always called `reason`;
+  `deny_reason` (field 2) is now `[deprecated = true]` and is removed at AXIAM 2.0.
+  `AccessDecision::from` reads `reason` and falls back to `deny_reason` only when
+  `reason` is **absent on a refusal** — which is exactly what a pre-SDK-Q10 server
+  sends, and the reason field 4 has explicit presence rather than being a plain
+  `string`. `AccessDecision` still exposes one reason accessor, so this is not a
+  breaking change for callers and nothing changes on the wire today.
+
+  **Known residual, deliberately not taken here:** contract 1.19 also relaxes gRPC
+  `subject_id` to optional (an *empty* value meaning "the subject in the verified
+  token"). `grpc::CheckAccessRequest::subject_id` stays a required `Uuid` — relaxing it
+  to `Option<Uuid>` is a breaking signature move and belongs in its own change, not in
+  an artifact re-sync. Passing the subject explicitly remains valid and is what a
+  service-mesh caller does anyway; the type's doc comment now records the gap.
+
 - **The "no reactive 401→refresh interceptor" invariant is now written down at the
   transport seam** (cross-SDK conformance review follow-up **F-14**; docs only, no
   behaviour change). CONTRACT.md §12 requires that a 401 from an `/oauth2/*` endpoint

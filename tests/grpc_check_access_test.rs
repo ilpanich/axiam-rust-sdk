@@ -82,8 +82,10 @@ impl StubAuthorizationService {
         match self.outcome_for(action) {
             StubOutcome::Allow => Ok(WireCheckAccessResponse {
                 allowed: true,
+                #[allow(deprecated)]
                 deny_reason: String::new(),
                 reason_code: String::new(),
+                reason: None,
             }),
             StubOutcome::Deny => Err(Status::permission_denied("caller lacks permission")),
             StubOutcome::Unavailable => Err(Status::unavailable("server unreachable")),
@@ -94,8 +96,10 @@ impl StubAuthorizationService {
                 if already_fired {
                     Ok(WireCheckAccessResponse {
                         allowed: true,
+                        #[allow(deprecated)]
                         deny_reason: String::new(),
                         reason_code: String::new(),
+                        reason: None,
                     })
                 } else {
                     Err(Status::unauthenticated("token expired"))

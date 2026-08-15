@@ -55,10 +55,12 @@ impl AuthorizationService for StubAuthz {
         &self,
         _request: Request<CheckAccessRequest>,
     ) -> Result<Response<CheckAccessResponse>, Status> {
+        #[allow(deprecated)]
         Ok(Response::new(CheckAccessResponse {
             allowed: true,
             deny_reason: String::new(),
             reason_code: String::new(),
+            reason: None,
         }))
     }
 
@@ -408,11 +410,15 @@ fn message_types_encode_decode_round_trip() {
     assert_eq!(BatchCheckAccessRequest::decode(&buf3[..]).unwrap(), batch);
 
     let batch_resp = BatchCheckAccessResponse {
-        results: vec![CheckAccessResponse {
-            allowed: false,
-            deny_reason: "nope".into(),
-            reason_code: String::new(),
-        }],
+        results: vec![
+            #[allow(deprecated)]
+            CheckAccessResponse {
+                allowed: false,
+                deny_reason: "nope".into(),
+                reason_code: String::new(),
+                reason: Some("nope".into()),
+            },
+        ],
     };
     let mut buf4 = Vec::new();
     batch_resp.encode(&mut buf4).unwrap();
@@ -434,21 +440,66 @@ fn message_types_encode_decode_round_trip() {
 fn access_decision_from_wire_response_maps_deny_reason() {
     use axiam_sdk::grpc::AccessDecision;
 
-    // An allow decision carries no reason.
+    // An allow decision carries no reason. A current server omits `reason`
+    // entirely on an allow (explicit presence, CONTRACT.md §11.2 rule 9).
+    #[allow(deprecated)]
     let allow = AccessDecision::from(CheckAccessResponse {
         allowed: true,
         deny_reason: String::new(),
         reason_code: String::new(),
+        reason: None,
     });
     assert!(allow.allowed);
     assert!(allow.reason.is_none());
 
-    // A deny decision surfaces the non-empty `deny_reason` as `Some(_)`.
+    // A deny decision from a current server: both fields carry the identical
+    // string, and the canonical `reason` (field 4) is the one that is read.
+    #[allow(deprecated)]
     let deny = AccessDecision::from(CheckAccessResponse {
         allowed: false,
         deny_reason: "caller lacks permission".into(),
         reason_code: String::new(),
+        reason: Some("caller lacks permission".into()),
     });
     assert!(!deny.allowed);
     assert_eq!(deny.reason.as_deref(), Some("caller lacks permission"));
+}
+
+/// CONTRACT.md §11.2 rule 9 (SDK-Q10, contract 1.19): read `reason`, and fall
+/// back to the deprecated `deny_reason` ONLY when `reason` is absent on a
+/// refusal — which is exactly what a pre-SDK-Q10 server sends.
+#[test]
+fn access_decision_falls_back_to_deny_reason_only_when_reason_is_absent() {
+    use axiam_sdk::grpc::AccessDecision;
+
+    // Pre-SDK-Q10 server: field 4 never set, field 2 carries the string.
+    #[allow(deprecated)]
+    let legacy = AccessDecision::from(CheckAccessResponse {
+        allowed: false,
+        deny_reason: "denied by rule".into(),
+        reason_code: "denied_by_rule".into(),
+        reason: None,
+    });
+    assert_eq!(legacy.reason.as_deref(), Some("denied by rule"));
+
+    // `reason` present wins outright — the deprecated field is not consulted.
+    #[allow(deprecated)]
+    let canonical = AccessDecision::from(CheckAccessResponse {
+        allowed: false,
+        deny_reason: "stale duplicate".into(),
+        reason_code: "denied_by_rule".into(),
+        reason: Some("denied by rule".into()),
+    });
+    assert_eq!(canonical.reason.as_deref(), Some("denied by rule"));
+
+    // An explicitly-empty `reason` is not a reason: it must not surface as
+    // `Some("")`, which a caller could accidentally match on.
+    #[allow(deprecated)]
+    let empty = AccessDecision::from(CheckAccessResponse {
+        allowed: true,
+        deny_reason: String::new(),
+        reason_code: String::new(),
+        reason: Some(String::new()),
+    });
+    assert!(empty.reason.is_none());
 }

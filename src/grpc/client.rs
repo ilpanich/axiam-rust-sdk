@@ -46,13 +46,18 @@ use crate::token::refresh_guard::RefreshedTokens;
 /// `CheckAccessRequest` proto message shape
 /// (`proto/axiam/v1/authorization.proto`).
 ///
-/// `subject_id` is required here (unlike REST's `AccessCheckRequest`, where
-/// `subject_id` is an `Option<Uuid>`) because it mirrors the proto's
-/// non-`optional` `subject_id` field — the wire contract always carries it,
-/// so it is not relaxed to match REST (SDK-Q10, C2). The two transports
-/// differ by design: REST derives the subject from the caller's JWT when
-/// omitted (§5), while a gRPC caller (typically a service-mesh peer with no
-/// request-scoped JWT) must always pass it explicitly.
+/// `subject_id` is required here, unlike REST's `AccessCheckRequest` where it
+/// is an `Option<Uuid>`.
+///
+/// As of contract 1.19 (SDK-Q10) the wire field is optional in the same sense
+/// REST's is — an **empty** `subject_id` means "the subject carried by the
+/// verified token", which proto3 spells as the empty string rather than as
+/// absence. This type has not yet been relaxed to `Option<Uuid>` to match:
+/// that is a breaking signature move and is tracked separately from the
+/// artifact re-vendor that brought the proto in. Always passing the subject
+/// explicitly remains valid and is what a service-mesh peer with no
+/// request-scoped JWT must do; a non-empty value MUST equal the token's
+/// subject, and a mismatch is refused (SEC-003).
 #[derive(Debug, Clone)]
 pub struct CheckAccessRequest {
     /// Tenant the authorization check is scoped to.
@@ -87,8 +92,12 @@ pub struct AccessDecision {
     /// **This field alone carries the outcome.** [`Self::reason_code`]
     /// explains it and never contradicts it.
     pub allowed: bool,
-    /// Optional human-readable explanation for the decision. `None` when
-    /// the wire response's `deny_reason` was empty.
+    /// Optional human-readable explanation for the decision.
+    ///
+    /// Sourced from the wire response's `reason` (field 4, contract 1.19),
+    /// falling back to the deprecated `deny_reason` (field 2) only when
+    /// `reason` is absent — see the [`From`] impl below for why the fallback
+    /// is still required. `None` when neither field carries anything.
     pub reason: Option<String>,
     /// Machine-readable decision reason (CONTRACT.md §11 rule 9, B1
     /// deny-override): `"allowed"`, `"no_grant"`, or `"denied_by_rule"`.
@@ -105,13 +114,27 @@ pub struct AccessDecision {
 
 impl From<WireCheckAccessResponse> for AccessDecision {
     fn from(wire: WireCheckAccessResponse) -> Self {
+        // SDK-Q10 / CONTRACT.md §11.2 rule 9 (contract 1.19): read `reason`,
+        // fall back to `deny_reason` only when `reason` is absent, and expose
+        // exactly one reason accessor rather than two.
+        //
+        // The fallback is not vestigial: `reason` has explicit presence
+        // precisely so a client can tell a pre-SDK-Q10 server (refuses with
+        // `reason` absent and `deny_reason` set) from an allow (nothing to
+        // say). Both fields carry the identical string on a current server;
+        // `deny_reason` is removed at AXIAM 2.0, at which point this fallback
+        // arm — and the `#[allow(deprecated)]` it needs — goes with it.
+        let reason = {
+            #[allow(deprecated)]
+            let legacy = wire.deny_reason;
+            wire.reason
+                .or(Some(legacy))
+                .filter(|reason| !reason.is_empty())
+        };
+
         AccessDecision {
             allowed: wire.allowed,
-            reason: if wire.deny_reason.is_empty() {
-                None
-            } else {
-                Some(wire.deny_reason)
-            },
+            reason,
             reason_code: if wire.reason_code.is_empty() {
                 None
             } else {
