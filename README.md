@@ -19,14 +19,14 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21 (including §6.1
-mTLS, the §10.1 minimum local-verification set — **including rule 9, sender-constrained
-tokens** — and §13 webhook signature verification).
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22
+(including §6.1 mTLS, the §10.1 minimum local-verification set — **including rule 9,
+sender-constrained tokens** — and §13 webhook signature verification).
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§12.7, §14, §15, §17, §19 and §20 are named rather than folded into the range because they
-landed after this SDK already claimed §1–§13: widening the range silently would turn a
+§12.7, §14, §15, §17, §19, §20 and §22 are named rather than folded into the range because
+they landed after this SDK already claimed §1–§13: widening the range silently would turn a
 statement that was true when written into a different claim without anyone editing it.
 
 ### Retry policy (§16)
@@ -177,7 +177,7 @@ dependencies for the transports/integrations it actually uses:
 |---------|---------|---------|
 | `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
 | `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1) — both over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
-| `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8) |
+| `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8), and `reactor_serve(config, handler)` — the CONTRACT.md §22 reactor runtime (hook events, signed in **both** directions) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
 | — | — | `webhook::verify_webhook` (CONTRACT.md §13) has no feature of its own: it is compiled whenever `rest` **or** `amqp` is on, since both already vendor its `hmac`/`sha2`/`hex`/`subtle` inputs. With the default feature set it is always available |
 | `actix` | off | The `AxiamUser` Actix-Web `FromRequest` extractor (CONTRACT.md §10 route guard). Implies `rest` (shares the same `JwksVerifier`) |
@@ -334,6 +334,130 @@ consume("amqp://guest:guest@localhost:5672", "axiam.authz.request", signing_key,
 See [`examples/amqp_consumer.rs`](examples/amqp_consumer.rs). Every delivery's HMAC-SHA256
 signature (CONTRACT.md §8) is verified before the handler runs; failures are nacked without
 requeue.
+
+### Reactors — AMQP extension actors (`amqp`, CONTRACT.md §22)
+
+A **reactor** is an external process that subscribes to named hook events on the AMQP bus
+and answers back — allow, deny, or a field-allow-listed mutation — inside a timeout the
+server declared. It is AXIAM's answer to Zitadel Actions and Keycloak SPIs, and the
+difference is the whole design: those load third-party code *into* the authorization
+server, and this keeps it outside, reachable only through a signed reply schema the server
+validates before it believes a word of it.
+
+```rust,no_run
+use axiam_sdk::Sensitive;
+use axiam_sdk::amqp::reactor::{ReactorConfig, ReactorDecision, events, reactor_serve};
+
+# async fn run(subkey: Sensitive<Vec<u8>>) -> Result<(), axiam_sdk::AxiamError> {
+let config = ReactorConfig::builder()
+    .amqp_url("amqps://reactor:secret@broker.example.com:5671")
+    .tenant_id("11111111-1111-1111-1111-111111111111".parse().unwrap())
+    .reactor_id("99999999-9999-9999-9999-999999999999".parse().unwrap())
+    .signing_key(subkey)   // the tenant's HKDF-derived AMQP subkey, never the master key
+    .build()?;
+
+reactor_serve(config, |event| async move {
+    match event.event.as_str() {
+        // token.pre_issue is mutable — the `ext.` namespace, and nothing else.
+        events::TOKEN_PRE_ISSUE => ReactorDecision::mutate([("ext.cost_center", "42")]),
+        // login.post_auth is veto-only, plus step-up.
+        events::LOGIN_POST_AUTH => ReactorDecision::deny("embargoed region"),
+        _ => ReactorDecision::allow(),
+    }
+})
+.await
+# }
+```
+
+See [`examples/reactor/`](examples/reactor/) for a complete three-hook reactor with
+graceful shutdown and a telemetry hook.
+
+#### The five hookable events, and their allow-lists
+
+| Event | Mutable | Complete allow-list | Default failure policy |
+|---|---|---|---|
+| `token.pre_issue` | yes | the **`ext.`** namespace only | `fail_open` |
+| `login.post_auth` | no | — (veto, or `require_mfa`) | `fail_closed` |
+| `user.pre_create` | yes | `username`, `email`, `metadata.` | `fail_closed` |
+| `user.pre_update` | yes | `username`, `email`, `metadata.` | `fail_closed` |
+| `grant.pre_assign` | no | — (veto only) | `fail_closed` |
+
+An entry ending in `.` is a **namespace prefix** and needs at least one character after the
+dot: `ext.` admits `ext.department` and `ext.a.b.c`, and refuses `ext.` itself, `ext`,
+`extra`, `external_id` and `evil.ext.department`. So a reactor can never reach `sub`,
+`aud`, `exp`, `scope` or any other standard claim — a **correctly signed** reply setting
+`sub` is refused exactly as a forged one is.
+
+Registrations that name no `failure_policy` get **the strictest default among their
+events**, in either array order — `default_failure_policy_for([...])` computes it, and
+"take the first event's default" is specifically what §22.8 forbids, because it lets the
+order of a JSON array decide whether an unreachable fraud check passes.
+
+#### `authz.check` is not hookable, and this SDK does not pretend otherwise
+
+`authz.check`, `authz.check_batch` and `token.introspect` are absent from `EVENT_REGISTRY`,
+from the `events` constants and from every example here (§22.7, a normative MUST NOT). A
+reactor round-trip is milliseconds; the check path's budget is microseconds. An application
+that needs external input on an authorization decision writes a **deny grant**, which the
+engine evaluates in the hot path at hot-path cost — and there is deliberately no
+client-side interceptor in this SDK offering itself as the reactor equivalent.
+
+#### What the runtime guarantees
+
+- **Both directions are signed.** The server signs the event with the tenant's HKDF-derived
+  AMQP subkey; the reactor signs its reply with the same key. An unsigned or stale reply is
+  not a weak reply — the server discards it as though the reactor had never answered. Every
+  event is verified (`key_version ≥ 2`, MAC, ±300 s freshness, nonce seen-set) *before* your
+  handler is called.
+- **One canonicalization quirk, and it is the whole difference.** A reactor body signs
+  `hmac_signature` as **`null`**, where §8's own two message types omit it. Getting this
+  wrong produces a MAC that never verifies and no other symptom. It is pinned by
+  server-generated vectors rather than by memory — see
+  [`testdata/reactor_v2_reference_vectors.json`](testdata/reactor_v2_reference_vectors.json)
+  and [`tests/reactor_vectors_test.rs`](tests/reactor_vectors_test.rs).
+- **It declares no topology.** No `queue_declare`, no `exchange_declare`, no `queue_bind` —
+  the server owns all three, and the transport seam this runtime is written against does
+  not even offer them. A reactor that can bind is a reactor that can bind itself to
+  `*.token.pre_issue` and read another tenant's issuance events.
+- **It fails closed on its own errors.** A handler that panics, a body that will not decode,
+  a window that has already closed: each publishes **nothing**, so the registration's
+  `failure_policy` decides. Synthesizing an `allow` would override the operator's
+  `fail_closed` setting from inside the library. `ReactorDecision::abstain()` is the
+  explicit form of the same thing.
+- **It does not filter your patch.** One forbidden key rejects the whole patch server-side;
+  pruning it here would leave you believing a field was set when it was dropped. Check
+  yourself with `ReactorEventSpec::patch_field_allowed` if you want to know before you send.
+- **It honours `timeout_ms`.** The handler runs inside the window the server declared, and a
+  reply whose window has closed is abandoned rather than published late.
+- **Shutdown drains (§18).** `ReactorShutdown::trigger()` stops the runtime taking *new*
+  deliveries; the event in flight finishes — handler, signature, publish — first.
+
+#### Registering a reactor (§22.9)
+
+Registration is a REST admin call, not part of this runtime:
+
+```bash
+curl -X POST https://axiam.example.com/api/v1/reactors \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"fraud-check","events":["login.post_auth"],"mode":"intercept","timeout_ms":500}'
+```
+
+The response's `id` is what `reactor_id(..)` takes, and the server declares the queue.
+`timeout_ms` defaults to **500** and is refused outside `1…5000`; the chain's wall-clock
+ceiling is **5000 ms** and the per-tenant in-flight cap is **64**. This SDK exposes those as
+constants (`DEFAULT_TIMEOUT_MS`, `MAX_TIMEOUT_MS`, `DEFAULT_MAX_IN_FLIGHT`) but ships **no
+typed client for the CRUD endpoints** — call them through `AxiamClient`'s HTTP surface, and
+let the server validate; §22.9 explicitly warns against re-deriving `PUT` merge semantics or
+the `failure_policy` re-derivation client-side.
+
+#### Logging
+
+The `payload`, `patch`, `reason` and `decision` are tenant business data — readable by
+design, since a handler that cannot inspect the event cannot decide anything, but this
+runtime never logs them at info level and yours should not either (§22.12). The signing key
+is `Sensitive<Vec<u8>>`, is never logged at any level, and never appears in a reconnect
+diagnostic. `nonce`, `correlation_id` and `hmac_signature` are not secrets and may be logged
+for correlation.
 
 ### Actix-Web route guard (`actix`)
 

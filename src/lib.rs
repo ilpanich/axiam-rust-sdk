@@ -11,7 +11,10 @@
 //! - `grpc` — [`grpc::AuthzGrpcClient`], for low-latency authorization
 //!   checks from a service mesh.
 //! - `amqp` — [`amqp`], a closure-handler consumer for HMAC-signed,
-//!   replay-protected authorization/audit messages (§8).
+//!   replay-protected authorization/audit messages (§8), plus
+//!   [`amqp::reactor`] — the §22 reactor runtime, where the same HMAC runs in
+//!   **both** directions: the server signs the hook event, and the reactor
+//!   signs the allow/deny/mutate reply.
 //!
 //! An additional `actix` feature provides [`middleware::AxiamUser`], an
 //! Actix-Web extractor that verifies sessions locally against a cached JWKS

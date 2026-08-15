@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CONTRACT.md §22 — Reactors (AMQP extension actors).** New `amqp::reactor`
+  module and the `reactor_serve(config, handler)` runtime: it consumes the
+  server-declared per-reactor queue, verifies every event (§8 v2 — `key_version`,
+  MAC, ±300 s freshness, nonce seen-set) *before* user code sees it, dispatches
+  to a handler returning `Allow` / `Deny` / `Mutate`, then signs and publishes
+  the reply. Also ships the event registry with its mutable-field allow-lists,
+  the strictest-wins `failure_policy` composition (§22.8), `ReactorShutdown`
+  for the §18 drain, and `examples/reactor/`.
+
+  **§8's HMAC now runs in both directions**, with one canonicalization
+  difference that produces a MAC that never verifies and no other symptom: a
+  reactor body signs `hmac_signature` as **`null`**, where `AuthzRequest` and
+  `AuditEventMessage` omit it. That is pinned by the server-generated vectors
+  in `testdata/reactor_v2_reference_vectors.json` — same master key, tenant and
+  derived subkey as the §8 fixture — rather than by a paragraph to remember.
+
+  Three behaviours are structural rather than documented. The runtime **declares
+  no topology**: the transport seam it is written against has no declare or bind
+  operation at all, and a test asserts the source calls none (§22.1). It **fails
+  closed on its own errors**: a panicking handler, an undecodable body or an
+  expired window publishes *nothing*, so the operator's `failure_policy` decides
+  rather than a synthesized `allow` from inside the library (§22.10 rule 2). And
+  it **does not filter a patch** — one forbidden key rejects the whole patch
+  server-side, and pruning it would leave the author believing a field was set
+  (§22.4 rule 1).
+
+  §22.7's hot-path exclusion is honoured by absence: `authz.check`,
+  `authz.check_batch` and `token.introspect` appear in no constant, no registry
+  row and no example, and a test asserts it against the data rather than a
+  comment.
+
+  Not shipped, deliberately: a typed client for the §22.9 admin CRUD endpoints.
+  That subsection is informative, and §22.9 specifically warns against
+  re-deriving `PUT` merge semantics or the `failure_policy` re-derivation
+  client-side — so the right surface is the server's, called through
+  `AxiamClient`'s HTTP layer.
+
 - **CONTRACT.md §21.7.2 DPoP proof verification (RFC 9449).** New
   `token::dpop` implements all ten checks and returns the proof key's RFC 7638
   thumbprint, so a value passed on to `verify_token_binding` could only have
