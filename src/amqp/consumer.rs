@@ -133,14 +133,14 @@ impl ReplayGuard {
 
     /// `true` when `issued_at` lies within ±skew of `now` — mirrors the
     /// server's `is_fresh` (`crates/axiam-amqp/src/messages.rs:86-88`).
-    fn is_fresh(&self, issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    pub(crate) fn is_fresh(&self, issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
         now.signed_duration_since(issued_at).abs() <= self.skew
     }
 
     /// Returns `true` the first time `nonce` is observed (accept); `false`
     /// if it was already recorded and hasn't expired yet (a replay).
     /// Expired entries are pruned on every call.
-    fn check_and_record_nonce(&self, nonce: &str) -> bool {
+    pub(crate) fn check_and_record_nonce(&self, nonce: &str) -> bool {
         let ttl = self.ttl();
         let now = Instant::now();
         let mut seen = match self.seen.lock() {
@@ -507,71 +507,11 @@ mod tests {
         }
     }
 
-    // A minimal `tracing::Subscriber` that records the formatted message of
-    // every event into a *thread-local* buffer, so the "security event
-    // omits the HMAC value" assertion can inspect exactly what would have
-    // been logged — without needing a `tracing-subscriber` dev-dependency,
-    // and without racing other tests. `tracing`'s per-callsite interest
-    // cache is process-global: installing a subscriber via the thread-local
-    // `set_default` guard in each test, then calling
-    // `rebuild_interest_cache()`, mutates that global cache and can race
-    // with any other concurrently-running test thread that hits the same
-    // `tracing::warn!` call sites in `verify_and_dispatch`/`consume`. To
-    // avoid that race entirely, this subscriber is installed exactly once
-    // (via `std::sync::Once`) as the *global* default for the whole test
-    // binary, and routes every event into a `thread_local!` `Vec<String>` —
-    // so each test thread only ever sees the events it caused itself,
-    // regardless of how many other tests are running concurrently.
-    thread_local! {
-        static THREAD_EVENTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-
-    struct ThreadLocalRecordingSubscriber;
-
-    struct MessageVisitor(String);
-
-    impl tracing::field::Visit for MessageVisitor {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!("{}={:?} ", field.name(), value));
-        }
-    }
-
-    impl tracing::Subscriber for ThreadLocalRecordingSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut visitor = MessageVisitor(String::new());
-            event.record(&mut visitor);
-            THREAD_EVENTS.with(|events| events.borrow_mut().push(visitor.0));
-        }
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    static INIT_GLOBAL_SUBSCRIBER: std::sync::Once = std::sync::Once::new();
-
-    /// Install [`ThreadLocalRecordingSubscriber`] as the global default
-    /// exactly once per test binary run, then clear this thread's event
-    /// buffer so a prior test on the same worker thread cannot leak events
-    /// into the next one.
-    fn init_recording_subscriber() {
-        INIT_GLOBAL_SUBSCRIBER.call_once(|| {
-            tracing::subscriber::set_global_default(ThreadLocalRecordingSubscriber)
-                .expect("no global subscriber set yet in this test binary");
-        });
-        THREAD_EVENTS.with(|events| events.borrow_mut().clear());
-    }
+    // The recording `tracing::Subscriber` these assertions read lives in
+    // `crate::amqp::test_log`, shared with the §22 reactor-runtime tests: a
+    // test binary may install exactly one global subscriber, and both suites
+    // need to assert on what would have been logged.
+    use crate::amqp::test_log::{THREAD_EVENTS, init_recording_subscriber};
 
     /// Build a v2 message body (NEW-4: always carries `key_version`,
     /// `nonce`, `issued_at`) with a fresh, unique `nonce` and `issued_at`

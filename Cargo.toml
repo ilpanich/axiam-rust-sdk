@@ -250,6 +250,14 @@ required-features = ["rest", "grpc"]
 name = "amqp_consumer"
 required-features = ["amqp"]
 
+# CONTRACT.md §22 reactor runtime demonstration. A directory example
+# (`examples/reactor/main.rs`) rather than a single file, because it is the one
+# example with enough structure to be worth reading in parts.
+[[example]]
+name = "reactor"
+path = "examples/reactor/main.rs"
+required-features = ["amqp"]
+
 [[example]]
 name = "actix_route_guard"
 required-features = ["actix", "macros"]
