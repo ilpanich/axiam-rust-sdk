@@ -52,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The "no reactive 401→refresh interceptor" invariant is now written down at the
+  transport seam** (cross-SDK conformance review follow-up **F-14**; docs only, no
+  behaviour change). CONTRACT.md §12 requires that a 401 from an `/oauth2/*` endpoint
+  never enters the §9 single-flight refresh guard — that 401 means the *client
+  credentials* are bad, not that the user's session expired, so refreshing would burn a
+  single-use rotating refresh token for someone else's failure. Three sibling SDKs
+  enforce this with an explicit `/oauth2/*` skip list; this SDK has always enforced it
+  **structurally**, by installing no reactive 401 interceptor on its `reqwest::Client`
+  at all. That made the SDK correct but the reason invisible: a future maintainer adding
+  blanket retry-on-401 middleware would have broken a contract MUST with no compile error
+  and no obvious symptom. The invariant, and what a future interceptor would have to do
+  instead, are now stated on `AxiamClientInner::http` and on `AxiamClient::http()`. The
+  regression test that pins it
+  (`introspect_401_becomes_oauth_protocol_error_and_does_not_trigger_the_refresh_guard`)
+  already existed and is named from the docs so the two stay connected.
+
 - **Vendored `proto/axiam/v1/token.proto` re-synced** to pick up `cnf`,
   `token_type`, `scope`, `client_id`, `permissions` and `ext_exchange_iss` on
   the token responses.

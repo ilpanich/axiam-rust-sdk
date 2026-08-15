@@ -511,6 +511,40 @@ fn concat_cert_and_key(cert_pem: &[u8], key_pem: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) struct AxiamClientInner {
+    /// The one `reqwest::Client` every REST and §12 OIDC call shares.
+    ///
+    /// # Invariant: this transport has **no** 401→refresh interceptor
+    ///
+    /// CONTRACT.md §12 requires that a 401 from an `/oauth2/*` endpoint never
+    /// enters the CONTRACT.md §9 single-flight refresh guard: such a
+    /// 401 means the *client credentials* are bad (`invalid_client`), not that
+    /// the user's session expired, so refreshing is both meaningless and
+    /// harmful — it would burn a single-use rotating refresh token in response
+    /// to someone else's failure.
+    ///
+    /// Three sibling SDKs (TypeScript, Java, C#) satisfy that rule with an
+    /// explicit `/oauth2/*` skip list because their transports *do* carry a
+    /// reactive 401 interceptor. This SDK satisfies it **structurally**: no
+    /// interceptor is installed on this client at all. Refresh is only ever
+    /// driven explicitly, by [`crate::token::refresh_guard`] on the §1 cookie
+    /// session and by `oidc_refresh`'s dedicated coalescer
+    /// ([`crate::oidc::single_flight`]) on the §12 token namespace — never
+    /// automatically, from here.
+    ///
+    /// **Therefore: do not add a reactive 401→refresh interceptor (or any
+    /// other blanket retry-on-401 middleware) to this `reqwest::Client`.** Doing
+    /// so would silently route `/oauth2/*` 401s into the §9 guard and break the
+    /// rule with no compile error and no obvious symptom. If one is ever needed
+    /// for the REST surface, it MUST carry an explicit `/oauth2/*` skip list, as
+    /// the three list-based SDKs do — and the skip list must cover every §12
+    /// endpoint, including those reached at a *foreign host* via the discovery
+    /// document, not merely paths under `base_url`.
+    ///
+    /// Pinned by the regression test
+    /// `introspect_401_becomes_oauth_protocol_error_and_does_not_trigger_the_refresh_guard`
+    /// (`tests/oidc_token_ops_test.rs`), which asserts a 401 from
+    /// `/oauth2/introspect` produces zero `/api/v1/auth/refresh` calls.
+    /// Cross-SDK conformance review follow-up F-14.
     pub(crate) http: reqwest::Client,
     pub(crate) jar: Arc<reqwest::cookie::Jar>,
     pub(crate) base_url: url::Url,
@@ -621,7 +655,13 @@ impl AxiamClient {
     }
 
     /// Access the underlying `reqwest::Client` (crate-internal use by the
-    /// `rest`/`token` modules).
+    /// `rest`/`token`/`oidc` modules).
+    ///
+    /// This is the transport seam the §12 OIDC helpers share with the §1 REST
+    /// surface. It deliberately carries **no** reactive 401→refresh
+    /// interceptor — see the `AxiamClientInner::http` field docs for the
+    /// invariant that keeps a 401 from `/oauth2/*` out of the §9 guard, and why
+    /// adding such an interceptor here would break CONTRACT.md §12 silently.
     pub(crate) fn http(&self) -> &reqwest::Client {
         &self.inner.http
     }
