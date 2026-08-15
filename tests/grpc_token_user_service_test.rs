@@ -56,6 +56,7 @@ impl TokenService for StubTokenService {
                 tenant_id: "22222222-2222-2222-2222-222222222222".into(),
                 org_id: "33333333-3333-3333-3333-333333333333".into(),
                 exp: 9_999_999_999,
+                ..Default::default()
             }))
         } else if req.access_token == "invalid-token" {
             Ok(Response::new(ValidateTokenResponse {
@@ -64,6 +65,7 @@ impl TokenService for StubTokenService {
                 tenant_id: String::new(),
                 org_id: String::new(),
                 exp: 0,
+                ..Default::default()
             }))
         } else {
             Err(Status::invalid_argument("unknown test token"))
@@ -87,6 +89,7 @@ impl TokenService for StubTokenService {
             iat: 1_000,
             exp: 9_999_999_999,
             jti: Uuid::new_v4().to_string(),
+            ..Default::default()
         }))
     }
 }

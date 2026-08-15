@@ -112,6 +112,10 @@ pub struct CnfClaim {
     /// client certificate the token was issued to.
     #[serde(rename = "x5t#S256", default, skip_serializing_if = "Option::is_none")]
     pub x5t_s256: Option<String>,
+    /// RFC 9449 §6.1 `jkt` — base64url (unpadded) RFC 7638 thumbprint of the
+    /// DPoP public key the token was issued to (contract 1.16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
 }
 
 impl CnfClaim {
@@ -124,6 +128,51 @@ impl CnfClaim {
     pub fn certificate_thumbprint(&self) -> Option<&str> {
         self.x5t_s256.as_deref()
     }
+
+    /// The DPoP key thumbprint this token is bound to, or `None` when the
+    /// confirmation does not name one (contract 1.16).
+    pub fn dpop_thumbprint(&self) -> Option<&str> {
+        self.jkt.as_deref()
+    }
+
+    /// Whether this confirmation names **no** method this SDK understands.
+    ///
+    /// A `cnf` that exists but names nothing checkable is the case rule 9 is
+    /// most often got wrong: it is an *unverifiable constraint*, never *no
+    /// constraint*, and it must be refused. Over gRPC it is also the shape an
+    /// empty `CnfClaim` message arrives in, because proto3 cannot distinguish
+    /// an absent string from an empty one (§10.3 rule 3).
+    pub fn names_nothing_checkable(&self) -> bool {
+        self.certificate_thumbprint().is_none() && self.dpop_thumbprint().is_none()
+    }
+}
+
+/// The proofs a caller can present for a sender-constrained token
+/// (contract 1.16, CONTRACT.md §10.1 rule 9).
+///
+/// Both fields are `Option` because a caller may hold one, both, or neither —
+/// and "neither" is a legitimate thing to pass for an ordinary bearer token,
+/// which is why [`Claims::verify_token_binding`] accepts it and returns `Ok`
+/// when the token names no confirmation.
+///
+/// # Every thumbprint must come from the transport
+///
+/// Take the certificate thumbprint from the TLS peer certificate (or from a
+/// trusted terminating proxy over a channel your application controls), and
+/// the DPoP thumbprint from a proof **you have already verified** against this
+/// request's method and URI. Never from a request header the caller can set:
+/// a forgeable input makes the whole mechanism decorative.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PresentedProofs<'a> {
+    /// RFC 8705 §3.1 `x5t#S256` of the peer certificate on this connection.
+    pub certificate_thumbprint: Option<&'a str>,
+    /// RFC 9449 §6.1 `jkt` of the key that signed a DPoP proof **this SDK has
+    /// already verified** for this request's `htm`/`htu`.
+    ///
+    /// Passing a thumbprint here asserts the proof checked out. Passing the
+    /// `jkt` off an unverified proof would let any captured proof authorize
+    /// any request.
+    pub dpop_thumbprint: Option<&'a str>,
 }
 
 impl Claims {
@@ -134,19 +183,25 @@ impl Claims {
     /// certificate: base64url, **unpadded**, SHA-256 over the **DER** encoding.
     /// [`certificate_thumbprint_s256`] computes it from DER bytes.
     ///
-    /// # The four cases
+    /// This is the **narrow** entry point, kept for callers whose transport can
+    /// only ever produce a certificate thumbprint. It refuses a DPoP-bound
+    /// token outright rather than ignoring the `jkt` it cannot check — see
+    /// [`Claims::verify_token_binding`] for the full rule.
+    ///
+    /// # The five cases
     ///
     /// | this token's `cnf` | `presented_thumbprint` | result |
     /// |---|---|---|
     /// | absent | anything | `Ok` — an ordinary bearer token |
     /// | `x5t#S256` | equal | `Ok` |
     /// | `x5t#S256` | different, or `None` | `Err` |
-    /// | present, no `x5t#S256` | anything | `Err` |
+    /// | names `jkt` (contract 1.16) | anything | `Err` — **this** function cannot check a DPoP proof |
+    /// | present, names neither | anything | `Err` |
     ///
     /// The first row is why a guard that adopts this rule does not break
     /// existing deployments: an unbound token is still accepted whether or not
-    /// a certificate is present. The last row is the one that is easy to get
-    /// wrong — a `cnf` naming a method this SDK cannot check is an
+    /// a certificate is present. The last two are the ones that are easy to get
+    /// wrong — a `cnf` naming a method this SDK cannot check *here* is an
     /// *unverifiable constraint*, never *no constraint*.
     ///
     /// # The thumbprint must come from the transport
@@ -174,10 +229,24 @@ impl Claims {
         };
 
         let Some(expected) = cnf.certificate_thumbprint() else {
+            // Includes the DPoP case: this function has no proof to check, so
+            // a `jkt`-bound token is refused rather than silently downgraded.
             return Err(auth(
-                "token carries a cnf confirmation naming a method this SDK cannot verify                  (CONTRACT.md §10.1 rule 9 — an unverifiable constraint is not an absent one)",
+                "token carries a cnf confirmation naming a method this entry point cannot verify \
+                 (CONTRACT.md §10.1 rule 9 — an unverifiable constraint is not an absent one; \
+                 use verify_token_binding for DPoP)",
             ));
         };
+
+        // A token naming BOTH methods is a conjunction (contract 1.16): this
+        // function can only establish one half, so it must not answer for the
+        // whole. Refusing here is what stops "check whichever we can".
+        if cnf.dpop_thumbprint().is_some() {
+            return Err(auth(
+                "token names both a certificate and a DPoP key; both must hold \
+                 (CONTRACT.md §10.1 rule 9) — use verify_token_binding",
+            ));
+        }
 
         let Some(presented) = presented_thumbprint else {
             return Err(auth(
@@ -192,6 +261,98 @@ impl Claims {
                 "token is bound to a different client certificate than the one presented",
             ))
         }
+    }
+
+    /// CONTRACT.md §10.1 rule 9 — enforce this token's sender constraint
+    /// against **every** proof the caller presented (contract 1.16).
+    ///
+    /// This is the full rule, and the one to use unless your transport
+    /// genuinely cannot produce a DPoP thumbprint.
+    ///
+    /// # The ten cases
+    ///
+    /// | this token's `cnf` | certificate | DPoP | result |
+    /// |---|---|---|---|
+    /// | absent | anything | anything | `Ok` — an ordinary bearer token |
+    /// | `x5t#S256` | equal | ignored | `Ok` |
+    /// | `x5t#S256` | different | ignored | `Err` |
+    /// | `x5t#S256` | `None` | ignored | `Err` |
+    /// | `jkt` | ignored | equal | `Ok` |
+    /// | `jkt` | ignored | different | `Err` |
+    /// | `jkt` | ignored | `None` | `Err` |
+    /// | both | equal | equal | `Ok` — **conjunction** |
+    /// | both | either wrong or missing | — | `Err` |
+    /// | present, names neither | anything | anything | `Err` |
+    ///
+    /// Two rows carry the weight. **Both present is a conjunction**: an
+    /// operator who turned on two constraints asked for two, and satisfying
+    /// the more convenient one is not compliance. **Names neither is a
+    /// refusal**: a confirmation this SDK cannot interpret is an unverifiable
+    /// constraint, and reading it as "unconstrained" is the exact downgrade
+    /// rule 9 exists to prevent.
+    ///
+    /// # The DPoP thumbprint must come from a *verified* proof
+    ///
+    /// This function compares thumbprints; it does not verify proofs. Supply
+    /// `dpop_thumbprint` only after checking the proof's signature, `htm`,
+    /// `htu`, `iat` and `jti` for **this** request. A thumbprint lifted from an
+    /// unverified proof would let a proof captured from any other endpoint
+    /// authorize this one.
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Auth`] on any rejecting row.
+    pub fn verify_token_binding(&self, proofs: PresentedProofs<'_>) -> Result<(), AxiamError> {
+        // The fast path, and the common one. Note it comes first: an unbound
+        // token is accepted with no proofs at all, which is the property that
+        // keeps existing deployments working.
+        let Some(cnf) = self.cnf.as_ref() else {
+            return Ok(());
+        };
+
+        let auth = |message: &str| AxiamError::Auth {
+            message: message.to_owned(),
+            oauth: None,
+            reason: None,
+        };
+
+        if cnf.names_nothing_checkable() {
+            return Err(auth(
+                "token carries a cnf confirmation naming no method this SDK can verify \
+                 (CONTRACT.md §10.1 rule 9 — an unverifiable constraint is not an absent one)",
+            ));
+        }
+
+        // Each arm that applies must pass. Written as two independent checks
+        // rather than a match on the pair precisely so that "both named" needs
+        // no separate branch — it is simply the case where both run.
+        if let Some(expected) = cnf.certificate_thumbprint() {
+            let Some(presented) = proofs.certificate_thumbprint else {
+                return Err(auth(
+                    "token is certificate-bound but no client certificate was presented",
+                ));
+            };
+            if !constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
+                return Err(auth(
+                    "token is bound to a different client certificate than the one presented",
+                ));
+            }
+        }
+
+        if let Some(expected) = cnf.dpop_thumbprint() {
+            let Some(presented) = proofs.dpop_thumbprint else {
+                return Err(auth(
+                    "token is DPoP-bound but no verified DPoP proof was presented",
+                ));
+            };
+            if !constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
+                return Err(auth(
+                    "token is bound to a different DPoP key than the one presented",
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
