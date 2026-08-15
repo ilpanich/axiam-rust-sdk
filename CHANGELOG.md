@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CONTRACT.md §21.7.2 DPoP proof verification (RFC 9449).** New
+  `token::dpop` implements all ten checks and returns the proof key's RFC 7638
+  thumbprint, so a value passed on to `verify_token_binding` could only have
+  come from a proof that verified. `InMemoryJtiStore` covers check 8 for a
+  single process; the `JtiStore` trait is a required argument, not an optional
+  one, because there is no safe default that skips replay tracking.
+
+  Gated on `rest`/`actix` (the checks need `sha2`, `base64`, `subtle`). A
+  `--no-default-features` consumer keeps `verify_token_binding` and has no proof
+  verifier — which per §10.1 rule 9 means refusing `jkt`-bound tokens.
+
+  **One recorded divergence from the Python and TypeScript SDKs:** `jsonwebtoken`
+  refuses a token whose header `alg` disagrees with the allowlist it was handed,
+  so this SDK *rejects* a lying `alg` header where those two ignore it and verify
+  anyway. Both satisfy check 2 — neither lets the header choose the algorithm —
+  and this is the stricter of the two. There is a test named for the divergence
+  so it stays a decision rather than a surprise.
+
 - **CONTRACT.md §10.1 rule 9 extended for DPoP (contract 1.16/1.17).**
   `CnfClaim` gains `jkt` (RFC 9449 §6.1), and a new
   `Claims::verify_token_binding(PresentedProofs)` applies the full ten-row
