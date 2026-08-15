@@ -84,6 +84,7 @@ impl TokenService for StubToken {
             tenant_id: String::new(),
             org_id: String::new(),
             exp: 0,
+            ..Default::default()
         }))
     }
 

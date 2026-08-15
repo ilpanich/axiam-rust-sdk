@@ -12,6 +12,7 @@
 #![cfg(feature = "rest")]
 
 use axiam_sdk::AxiamError;
+use axiam_sdk::token::PresentedProofs;
 use axiam_sdk::token::{CLOCK_SKEW_LEEWAY_SECS, JwksVerifier};
 use base64::Engine as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -589,6 +590,164 @@ async fn plain_verify_does_not_enforce_the_binding_and_says_so() {
     claims
         .verify_certificate_binding(None)
         .expect_err("...and rejects an absent one");
+}
+
+// ---------------------------------------------------------------------------
+// §10.1 rule 9 extended for DPoP (contract 1.16)
+// ---------------------------------------------------------------------------
+
+const JKT: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+const OTHER_JKT: &str = "sBjflhaR2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+/// Claims carrying whatever `cnf` the caller wants.
+fn claims_with_cnf(cnf: serde_json::Value) -> serde_json::Value {
+    let mut claims = good_claims();
+    claims["cnf"] = cnf;
+    claims
+}
+
+/// **The positive regression test**, and the one this whole change is most
+/// likely to break: an unbound token must still verify with **no certificate
+/// and no proof**. The likeliest wrong implementation of rule 9 is one that
+/// starts demanding evidence from every caller.
+#[tokio::test]
+async fn an_unbound_token_is_accepted_with_no_proofs_at_all() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&good_claims());
+
+    let claims = verifier.verify(&token).await.unwrap();
+    claims
+        .verify_token_binding(PresentedProofs::default())
+        .expect("an unbound token needs no proofs");
+    claims
+        .verify_token_binding(PresentedProofs {
+            certificate_thumbprint: Some(THUMBPRINT),
+            dpop_thumbprint: Some(JKT),
+        })
+        .expect("...and is not made invalid by proofs it never asked for");
+}
+
+#[tokio::test]
+async fn a_dpop_bound_token_accepts_the_matching_key() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&claims_with_cnf(json!({ "jkt": JKT })));
+
+    let claims = verifier.verify(&token).await.unwrap();
+    claims
+        .verify_token_binding(PresentedProofs {
+            certificate_thumbprint: None,
+            dpop_thumbprint: Some(JKT),
+        })
+        .expect("the proof names the confirmed key");
+}
+
+#[tokio::test]
+async fn a_dpop_bound_token_is_rejected_without_a_proof_or_with_the_wrong_key() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&claims_with_cnf(json!({ "jkt": JKT })));
+    let claims = verifier.verify(&token).await.unwrap();
+
+    let err = claims
+        .verify_token_binding(PresentedProofs::default())
+        .expect_err("no proof means no possession");
+    assert_auth_error_containing(err, "no verified DPoP proof");
+
+    let err = claims
+        .verify_token_binding(PresentedProofs {
+            certificate_thumbprint: None,
+            dpop_thumbprint: Some(OTHER_JKT),
+        })
+        .expect_err("another key's proof is not this token's");
+    assert_auth_error_containing(err, "different DPoP key");
+}
+
+/// **A `cnf` naming both methods is a conjunction.** An operator who turned on
+/// two constraints asked for two; satisfying the more convenient one is not
+/// compliance. This is the rule most likely to be implemented as "check
+/// whichever we can", which is why each half is asserted to fail alone.
+#[tokio::test]
+async fn a_cnf_naming_both_methods_requires_both() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&claims_with_cnf(
+        json!({ "x5t#S256": THUMBPRINT, "jkt": JKT }),
+    ));
+    let claims = verifier.verify(&token).await.unwrap();
+
+    claims
+        .verify_token_binding(PresentedProofs {
+            certificate_thumbprint: Some(THUMBPRINT),
+            dpop_thumbprint: Some(JKT),
+        })
+        .expect("both proofs present and correct");
+
+    claims
+        .verify_token_binding(PresentedProofs {
+            certificate_thumbprint: Some(THUMBPRINT),
+            dpop_thumbprint: None,
+        })
+        .expect_err("the certificate alone is not enough");
+
+    claims
+        .verify_token_binding(PresentedProofs {
+            certificate_thumbprint: None,
+            dpop_thumbprint: Some(JKT),
+        })
+        .expect_err("the proof alone is not enough");
+}
+
+/// An **empty** `cnf` names nothing checkable and must be refused, not read as
+/// unbound. Over gRPC this is also how proto3 delivers an empty `CnfClaim`
+/// message, which is why §10.3 rule 3 spells it out separately.
+#[tokio::test]
+async fn an_empty_cnf_is_refused_rather_than_read_as_unbound() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&claims_with_cnf(json!({})));
+    let claims = verifier.verify(&token).await.unwrap();
+
+    let err = claims
+        .verify_token_binding(PresentedProofs::default())
+        .expect_err("an empty confirmation is unverifiable, not absent");
+    assert_auth_error_containing(err, "no method this SDK can verify");
+}
+
+/// The narrow entry point keeps working for certificates, and **refuses** a
+/// DPoP-bound token rather than ignoring the `jkt` it cannot check. That
+/// refusal is the whole reason it can stay in the API without becoming a
+/// downgrade path.
+#[tokio::test]
+async fn the_certificate_only_entry_point_refuses_a_dpop_bound_token() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&claims_with_cnf(json!({ "jkt": JKT })));
+    let claims = verifier.verify(&token).await.unwrap();
+
+    for presented in [None, Some(THUMBPRINT)] {
+        claims
+            .verify_certificate_binding(presented)
+            .expect_err("a certificate-only check must not answer for a DPoP binding");
+    }
+}
+
+/// ...and it refuses a both-bound token too, for the same reason: it can
+/// establish one half and must not answer for the whole.
+#[tokio::test]
+async fn the_certificate_only_entry_point_refuses_a_both_bound_token() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let token = sign_eddsa(&claims_with_cnf(
+        json!({ "x5t#S256": THUMBPRINT, "jkt": JKT }),
+    ));
+    let claims = verifier.verify(&token).await.unwrap();
+
+    let err = claims
+        .verify_certificate_binding(Some(THUMBPRINT))
+        .expect_err("the certificate half alone does not satisfy a conjunction");
+    assert_auth_error_containing(err, "both must hold");
 }
 
 /// The thumbprint helper must produce RFC 7515 §2 base64url: unpadded, and

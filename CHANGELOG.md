@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CONTRACT.md §21.7.2 DPoP proof verification (RFC 9449).** New
+  `token::dpop` implements all ten checks and returns the proof key's RFC 7638
+  thumbprint, so a value passed on to `verify_token_binding` could only have
+  come from a proof that verified. `InMemoryJtiStore` covers check 8 for a
+  single process; the `JtiStore` trait is a required argument, not an optional
+  one, because there is no safe default that skips replay tracking.
+
+  Gated on `rest`/`actix` (the checks need `sha2`, `base64`, `subtle`). A
+  `--no-default-features` consumer keeps `verify_token_binding` and has no proof
+  verifier — which per §10.1 rule 9 means refusing `jkt`-bound tokens.
+
+  **One recorded divergence from the Python and TypeScript SDKs:** `jsonwebtoken`
+  refuses a token whose header `alg` disagrees with the allowlist it was handed,
+  so this SDK *rejects* a lying `alg` header where those two ignore it and verify
+  anyway. Both satisfy check 2 — neither lets the header choose the algorithm —
+  and this is the stricter of the two. There is a test named for the divergence
+  so it stays a decision rather than a surprise.
+
+- **CONTRACT.md §10.1 rule 9 extended for DPoP (contract 1.16/1.17).**
+  `CnfClaim` gains `jkt` (RFC 9449 §6.1), and a new
+  `Claims::verify_token_binding(PresentedProofs)` applies the full ten-row
+  rule: a certificate thumbprint, a verified DPoP key thumbprint, or **both**.
+  A `cnf` naming both methods is a **conjunction** — satisfying only the more
+  convenient one is not compliance — and a `cnf` naming nothing this SDK can
+  check (including an *empty* one) is refused rather than read as unbound.
+  `Claims::verify_certificate_binding` remains as the narrower entry point for
+  transports that can only produce a certificate, and now **refuses** a
+  DPoP-bound or both-bound token rather than ignoring the half it cannot
+  check.
+  New example: `examples/sender_constrained_guard.rs`.
+
+  Not a breaking change: an unbound token is still accepted with no
+  certificate and no proof, which is asserted directly by
+  `an_unbound_token_is_accepted_with_no_proofs_at_all`.
+
+  §10.3 (sender-constrained tokens over gRPC) needs no work in this SDK — its
+  gRPC client calls `AuthorizationService` only and never introspects through
+  `TokenService`, so there is no gRPC path here that could read a `cnf`. The
+  vendored `proto/` is re-synced regardless, so the fields are present the day
+  that changes.
+
+### Changed
+
+- **Vendored `proto/axiam/v1/token.proto` re-synced** to pick up `cnf`,
+  `token_type`, `scope`, `client_id`, `permissions` and `ext_exchange_iss` on
+  the token responses.
+
+  Additive proto fields are wire-compatible, but Rust struct literals are
+  exhaustive — so **code that constructs `ValidateTokenResponse` or
+  `IntrospectTokenResponse` literally will stop compiling** until it adds the
+  new fields or `..Default::default()`. In practice that means mock servers,
+  not production code, which reads the responses rather than building them.
+  This crate's own test mocks now use `..Default::default()` so they do not
+  need editing again the next time the schema grows.
+
 - **CONTRACT.md §10.1 rule 9 — sender-constrained (certificate-bound) access tokens**
   (contract 1.15, RFC 8705 §3 / RFC 7800). AXIAM can now issue tokens carrying a
   `cnf.x5t#S256` confirmation naming the client certificate they were issued to. Such a
