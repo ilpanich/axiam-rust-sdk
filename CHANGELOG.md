@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha25] - 2026-08-16
+
+### Added
+
+- Ship the CONTRACT.md §22 reactor runtime (R2.5)
+- Implement §21.7.2 proof verification — all ten checks (#59)
+- Subject_token_type is required (contract 1.13)
+- §15.7 — external-IdP subject tokens at the exchange (X4)
+- Wire §20.3 challenge emission into the §11 route guard, plus the example pair (#52)
+- §20 — UMA 2.0 Protection API and ticket grant
+- Report clamped settings via §19 ConfigClamped (contract 1.9)
+- Contract 1.8 — §16 retry, §17 memo, §18 close(), §19 telemetry (D5) (#45)
+- Device grant, token exchange, logout helpers; re-vendor (D6)
+
+### Changed
+
+- Re-vendor CONTRACT.md 1.19, openapi.json and proto/ from main (R5.8) (#61)
+- Name the no-401-interceptor invariant at the transport seam (R5.7, F-14) (#60)
+- Contract 1.15 — §10.1 rule 9, sender-constrained access tokens (#58)
+- Drop a needless borrow in the timeout test
+- Rustfmt import order
+- Add the §20.7 required timeout assertion
+- Retire the "measured residual" justification (contract 1.14)
+- Re-sync to contract 1.14 (#302 closed)
+- Bump github/codeql-action from 4.37.4 to 4.37.6
+- Bump Swatinem/rust-cache from 2.9.1 to 2.9.2
+- Bump dtolnay/rust-toolchain
+- Bump taiki-e/install-action from 2.85.5 to 2.85.10
+
+### Fixed
+
+- Never print the raw UMA challenge header (#53)
+
 ## [Unreleased]
 
 ### Added
