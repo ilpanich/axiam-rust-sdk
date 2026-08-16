@@ -428,3 +428,126 @@ fn compile_error_spanned<T: quote::ToTokens>(tokens: T, message: &str) -> TokenS
         .to_compile_error()
         .into()
 }
+
+// ---------------------------------------------------------------------------
+// §22.14 — declarative reactor handler binding
+// ---------------------------------------------------------------------------
+
+/// The §22.5 hookable events, for compile-time validation of
+/// [`macro@reactor_handler`]'s argument.
+///
+/// A copy of `axiam_sdk::amqp::reactor::registry::EVENT_REGISTRY`'s names, and
+/// necessarily a copy: a proc-macro crate is compiled for the HOST and cannot
+/// depend on the library it expands into. `tests/reactor_macro_test.rs` in the
+/// parent crate asserts the two lists agree, so an event added to the registry
+/// and not to this list fails a test rather than silently becoming unbindable.
+///
+/// Note what is **not** here and never will be: a list of the three hot-path
+/// operations §22.7 excludes. They are refused because they are absent from
+/// *this* list, not because they appear on another one — §22.13 requires them
+/// to be absent from every event constant the SDK exposes, and §22.14 rule 2
+/// restates that for exactly this temptation (a nicer error message).
+const HOOKABLE_EVENTS: &[&str] = &[
+    "token.pre_issue",
+    "login.post_auth",
+    "user.pre_create",
+    "user.pre_update",
+    "grant.pre_assign",
+];
+
+/// Bind an `async fn` to one reactor hook event (CONTRACT.md §22.14).
+///
+/// The event name lives next to the function that handles it, and is checked
+/// **at compile time** against the §22.5 registry — so a typo is a build
+/// failure rather than an event that silently never fires.
+///
+/// ```ignore
+/// use axiam_sdk::amqp::reactor::{ReactorDecision, ReactorEvent, ReactorRouter};
+/// use axiam_sdk::reactor_handler;
+///
+/// #[reactor_handler("token.pre_issue")]
+/// async fn enrich_token(event: ReactorEvent) -> ReactorDecision {
+///     ReactorDecision::mutate([("ext.department", "engineering")])
+/// }
+///
+/// let handler = ReactorRouter::new().on::<enrich_token>().build()?;
+/// ```
+///
+/// # What it expands to
+///
+/// The function is emitted **unchanged**, so it stays directly callable and
+/// directly unit-testable. Alongside it the macro emits a braced marker struct
+/// of the same name — braced, so it occupies only the *type* namespace and does
+/// not collide with the function in the value namespace — carrying an
+/// `impl ReactorHandlerFn` whose `EVENT` associated constant is the validated
+/// literal. `ReactorRouter::on::<T>()` reads it from there.
+///
+/// # What it deliberately does not do
+///
+/// It adds no dispatch, no error handling and no answer of its own. §22.14's
+/// rules — an unbound event abstains, a handler's own panic propagates, a patch
+/// is never filtered — are enforced by [`ReactorRouter`], one place, whichever
+/// way a handler was bound.
+///
+/// [`ReactorRouter`]: https://docs.rs/axiam-sdk/latest/axiam_sdk/amqp/reactor/struct.ReactorRouter.html
+#[proc_macro_attribute]
+pub fn reactor_handler(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args2 = proc_macro2::TokenStream::from(args.clone());
+    let parsed = match syn::parse::<ExprLit>(args) {
+        Ok(lit) => lit,
+        Err(_) => {
+            return compile_error(
+                args2,
+                "reactor_handler takes one string literal: the §22.5 event name, \
+                 e.g. #[reactor_handler(\"token.pre_issue\")]",
+            );
+        }
+    };
+    let Some(event) = lit_string(&Expr::Lit(parsed.clone())) else {
+        return compile_error(
+            args2,
+            "reactor_handler's argument must be a string literal event name",
+        );
+    };
+
+    if !HOOKABLE_EVENTS.contains(&event.as_str()) {
+        return compile_error_spanned(
+            &parsed,
+            &format!(
+                "{event} is not a hookable reactor event; the registry is [{}]",
+                HOOKABLE_EVENTS.join(", ")
+            ),
+        );
+    }
+
+    let func = parse_macro_input!(item as ItemFn);
+    if func.sig.asyncness.is_none() {
+        return compile_error_spanned(
+            func.sig.fn_token,
+            "reactor_handler requires an `async fn` — a handler resolves to a ReactorDecision",
+        );
+    }
+
+    let name = &func.sig.ident;
+    let vis = &func.vis;
+    let doc = format!("Marker type binding [`{name}`] to `{event}` (CONTRACT.md §22.14).");
+
+    quote! {
+        #func
+
+        #[doc = #doc]
+        #[allow(non_camel_case_types)]
+        #vis struct #name {}
+
+        impl ::axiam_sdk::amqp::reactor::ReactorHandlerFn for #name {
+            const EVENT: &'static str = #event;
+
+            fn call(
+                event: ::axiam_sdk::amqp::reactor::ReactorEvent,
+            ) -> ::axiam_sdk::amqp::reactor::BoxedReactorFuture {
+                ::std::boxed::Box::pin(#name(event))
+            }
+        }
+    }
+    .into()
+}

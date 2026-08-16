@@ -1,0 +1,5 @@
+error: reactor_handler requires an `async fn` — a handler resolves to a ReactorDecision
+  --> tests/ui_reactor/non_async.rs:12:1
+   |
+12 | fn enrich(_event: ReactorEvent) -> ReactorDecision {
+   | ^^

@@ -60,9 +60,13 @@
 //!   `"hmac_signature": null` canonicalization that differs from §8's own two
 //!   message types (§22.1–§22.4).
 //! * [`runtime`] — [`reactor_serve`] itself (§22.10).
+//! * [`router`] — [`ReactorRouter`], §22.14's declarative binding: one handler
+//!   per event instead of a `match` whose catch-all arm answers for code that
+//!   never ran.
 
 pub mod protocol;
 pub mod registry;
+pub mod router;
 pub mod runtime;
 
 pub use protocol::{
@@ -74,6 +78,7 @@ pub use registry::{
     DEFAULT_MAX_IN_FLIGHT, DEFAULT_TIMEOUT_MS, EVENT_REGISTRY, FailurePolicy, MAX_TIMEOUT_MS,
     MIN_TIMEOUT_MS, ReactorEventSpec, ReactorMode, default_failure_policy_for, event_spec, events,
 };
+pub use router::{BoxedReactorFuture, ReactorHandlerFn, ReactorRouter};
 pub use runtime::{
     ReactorConfig, ReactorConfigBuilder, ReactorDecision, ReactorShutdown, reactor_serve,
 };

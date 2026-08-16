@@ -182,6 +182,7 @@ dependencies for the transports/integrations it actually uses:
 | — | — | `webhook::verify_webhook` (CONTRACT.md §13) has no feature of its own: it is compiled whenever `rest` **or** `amqp` is on, since both already vendor its `hmac`/`sha2`/`hex`/`subtle` inputs. With the default feature set it is always available |
 | `actix` | off | The `AxiamUser` Actix-Web `FromRequest` extractor (CONTRACT.md §10 route guard). Implies `rest` (shares the same `JwksVerifier`) |
 | `macros` | off | The `#[require_access]` / `#[require_auth]` / `#[require_role]` declarative authorization attribute macros (CONTRACT.md §11), plus the programmatic `middleware::RequireAccess` guard. Implies `actix` |
+| `reactor-macros` | off | The `#[reactor_handler("...")]` attribute macro (CONTRACT.md §22.14), which binds an `async fn` to one hook event and validates the name against the §22.5 registry **at compile time**. Implies `amqp`, and deliberately not `macros`: a reactor is an AMQP daemon with no HTTP surface, so it should not pull `actix-web` in to get an attribute macro |
 
 To build a REST-only client (no gRPC, no AMQP), disable the default feature set and opt back
 into just `rest`:
@@ -368,6 +369,66 @@ reactor_serve(config, |event| async move {
 .await
 # }
 ```
+
+#### Binding handlers per event (§22.14)
+
+The `match` above is the shape every multi-event reactor grows, and its `_ =>` arm —
+`ReactorDecision::allow()` — answers on behalf of code that never ran. That is the defect
+§22.10 rule 2 forbids the *runtime* from committing, relocated into your file where the
+rule does not reach it: an operator who set `fail_closed` on the registration has it
+defeated there.
+
+`ReactorRouter` is §22.14's declarative form, in the spirit of the §11 declarative
+authorization helpers:
+
+```rust,no_run
+use axiam_sdk::amqp::reactor::{ReactorDecision, ReactorRouter, events, reactor_serve};
+# use axiam_sdk::amqp::reactor::ReactorConfig;
+# async fn run(config: ReactorConfig) -> Result<(), axiam_sdk::AxiamError> {
+let handler = ReactorRouter::new()
+    .bind(events::TOKEN_PRE_ISSUE, |event| async move {
+        ReactorDecision::mutate([("ext.cost_center", "42")])
+    })
+    .bind(events::LOGIN_POST_AUTH, |event| async move {
+        ReactorDecision::deny("embargoed region")
+    })
+    .build()?;   // every rejected binding at once, not one per run
+
+reactor_serve(config, handler).await
+# }
+```
+
+With the `reactor-macros` feature, `#[reactor_handler]` moves the event name next to the
+function it belongs to — and checks it **at compile time**:
+
+```rust,ignore
+use axiam_sdk::reactor_handler;
+
+#[reactor_handler("token.pre_issue")]
+async fn enrich_token(event: ReactorEvent) -> ReactorDecision {
+    ReactorDecision::mutate([("ext.cost_center", "42")])
+}
+
+let handler = ReactorRouter::new().on::<enrich_token>().build()?;
+```
+
+`#[reactor_handler("token.pre_isue")]` does not compile. The function itself is emitted
+unchanged, so it stays directly callable and directly unit-testable; the macro adds only a
+marker type in the *type* namespace carrying the validated event name.
+
+- **A misspelled event is refused when you bind it** — the router accepts only §22.5
+  registry names, which is also how it refuses the three hot-path operations §22.7
+  excludes: they are in no registry row. The diagnostic names the registry, never the
+  exclusions.
+- **An unbound event abstains** — no reply, and the registration's `failure_policy` decides
+  (§22.8), exactly as it decides a timeout. Never a synthesized `allow`.
+- A duplicate binding is an error rather than a silent overwrite, and `router.events()`
+  feeds `default_failure_policy_for` so you can see what an unreachable reactor costs
+  before you go live.
+
+It is pure sugar: `build()` produces exactly the handler `reactor_serve` already takes. It
+opens nothing, verifies nothing, signs nothing, does not filter a patch, and a handler's
+own panic reaches the runtime unchanged so nothing is published.
 
 See [`examples/reactor/`](examples/reactor/) for a complete three-hook reactor with
 graceful shutdown and a telemetry hook.

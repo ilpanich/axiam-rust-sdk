@@ -1,0 +1,5 @@
+error: authz.check is not a hookable reactor event; the registry is [token.pre_issue, login.post_auth, user.pre_create, user.pre_update, grant.pre_assign]
+  --> tests/ui_reactor/hot_path_event.rs:13:19
+   |
+13 | #[reactor_handler("authz.check")]
+   |                   ^^^^^^^^^^^^^
