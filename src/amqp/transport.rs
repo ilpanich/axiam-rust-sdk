@@ -140,7 +140,9 @@ impl AmqpTlsConfig {
 ///
 /// # Why there is no loopback exception here
 ///
-/// [`crate::url_guard`] permits plaintext against a loopback host, and that
+/// This crate's private `url_guard` module permits plaintext against a loopback
+/// host (named in prose rather than linked: it is not public API, and an
+/// intra-doc link to a private item fails `cargo doc -D warnings`). That
 /// exception is right for §6's REST and gRPC rules — a dev server on
 /// `http://localhost` is a normal thing to talk to. §8b is a different rule and
 /// does not carry that carve-out: rules 1 and 5 are unconditional, the five
