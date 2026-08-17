@@ -37,11 +37,12 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use lapin::Channel;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
-use lapin::{Channel, Connection, ConnectionProperties};
 
 use crate::amqp::hmac::verify_payload;
+use crate::amqp::transport::{AmqpTlsConfig, connect_amqps};
 use crate::error::AxiamError;
 use crate::sensitive::Sensitive;
 
@@ -358,6 +359,12 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
 /// invoked only after successful verification (HMAC signature AND the
 /// NEW-4 replay-protection gates) and MUST NOT itself call ack/nack (there
 /// is no delivery handle exposed to it).
+///
+/// `amqp_url` MUST be `amqps://` (CONTRACT.md §8b), checked before any socket
+/// is opened. Use [`consume_with_tls`] to supply a CA bundle for a
+/// privately-issued broker certificate, or a client identity for mutual TLS;
+/// this function verifies the broker against the platform root store, which is
+/// correct only for a publicly-issued certificate.
 pub async fn consume<F, Fut>(
     amqp_url: &str,
     queue: &str,
@@ -369,28 +376,43 @@ where
     F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send,
 {
-    // X-2: refuse a plaintext `amqp://` broker URL (loopback excepted) — signed
-    // message bodies and the per-tenant context would otherwise cross an
-    // unencrypted link. Require `amqps://` for any routable host.
-    if let Ok(parsed) = url::Url::parse(amqp_url) {
-        crate::url_guard::ensure_secure_scheme(
-            "AMQP url",
-            parsed.scheme(),
-            parsed.host_str(),
-            "amqps",
-        )
-        .map_err(|message| AxiamError::Network {
-            message,
-            source: None,
-        })?;
-    }
+    consume_with_tls(
+        amqp_url,
+        queue,
+        signing_key,
+        freshness_skew,
+        &AmqpTlsConfig::default(),
+        handler,
+    )
+    .await
+}
 
-    let connection = Connection::connect(amqp_url, ConnectionProperties::default())
-        .await
-        .map_err(|e| AxiamError::Network {
-            message: format!("failed to connect to AMQP broker: {e}"),
-            source: None,
-        })?;
+/// [`consume`], with explicit TLS material for the broker connection
+/// (CONTRACT.md §8b rules 2 and 3).
+///
+/// Supply `tls.ca_cert_pem` when the broker certificate is issued by a private
+/// CA — the common case for an in-cluster broker, and the reason rule 2 is a
+/// MUST — and the `client_cert_pem`/`client_key_pem` pair for mutual TLS.
+///
+/// There is deliberately no verification-skip option, here or anywhere else in
+/// this SDK (rule 4); see [`AmqpTlsConfig`].
+pub async fn consume_with_tls<F, Fut>(
+    amqp_url: &str,
+    queue: &str,
+    signing_key: Sensitive<Vec<u8>>,
+    freshness_skew: Option<StdDuration>,
+    tls: &AmqpTlsConfig,
+    handler: F,
+) -> Result<(), AxiamError>
+where
+    F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    // §8b rules 1 and 5: refuse anything but `amqps://`, before a socket is
+    // opened and with no fallback path to take. Signed message bodies and the
+    // per-tenant context would otherwise cross an unencrypted link — HMAC
+    // proves who wrote them, it does not keep them off the wire.
+    let connection = connect_amqps(amqp_url, tls).await?;
 
     let channel: Channel = connection
         .create_channel()
@@ -1078,32 +1100,65 @@ mod tests {
         }
     }
 
+    /// §8b has no loopback carve-out, unlike §6's rule for REST and gRPC.
+    ///
+    /// This test previously asserted the opposite: it bound an ephemeral
+    /// loopback port, dropped it, and checked that `consume()` got as far as a
+    /// connection failure — "proving the X-2 guard's loopback exception let
+    /// control through". That exception is gone for AMQP. §8b rules 1 and 5 are
+    /// unconditional, the five other SDKs that ship AMQP dialers enforce them
+    /// with no host exception, and since the server became TLS-only there is no
+    /// plaintext loopback broker left to reach.
+    ///
+    /// The assertion is now that no socket is attempted at all — the URL is
+    /// refused on its scheme, and the port never enters into it.
     #[tokio::test]
-    async fn consume_attempts_to_connect_when_loopback_amqp_url_passes_the_guard() {
-        // No broker is listening on this freshly-bound-then-dropped
-        // ephemeral loopback port, so `Connection::connect` itself fails —
-        // proving the X-2 guard's loopback exception let control through to
-        // the connection attempt (a routable-host plaintext URL would have
-        // been rejected earlier, before ever reaching this error).
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
-        let addr = listener.local_addr().expect("resolve bound local_addr");
-        drop(listener);
+    async fn consume_rejects_plaintext_amqp_url_on_loopback_too() {
+        for url in [
+            "amqp://localhost:5672",
+            "amqp://127.0.0.1:5672",
+            "amqp://[::1]:5672",
+        ] {
+            let err = consume(
+                url,
+                "test-queue",
+                Sensitive::new(b"irrelevant-signing-key".to_vec()),
+                None,
+                |_value: serde_json::Value| async {},
+            )
+            .await
+            .expect_err("plaintext is refused on loopback too (§8b rules 1 and 5)");
 
-        let err = consume(
-            &format!("amqp://{addr}"),
-            "test-queue",
-            Sensitive::new(b"irrelevant-signing-key".to_vec()),
-            None,
-            |_value: serde_json::Value| async {},
-        )
-        .await
-        .expect_err("a closed loopback port must fail to connect");
+            match err {
+                AxiamError::Network { message, .. } => assert!(
+                    message.contains("amqps://"),
+                    "the error must name the scheme to use, got: {message}"
+                ),
+                other => panic!("expected Network error, got {other:?}"),
+            }
+        }
+    }
 
-        assert!(
-            matches!(err, AxiamError::Network { .. }),
-            "connection failure must map to Network, got {err:?}"
-        );
+    /// Regression: the guard used to be `if let Ok(parsed) = Url::parse(..)`,
+    /// so a URL that failed to parse skipped it entirely and went straight to
+    /// lapin. A security check must fail closed on an input it cannot read.
+    #[tokio::test]
+    async fn consume_rejects_an_unparseable_url_rather_than_dialling_it() {
+        for url in ["", "not a url at all", "://broker"] {
+            let err = consume(
+                url,
+                "test-queue",
+                Sensitive::new(b"irrelevant-signing-key".to_vec()),
+                None,
+                |_value: serde_json::Value| async {},
+            )
+            .await
+            .expect_err("an unparseable url must fail closed");
+            assert!(
+                matches!(err, AxiamError::Network { .. }),
+                "got {err:?} for {url:?}"
+            );
+        }
     }
 
     // --- v2 replay-protection field extraction/validation ------------------
