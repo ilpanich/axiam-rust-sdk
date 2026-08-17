@@ -52,9 +52,10 @@ use std::collections::BTreeMap;
 
 use axiam_sdk::Sensitive;
 use axiam_sdk::amqp::reactor::{
-    FailurePolicy, ReactorConfig, ReactorDecision, ReactorEvent, ReactorShutdown,
+    FailurePolicy, ReactorConfig, ReactorDecision, ReactorEvent, ReactorRouter, ReactorShutdown,
     default_failure_policy_for, event_spec, events, reactor_serve,
 };
+use axiam_sdk::reactor_handler;
 use axiam_sdk::telemetry::TelemetryEvent;
 
 #[tokio::main]
@@ -71,11 +72,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The strictest default among the events we registered for (§22.8). Shown
     // here because it is worth knowing before you go live, not because the SDK
     // needs it: the server derives it from the registration.
-    let policy = default_failure_policy_for([
-        events::TOKEN_PRE_ISSUE,
-        events::LOGIN_POST_AUTH,
-        events::GRANT_PRE_ASSIGN,
-    ]);
+    // One handler per event (§22.14) instead of a `match` whose `_ =>` arm
+    // answers on behalf of code that never ran. Each name was validated at
+    // COMPILE time by `#[reactor_handler]`; an event nobody bound abstains, so
+    // the registration's failure_policy decides rather than this file.
+    let router = ReactorRouter::new()
+        .on::<enrich_token>()
+        .on::<screen_login>()
+        .on::<four_eyes>();
+
+    // The strictest default among the events actually bound (§22.8), derived
+    // from the router rather than from a restatement of the registration — so
+    // the two cannot drift apart. Shown here because it is worth knowing before
+    // you go live, not because the SDK needs it: the server derives it from the
+    // registration.
+    let policy = default_failure_policy_for(router.events().iter().copied());
     assert_eq!(policy, FailurePolicy::FailClosed);
     println!("failure policy when this reactor is unreachable: {policy}");
 
@@ -112,29 +123,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     println!("consuming {} (declared by the server)", config.queue());
-    reactor_serve(config, decide).await?;
+    reactor_serve(config, router.build()?).await?;
     Ok(())
-}
-
-/// One function from an event to one of three answers (§22.10).
-async fn decide(event: ReactorEvent) -> ReactorDecision {
-    // The payload is tenant business data: readable by design, but do not log
-    // it at info level (§22.12).
-    match event.event.as_str() {
-        events::TOKEN_PRE_ISSUE => enrich_token(&event),
-        events::LOGIN_POST_AUTH => screen_login(&event),
-        events::GRANT_PRE_ASSIGN => four_eyes(&event),
-        // An event we did not register for should never arrive. Abstaining
-        // publishes nothing and lets the failure policy decide, which is the
-        // honest answer to "I do not know what this is".
-        _ => ReactorDecision::abstain(),
-    }
 }
 
 /// `token.pre_issue` is the one mutable event here, and its allow-list is the
 /// `ext.` namespace and nothing else — `sub`, `aud`, `exp` and every other
 /// standard claim are unreachable, because none of them begins with `ext.`.
-fn enrich_token(event: &ReactorEvent) -> ReactorDecision {
+#[reactor_handler("token.pre_issue")]
+async fn enrich_token(event: ReactorEvent) -> ReactorDecision {
     let Some(sub) = event.payload.get("sub").and_then(|v| v.as_str()) else {
         return ReactorDecision::allow();
     };
@@ -173,7 +170,8 @@ fn enrich_token(event: &ReactorEvent) -> ReactorDecision {
 /// `login.post_auth` fires on password sign-in, on SAML ACS and on the OIDC
 /// callback — after the credentials verify and before any session or token is
 /// issued (§22.5).
-fn screen_login(event: &ReactorEvent) -> ReactorDecision {
+#[reactor_handler("login.post_auth")]
+async fn screen_login(event: ReactorEvent) -> ReactorDecision {
     let ip = event
         .payload
         .get("ip")
@@ -201,7 +199,8 @@ fn screen_login(event: &ReactorEvent) -> ReactorDecision {
 
 /// `grant.pre_assign` is veto-only: it can refuse a role assignment, and it
 /// cannot rewrite one.
-fn four_eyes(event: &ReactorEvent) -> ReactorDecision {
+#[reactor_handler("grant.pre_assign")]
+async fn four_eyes(event: ReactorEvent) -> ReactorDecision {
     let actor = event.payload.get("actor_id").and_then(|v| v.as_str());
     let subject = event.payload.get("subject_id").and_then(|v| v.as_str());
     let role = event

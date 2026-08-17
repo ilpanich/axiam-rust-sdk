@@ -90,6 +90,13 @@ actix = ["dep:actix-web", "dep:subtle", "rest"]
 # to this crate: the expansion references `::axiam_sdk` runtime helpers, so the
 # two must always ship together.
 macros = ["dep:axiam-sdk-macros", "actix"]
+# §22.14 declarative reactor handler binding: the `#[reactor_handler]` attribute
+# macro, re-exported from `axiam_sdk` so users write
+# `use axiam_sdk::reactor_handler;`. Implies `amqp` (the expansion names
+# `::axiam_sdk::amqp::reactor` types), and deliberately NOT `macros`, which
+# implies `actix`: a reactor is an AMQP daemon with no HTTP surface, so pulling
+# actix-web in to get an attribute macro would be a dependency for nothing.
+reactor-macros = ["dep:axiam-sdk-macros", "amqp"]
 
 [dependencies]
 axiam-sdk-macros = { version = "=1.0.0-alpha25", path = "axiam-sdk-macros", optional = true }
@@ -256,7 +263,9 @@ required-features = ["amqp"]
 [[example]]
 name = "reactor"
 path = "examples/reactor/main.rs"
-required-features = ["amqp"]
+# `reactor-macros` rather than `amqp`: the example binds its three handlers with
+# §22.14's `#[reactor_handler]`, which is what a reactor should look like.
+required-features = ["reactor-macros"]
 
 [[example]]
 name = "actix_route_guard"

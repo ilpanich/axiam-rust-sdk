@@ -117,3 +117,11 @@ pub mod webhook;
 // The macros expand to the runtime helpers in [`middleware::authz`].
 #[cfg(feature = "macros")]
 pub use axiam_sdk_macros::{require_access, require_auth, require_role};
+
+// §22.14 declarative reactor handler binding: `#[reactor_handler("...")]`, from
+// the same companion crate. Gated on its own feature rather than on `macros`
+// because `macros` implies `actix` — a reactor is an AMQP daemon with no HTTP
+// surface at all, and making one pull actix-web in to get an attribute macro
+// would be a dependency for nothing.
+#[cfg(feature = "reactor-macros")]
+pub use axiam_sdk_macros::reactor_handler;
