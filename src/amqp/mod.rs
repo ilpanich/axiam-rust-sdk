@@ -24,8 +24,10 @@ pub mod messages;
 pub mod reactor;
 #[cfg(test)]
 pub(crate) mod test_log;
+pub mod transport;
 
-pub use consumer::consume;
+pub use consumer::{consume, consume_with_tls};
 pub use hmac::{sign_payload, verify_payload};
 pub use messages::{AuditEventMessage, AuthzRequest};
 pub use reactor::{ReactorConfig, ReactorDecision, ReactorEvent, ReactorShutdown, reactor_serve};
+pub use transport::{AmqpTlsConfig, ensure_amqps};

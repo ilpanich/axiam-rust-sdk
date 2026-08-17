@@ -32,9 +32,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use futures_util::{FutureExt, StreamExt};
+use lapin::BasicProperties;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions};
 use lapin::types::FieldTable;
-use lapin::{BasicProperties, Connection, ConnectionProperties};
 use uuid::Uuid;
 
 use crate::amqp::consumer::ReplayGuard;
@@ -211,6 +211,7 @@ impl Default for ReactorShutdown {
 /// Build one with [`ReactorConfig::builder`].
 pub struct ReactorConfig {
     amqp_url: String,
+    tls: crate::amqp::transport::AmqpTlsConfig,
     tenant_id: Uuid,
     reactor_id: Uuid,
     signing_key: Sensitive<Vec<u8>>,
@@ -254,6 +255,7 @@ impl ReactorConfig {
 #[derive(Default)]
 pub struct ReactorConfigBuilder {
     amqp_url: Option<String>,
+    tls: crate::amqp::transport::AmqpTlsConfig,
     tenant_id: Option<Uuid>,
     reactor_id: Option<Uuid>,
     signing_key: Option<Sensitive<Vec<u8>>>,
@@ -277,10 +279,34 @@ impl std::fmt::Debug for ReactorConfigBuilder {
 }
 
 impl ReactorConfigBuilder {
-    /// Broker URL. Must be `amqps://` for any routable host (§8b) — there is
-    /// no verification-skip switch and no plaintext fallback.
+    /// Broker URL. Must be `amqps://` (§8b rules 1 and 5) — there is no
+    /// verification-skip switch, no plaintext fallback, and no loopback
+    /// exception.
     pub fn amqp_url(mut self, url: impl Into<String>) -> Self {
         self.amqp_url = Some(url.into());
+        self
+    }
+
+    /// TLS material for the broker connection (§8b rules 2 and 3).
+    ///
+    /// Optional, and omitting it weakens nothing: the URL must be `amqps://`
+    /// either way, and with no material supplied the broker is verified against
+    /// the platform root store. Set
+    /// [`ca_cert_pem`](crate::amqp::AmqpTlsConfig::ca_cert_pem) when the broker
+    /// certificate is issued by a private CA — the common case for an
+    /// in-cluster broker, and the reason rule 2 is a MUST.
+    ///
+    /// ```no_run
+    /// use axiam_sdk::amqp::AmqpTlsConfig;
+    ///
+    /// let tls = AmqpTlsConfig {
+    ///     ca_cert_pem: Some(std::fs::read_to_string("/etc/axiam/broker-ca.pem")?),
+    ///     ..Default::default()
+    /// };
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn tls(mut self, tls: crate::amqp::transport::AmqpTlsConfig) -> Self {
+        self.tls = tls;
         self
     }
 
@@ -360,17 +386,17 @@ impl ReactorConfigBuilder {
         let amqp_url = self
             .amqp_url
             .ok_or_else(|| AxiamError::network("reactor config requires an amqp_url"))?;
-        // §8b: reactors connect across a trust boundary. HMAC does not
-        // substitute for TLS and TLS does not substitute for HMAC.
-        if let Ok(parsed) = url::Url::parse(&amqp_url) {
-            crate::url_guard::ensure_secure_scheme(
-                "AMQP url",
-                parsed.scheme(),
-                parsed.host_str(),
-                "amqps",
-            )
-            .map_err(AxiamError::network)?;
-        }
+        // §8b rules 1 and 5: reactors connect across a trust boundary, and a
+        // reactor's reply is an instruction to allow, deny or rewrite a token.
+        // HMAC does not substitute for TLS and TLS does not substitute for
+        // HMAC.
+        //
+        // This used to be wrapped in `if let Ok(parsed) = url::Url::parse(..)`,
+        // which meant a URL that failed to parse skipped the check entirely.
+        // `ensure_amqps` has no such hole: an input nobody can parse is the one
+        // to refuse, not the one to wave through.
+        crate::amqp::transport::ensure_amqps(&amqp_url)?;
+        self.tls.validate()?;
         let freshness_skew = self
             .freshness_skew
             .and_then(|d| chrono::Duration::from_std(d).ok())
@@ -378,6 +404,7 @@ impl ReactorConfigBuilder {
 
         Ok(ReactorConfig {
             amqp_url,
+            tls: self.tls,
             tenant_id: self
                 .tenant_id
                 .ok_or_else(|| AxiamError::network("reactor config requires a tenant_id"))?,
@@ -854,6 +881,7 @@ where
 
         match serve_once(
             &config.amqp_url,
+            &config.tls,
             &queue,
             &ctx,
             &handler,
@@ -959,6 +987,7 @@ where
 
 async fn serve_once<F, Fut>(
     amqp_url: &str,
+    tls: &crate::amqp::transport::AmqpTlsConfig,
     queue: &str,
     ctx: &DispatchContext,
     handler: &F,
@@ -968,9 +997,10 @@ where
     F: Fn(ReactorEvent) -> Fut + Send + Sync,
     Fut: Future<Output = ReactorDecision> + Send,
 {
-    let connection = Connection::connect(amqp_url, ConnectionProperties::default())
-        .await
-        .map_err(|e| AxiamError::network(format!("failed to connect to AMQP broker: {e}")))?;
+    // §8b: the scheme and the TLS material are both re-checked here, not only
+    // in the builder. `serve_once` is the reconnect loop's body, so this is the
+    // call that actually opens every socket a reactor ever opens.
+    let connection = crate::amqp::transport::connect_amqps(amqp_url, tls).await?;
     let channel = connection
         .create_channel()
         .await

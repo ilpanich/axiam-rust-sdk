@@ -1,17 +1,26 @@
 //! Transport-URL security guard (X-2): reject plaintext (non-TLS) endpoint
 //! URLs at construction time.
 //!
-//! Every AXIAM transport (REST over HTTPS, gRPC over HTTPS, AMQP over AMQPS)
-//! must run over TLS — CONTRACT.md §6 mandates TLS 1.3 for all external
-//! communication and the SDK forwards tenant identifiers / CSRF tokens /
-//! bearer cookies that must never traverse a cleartext link. A plaintext
-//! `http://` / `amqp://` base URL is therefore refused up front rather than
-//! silently accepted.
+//! The HTTP transports (REST over HTTPS, gRPC over HTTPS) must run over TLS —
+//! CONTRACT.md §6 mandates TLS 1.3 for all external communication and the SDK
+//! forwards tenant identifiers / CSRF tokens / bearer cookies that must never
+//! traverse a cleartext link. A plaintext `http://` base URL is therefore
+//! refused up front rather than silently accepted.
 //!
 //! The single, deliberate exception is a loopback host (`localhost`,
 //! `127.0.0.1`, `::1`) so local development / integration tests against a
 //! non-TLS dev server still work. This is the only escape hatch; there is no
 //! flag to disable the check for a routable host.
+//!
+//! # AMQP does not come through here
+//!
+//! It used to. [`crate::amqp::transport::ensure_amqps`] now owns the broker
+//! URL, and it is **stricter**: §8b rules 1 and 5 carry no loopback carve-out,
+//! the five other SDKs that ship AMQP dialers enforce them with no host
+//! exception, and the server itself became TLS-only with no plaintext listener
+//! for a loopback exception to reach. The generic helper below also failed open
+//! on a URL that would not parse, which is the wrong direction for a security
+//! check; `ensure_amqps` fails closed instead.
 
 /// Returns `true` if `host` is a loopback / localhost literal — the sole
 /// allowed exception to the plaintext-transport ban.
@@ -82,10 +91,14 @@ mod tests {
     }
 
     #[test]
-    fn amqps_scheme_enforced_for_amqp() {
-        assert!(ensure_secure_scheme("AMQP url", "amqps", Some("broker"), "amqps").is_ok());
-        assert!(ensure_secure_scheme("AMQP url", "amqp", Some("broker"), "amqps").is_err());
-        assert!(ensure_secure_scheme("AMQP url", "amqp", Some("localhost"), "amqps").is_ok());
+    /// The helper is generic over the required scheme, and this pins that
+    /// genericity. It is **not** the AMQP guard: broker URLs go through
+    /// `amqp::transport::ensure_amqps`, which grants no loopback exception —
+    /// see this module's docs.
+    fn the_required_scheme_is_a_parameter_not_a_constant() {
+        assert!(ensure_secure_scheme("some url", "amqps", Some("broker"), "amqps").is_ok());
+        assert!(ensure_secure_scheme("some url", "amqp", Some("broker"), "amqps").is_err());
+        assert!(ensure_secure_scheme("some url", "amqp", Some("localhost"), "amqps").is_ok());
     }
 
     #[test]

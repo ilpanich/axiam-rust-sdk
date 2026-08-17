@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A CA bundle and client identity for the broker connection (§8b rules 2 and
+  3).** `AmqpTlsConfig` carries `ca_cert_pem` (for a privately-issued broker
+  certificate) and a `client_cert_pem`/`client_key_pem` pair (for mutual TLS),
+  reaching lapin through `Connection::connect_with_config`.
+
+  Rule 2 is a **MUST**, and it was previously not merely unimplemented here but
+  unimplementable: both AMQP entry points dialled with `Connection::connect`,
+  which takes no TLS material at all, so an `amqps://` broker could only ever be
+  verified against the platform root store. That excludes the common deployment
+  — an in-cluster broker whose certificate is issued by a private CA, or by
+  AXIAM's own `axiam-pki` organization CA.
+
+- `consume_with_tls()` (the TLS-carrying sibling of `consume()`, which keeps its
+  signature and delegates), `ReactorConfigBuilder::tls()`, and the exported
+  `ensure_amqps()` for validating a broker URL at config-load time.
+
+### Fixed
+
+- **The §8b scheme guard failed open on an unparseable URL.** It was written as
+  `if let Ok(parsed) = url::Url::parse(amqp_url) { … }`, so a URL that did not
+  parse skipped the check entirely and went straight to lapin. That is backwards
+  for a security check — an input nobody can parse is the one to refuse, not the
+  one to wave through. It is now an error, in both `consume()` and the reactor
+  builder.
+
+### Changed
+
+- **BREAKING (AMQP only): plaintext `amqp://` is refused on loopback too.** The
+  broker URL no longer goes through `url_guard`, whose `localhost` /
+  `127.0.0.1` / `::1` exception is right for §6's REST and gRPC rules and wrong
+  for §8b's: rules 1 and 5 carry no host carve-out, the five other SDKs that
+  ship AMQP dialers enforce them without one, and the AXIAM server is now
+  TLS-only with no plaintext listener for such an exception to reach.
+
+  `http://localhost` for REST and gRPC is **unchanged** — this is an AMQP-only
+  narrowing. If you develop against a local broker, give it a TLS listener;
+  `scripts/gen-broker-tls.sh` in the server repo mints suitable material, and
+  its certificate carries `localhost` in the SAN for exactly this case.
+
 ## [1.0.0-alpha25] - 2026-08-16
 
 ### Added

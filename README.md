@@ -320,11 +320,25 @@ carrying one of `invalid_alg`/`unknown_kid`/`invalid_signature`/`invalid_issuer`
 ### AMQP consumer (`amqp`)
 
 ```rust,no_run
-use axiam_sdk::amqp::consume;
+use axiam_sdk::amqp::{consume, consume_with_tls, AmqpTlsConfig};
 use axiam_sdk::Sensitive;
 
 # async fn run(signing_key: Sensitive<Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> {
-consume("amqp://guest:guest@localhost:5672", "axiam.authz.request", signing_key, |event| async move {
+// §8b: amqps:// only, enforced before a socket opens.
+consume("amqps://guest:guest@localhost:5671", "axiam.authz.request", signing_key, None, |event| async move {
+    println!("verified event: {event}");
+})
+.await?;
+# Ok(())
+# }
+
+# async fn run_private_ca(signing_key: Sensitive<Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> {
+// For a privately-issued broker certificate — the common in-cluster case:
+let tls = AmqpTlsConfig {
+    ca_cert_pem: Some(std::fs::read_to_string("/etc/axiam/broker-ca.pem")?),
+    ..Default::default()
+};
+consume_with_tls("amqps://broker.internal:5671", "axiam.authz.request", signing_key, None, &tls, |event| async move {
     println!("verified event: {event}");
 })
 .await?;
@@ -335,6 +349,26 @@ consume("amqp://guest:guest@localhost:5672", "axiam.authz.request", signing_key,
 See [`examples/amqp_consumer.rs`](examples/amqp_consumer.rs). Every delivery's HMAC-SHA256
 signature (CONTRACT.md §8) is verified before the handler runs; failures are nacked without
 requeue.
+
+#### Transport security (§8b)
+
+`consume`, `consume_with_tls` and `reactor_serve` all require `amqps://` and check it
+before opening a socket. HMAC signing (§8) gives authenticity and replay protection
+*across broker hops*; TLS gives confidentiality. Both are required and neither
+substitutes for the other — a signed `AuthzRequest` still names its subject, resource
+and action in cleartext on an unencrypted wire.
+
+| `AmqpTlsConfig` field | Meaning |
+|---|---|
+| `ca_cert_pem` | PEM bundle for a privately issued broker certificate. Omit for a publicly issued one (platform roots verify it). |
+| `client_cert_pem` + `client_key_pem` | Mutual TLS toward the broker. All-or-nothing: half an identity is refused before dialling. |
+
+There is deliberately no verification-skip option, under any name (§8b rule 4).
+
+**Note there is no loopback exception here.** The `http://localhost` carve-out that
+§6 grants the REST and gRPC base URLs does *not* extend to the broker URL: §8b rules 1
+and 5 are unconditional, and the AXIAM server itself is TLS-only with no plaintext
+listener for such an exception to reach.
 
 ### Reactors — AMQP extension actors (`amqp`, CONTRACT.md §22)
 

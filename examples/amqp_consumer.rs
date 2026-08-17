@@ -18,8 +18,11 @@ use axiam_sdk::amqp::consume;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // §8b: amqps:// only. A plaintext URL is refused before a socket opens —
+    // HMAC proves who wrote a message, it does not keep the subject, resource
+    // and action off the wire in cleartext.
     let amqp_url =
-        std::env::var("AMQP_URL").unwrap_or_else(|_| "amqp://guest:guest@localhost:5672".into());
+        std::env::var("AMQP_URL").unwrap_or_else(|_| "amqps://guest:guest@localhost:5671".into());
     let queue = std::env::var("AXIAM_AMQP_QUEUE").unwrap_or_else(|_| "axiam.authz.request".into());
 
     // §8.1: the per-tenant AMQP signing secret MUST be obtained from the
