@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A named D5 conformance suite, and §19 telemetry is finally tested (F7).**
+  `tests/d5_conformance.rs` carries the §19 assertions this SDK did not have —
+  `src/telemetry.rs` had no test at all — and names where the rest of D5
+  already lives, so the suite is locatable the way the other ten SDKs' is.
+
+  New assertions: a request pair per attempt with a `Retry` between them and in
+  that order; a panicking hook cannot fail an authorization check, and does not
+  poison later calls; **no event carries a token, a password, a CSRF value or a
+  resource id**; `Retry.reason` is redacted prose rather than the server's
+  body; the emitted variant set is closed; a memo hit emits no request events;
+  and retry-disabled makes exactly one attempt. All of it is asserted through
+  the public client surface against a `wiremock` server, counting what reaches
+  the wire and the sink rather than testing helpers in isolation.
+
 - **A CA bundle and client identity for the broker connection (§8b rules 2 and
   3).** `AmqpTlsConfig` carries `ca_cert_pem` (for a privately-issued broker
   certificate) and a `client_cert_pem`/`client_key_pem` pair (for mutual TLS),
@@ -53,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-vendor `openapi.json` at 1.0.0-alpha27 — the copy was pinned at alpha26 and
+  failing the cross-repo artifact-drift gate
 - **BREAKING (AMQP only): plaintext `amqp://` is refused on loopback too.** The
   broker URL no longer goes through `url_guard`, whose `localhost` /
   `127.0.0.1` / `::1` exception is right for §6's REST and gRPC rules and wrong
