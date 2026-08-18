@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-vendor `openapi.json` at 1.0.0-alpha27 — the copy was pinned at alpha26 and
+  failing the cross-repo artifact-drift gate
 - **BREAKING (AMQP only): plaintext `amqp://` is refused on loopback too.** The
   broker URL no longer goes through `url_guard`, whose `localhost` /
   `127.0.0.1` / `::1` exception is right for §6's REST and gRPC rules and wrong
