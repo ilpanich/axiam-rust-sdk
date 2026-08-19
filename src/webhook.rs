@@ -73,7 +73,7 @@
 
 #![cfg(any(feature = "rest", feature = "amqp"))]
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;

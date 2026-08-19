@@ -46,9 +46,9 @@
 //! simply has no proof verifier — which, per §10.1 rule 9, means it must
 //! refuse `jkt`-bound tokens rather than accept them as bearer tokens.
 
+use crate::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

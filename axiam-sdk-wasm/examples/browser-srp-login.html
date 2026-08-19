@@ -1,0 +1,119 @@
+<!--
+  A runnable demonstration of `axiam-sdk-wasm`: SRP login in a browser, with
+  a password-login fallback for tenants that do not offer SRP.
+
+  Serve this directory over HTTP (a `file://` page cannot load wasm):
+
+      cd axiam-sdk-wasm
+      wasm-pack build --target web --out-dir pkg-web --release
+      python3 -m http.server 8080
+      # then open http://localhost:8080/examples/browser-srp-login.html
+
+  Point AXIAM_BASE at an AXIAM whose CORS configuration allows this origin WITH
+  credentials, or serve this page same-origin with the API. Without that, the
+  session cookies never arrive and every call 401s — which looks like a broken
+  login and is a CORS problem.
+-->
+<!doctype html>
+<meta charset="utf-8">
+<title>AXIAM · SRP login (wasm)</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
+  input { width: 100%; padding: .5rem; font: inherit; }
+  button { margin-top: 1rem; padding: .55rem 1.1rem; font: inherit; cursor: pointer; }
+  #log { margin-top: 1.5rem; padding: .75rem; background: #f4f4f5; border-radius: 6px;
+         white-space: pre-wrap; font: 13px/1.45 ui-monospace, monospace; }
+  .warn { background: #fff7ed; border-left: 3px solid #ea580c; padding: .6rem .8rem; margin: 1rem 0; }
+</style>
+
+<h1>AXIAM SRP login</h1>
+
+<p class="warn">
+  <strong>What this protects, and what it does not.</strong> The password never
+  leaves this page — a TLS-terminating proxy, an access log, or a server-side
+  heap dump never sees it. It does <em>not</em> protect you against a
+  compromised AXIAM: that server also serves this page.
+</p>
+
+<label for="base">AXIAM base URL</label>
+<input id="base" value="http://localhost:8081">
+<label for="org">Organization slug</label>
+<input id="org" value="acme">
+<label for="tenant">Tenant slug</label>
+<input id="tenant" value="default">
+<label for="user">Username or email</label>
+<input id="user" value="alice">
+<label for="pass">Password</label>
+<input id="pass" type="password">
+
+<button id="go">Sign in</button>
+<div id="log">Ready.</div>
+
+<script type="module">
+  import init, { AxiamWasmClient, sdkVersion } from "../pkg-web/axiam_sdk_wasm.js";
+
+  const log = (msg) => { document.getElementById("log").textContent += "\n" + msg; };
+
+  await init();
+  document.getElementById("log").textContent = `axiam-sdk ${sdkVersion()} loaded.`;
+
+  document.getElementById("go").addEventListener("click", async () => {
+    const client = new AxiamWasmClient(
+      document.getElementById("base").value,
+      document.getElementById("org").value,
+      document.getElementById("tenant").value,
+    );
+    const user = document.getElementById("user").value;
+    const pass = document.getElementById("pass").value;
+
+    let result;
+    try {
+      // SRP first. Falling back the other way round — password first, SRP only
+      // when refused — would mean a tenant running `srp_mode: optional` never
+      // sees a single SRP login from a browser, which is the mode operators
+      // run during a migration.
+      log("attempting SRP…  (Argon2id runs here; the pause is the point)");
+      result = await client.loginSrp(user, pass);
+      log("signed in over SRP — the password never left this page");
+    } catch (err) {
+      const message = String(err?.message ?? err);
+
+      // The tenant does not offer SRP. This is a property of the tenant, not a
+      // credential failure, so fall back rather than telling the user their
+      // password is wrong.
+      if (message.includes("does not offer Secure Remote Password")) {
+        log("tenant has SRP disabled — falling back to password login");
+        result = await client.login(user, pass);
+        log("signed in with a password");
+      } else if (message.includes("failed to prove")) {
+        // The endpoint that answered does not hold this account's verifier, so
+        // it is not the server it claims to be. Do NOT retry over the password
+        // path: that would hand the same endpoint the plaintext it just failed
+        // to prove it deserves.
+        log("ABORTED: the server could not prove its identity. Not retrying.");
+        return;
+      } else {
+        log("sign-in failed: " + message);
+        return;
+      }
+    }
+
+    if (result.mfaRequired) {
+      const code = prompt(`MFA required (${result.availableMethods.join(", ")}). Code?`);
+      result = await client.verifyMfa(code ?? "");
+      log("MFA accepted");
+    }
+
+    log(`session ${result.sessionId}, expires in ${result.expiresIn}s`);
+
+    // The session now rides on HttpOnly cookies the browser holds; this page
+    // cannot read them, which is the point.
+    try {
+      const allowed = await client.can("documents:read", "00000000-0000-0000-0000-000000000000");
+      log(`can("documents:read", <nil uuid>) -> ${allowed}`);
+    } catch (err) {
+      log("authorization check failed: " + err.message);
+    }
+  });
+</script>

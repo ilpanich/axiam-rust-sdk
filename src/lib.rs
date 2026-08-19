@@ -68,8 +68,17 @@ mod retry;
 // CONTRACT.md §17 client-side decision memo. Internal — §17.2 makes only the
 // TTL public surface. Off by default; see the module docs for the staleness
 // bound a caller accepts by enabling it.
+/// The per-client cookie store, and the one place a browser build differs.
+#[cfg(feature = "rest")]
+pub mod cookies;
 #[cfg(feature = "rest")]
 mod memo;
+/// CONTRACT.md §23 Secure Remote Password — the protocol half, with no I/O.
+#[cfg(feature = "srp")]
+pub mod srp;
+/// Clock types that work on wasm32 as well as native — see the module docs for
+/// why `std::time` cannot be used directly.
+pub mod time;
 
 pub use error::{AxiamError, IdTokenFailureReason, OAuthProtocolError};
 pub use sensitive::Sensitive;

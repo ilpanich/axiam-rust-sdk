@@ -1,0 +1,91 @@
+# axiam-sdk-wasm — the browser build of the AXIAM Rust SDK.
+#
+# This crate is a thin `wasm-bindgen` façade. It contains no protocol logic of
+# its own: every call delegates to `axiam-sdk`, which compiles to
+# `wasm32-unknown-unknown` unchanged. That is the point — a second
+# implementation of login, authorization or SRP would be a second thing to get
+# wrong, and the npm package would drift from the crate the moment either
+# changed.
+#
+# It is deliberately NOT a member of the parent workspace's `members` list: it
+# only ever builds for wasm32, and including it would make a plain
+# `cargo test` at the repository root try to compile `wasm-bindgen` for the
+# host. `wasm-pack` is pointed at this directory instead.
+[package]
+name = "axiam-sdk-wasm"
+version = "1.0.0-alpha28"
+edition = "2024"
+rust-version = "1.88"
+description = "Browser (WebAssembly) build of the official AXIAM IAM client SDK"
+license = "Apache-2.0"
+publish = false          # published to npm by wasm-pack, never to crates.io
+repository = "https://github.com/ilpanich/axiam-rust-sdk"
+homepage = "https://github.com/ilpanich/axiam-rust-sdk"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# REST + OIDC + token + SRP. No gRPC (no sockets in a browser), no AMQP, no
+# Actix middleware — see README.md for what that means for a consumer.
+axiam-sdk = { path = "..", default-features = false, features = ["rest", "srp"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+# Resource ids are UUIDs; parsed at the boundary so a typo is a clear error.
+uuid = { version = "1", features = ["js"] }
+# Panics in wasm are otherwise a bare "unreachable executed" with no location.
+# This costs a few KB and turns every one of them into a readable console trace.
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+# `s` rather than `3`: this artifact is downloaded over the network on page
+# load, so bytes matter more than the last few percent of throughput. LTO and a
+# single codegen unit compound with it.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# wasm-opt is DISABLED, and that is a measured decision rather than an
+# oversight.
+#
+# ## What happens with it on
+#
+# Every optimisation level (-O, -Os, -O2), with binaryen 132 and with the
+# reference-types/bulk-memory features explicitly enabled, produces a module
+# that BUILDS CLEANLY and then throws on the first import:
+#
+#   RangeError: WebAssembly.Table.grow(): failed to grow table by 4
+#       at __wbindgen_init_externref_table
+#
+# The externref table is still declared at the same size and still exported
+# under the same name afterwards, so this is not a dropped export — something
+# subtler in how wasm-opt re-emits the table breaks the glue wasm-bindgen
+# generated against the pre-optimised module. Nothing in the build reports it.
+#
+# ## What it is worth
+#
+#                       raw          gzip -9
+#   no wasm-opt      1 571 442      543 697
+#   wasm-opt -Os     1 121 681      461 132
+#
+# 29% of the raw artifact, but only **15% over the wire**, which is the number
+# that matters — every CDN and every dev server serves wasm compressed. 82 KB
+# of transfer is not worth shipping a package that has never worked.
+#
+# ## How this stays honest
+#
+# `scripts/wasm-smoke.mjs` imports the built artifact and reproduces the
+# CONTRACT §23.7 verifiers through it. CI runs it on every build and before
+# every publish, so this can be re-enabled and re-measured whenever binaryen
+# and wasm-bindgen agree again — the guard is in place either way, and a broken
+# artifact fails the pipeline instead of reaching npm.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
