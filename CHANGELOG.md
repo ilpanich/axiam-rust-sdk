@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha28] - 2026-08-19
+
+### Changed
+
+- Add the named D5 conformance suite covering §19 telemetry, and re-vendor openapi.json (#67)
+- Bump taiki-e/install-action from 2.85.10 to 2.85.13
+- Bump github/codeql-action from 4.37.6 to 4.37.7
+
 ## [1.0.0-alpha27] - 2026-08-17
 
 ### Added
