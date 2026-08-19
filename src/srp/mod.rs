@@ -17,9 +17,12 @@
 //!
 //! # Layout
 //!
-//! * [`group`] — the RFC 5054 moduli, embedded as constants.
-//! * [`kdf`] — Argon2id and PBKDF2-HMAC-SHA256, the two ways `x` is derived.
-//! * [`ClientSession`] — one exchange: pick `a`, compute `A`, then finish.
+//! * `group` (private) — the RFC 5054 moduli, embedded as constants, reached
+//!   through [`SrpGroup`](crate::srp::SrpGroup).
+//! * [`kdf`](crate::srp::kdf) — Argon2id and PBKDF2-HMAC-SHA256, the two ways
+//!   `x` is derived.
+//! * [`ClientSession`](crate::srp::ClientSession) — one exchange: pick `a`,
+//!   compute `A`, then finish.
 //!
 //! Nothing here performs I/O. The transport lives in
 //! [`crate::rest::srp`], which is what `login_srp` drives. That split is

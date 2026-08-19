@@ -27,7 +27,7 @@
 //! `AxiamClient::capture_csrf` reads that header on **all** targets and falls
 //! back to the jar only where there is one.
 //!
-//! The result is that no call site needs a `cfg`: they hold a [`CookieJar`] and
+//! The result is that no call site needs a `cfg`: they hold a [`CookieJar`](crate::cookies::CookieJar) and
 //! ask it for what they need, and it answers `None` on a target where the
 //! answer cannot be known.
 
