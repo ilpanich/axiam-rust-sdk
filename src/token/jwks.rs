@@ -11,9 +11,9 @@
 //! other IdPs serve, and it is NOT tenant-scoped.
 
 #[cfg(any(feature = "rest", feature = "actix"))]
-use std::sync::RwLock;
+use crate::time::{Duration, Instant};
 #[cfg(any(feature = "rest", feature = "actix"))]
-use std::time::{Duration, Instant};
+use std::sync::RwLock;
 
 #[cfg(any(feature = "rest", feature = "actix"))]
 use jsonwebtoken::jwk::JwkSet;

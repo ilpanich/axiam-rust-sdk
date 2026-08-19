@@ -20,6 +20,8 @@ on:
       # even when no Rust file moved.
       - 'CONTRACT.md'
       - 'openapi.json'
+      - 'axiam-sdk-wasm/**'
+      - 'srp-test-vectors.json'
       - '.github/workflows/sdk-ci-rust.yml'
   push:
     tags:
@@ -68,6 +70,62 @@ jobs:
       # wire-breaking proto change must be a deliberate, reviewed act.
       - name: buf breaking (against main)
         run: buf breaking --against '.git#branch=origin/main'
+
+  wasm:
+    name: WebAssembly build + artifact smoke test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      # The browser build is REST + SRP only. gRPC needs sockets and AMQP needs
+      # a broker connection, neither of which exists in a page — building them
+      # for wasm32 would fail, and shipping them would be a lie about what the
+      # package can do.
+      - name: Check the SDK itself compiles for wasm32
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: cargo check --lib --target wasm32-unknown-unknown --no-default-features --features rest,srp
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          version: 'v0.15.0'
+
+      # All three targets are published, so all three are built here — a
+      # bundler-only break would otherwise surface as a user's failed import.
+      - name: Build (web, bundler, nodejs)
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        working-directory: axiam-sdk-wasm
+        run: |
+          wasm-pack build --target web     --out-dir pkg-web     --release
+          wasm-pack build --target bundler --out-dir pkg-bundler --release
+          wasm-pack build --target nodejs  --out-dir pkg-node    --release
+
+      # THE gate. `wasm-pack build` succeeding says nothing about whether the
+      # module works: a wasm-opt that disagrees with wasm-bindgen produces an
+      # artifact that builds cleanly and throws on first import (see
+      # axiam-sdk-wasm/Cargo.toml). This imports what was just built and
+      # reproduces the CONTRACT §23.7 SRP verifiers through it.
+      - name: Smoke-test the built artifact
+        working-directory: axiam-sdk-wasm
+        run: node scripts/wasm-smoke.mjs pkg-node
+
+      - name: Report payload size
+        working-directory: axiam-sdk-wasm
+        run: |
+          raw=$(stat -c%s pkg-web/axiam_sdk_wasm_bg.wasm)
+          gz=$(gzip -9 -c pkg-web/axiam_sdk_wasm_bg.wasm | wc -c)
+          echo "wasm payload: ${raw} bytes raw, ${gz} bytes gzipped" >> "$GITHUB_STEP_SUMMARY"
 
   test:
     name: Test (${{ matrix.toolchain }})

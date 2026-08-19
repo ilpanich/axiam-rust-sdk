@@ -223,7 +223,7 @@ impl AxiamClient {
             &request.action,
             request.scope.as_deref(),
         );
-        if let Some(hit) = memo.get_at(&key, std::time::Instant::now()) {
+        if let Some(hit) = memo.get_at(&key, crate::time::Instant::now()) {
             return Ok(hit);
         }
 
@@ -243,7 +243,7 @@ impl AxiamClient {
         // Only a decision the server actually returned is memoized: reaching
         // here means `Ok`, so §17.1 rule 7's ban on negative-caching a failure
         // is structural rather than a check that could be forgotten.
-        memo.put_at(key, &decision, std::time::Instant::now());
+        memo.put_at(key, &decision, crate::time::Instant::now());
         Ok(decision)
     }
 
@@ -283,7 +283,7 @@ impl AxiamClient {
             path_template: path,
             attempt,
         });
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
 
         // Closes the §19 pair exactly once, on every exit path.
         let finish = |status: Option<u16>, outcome: Outcome| {

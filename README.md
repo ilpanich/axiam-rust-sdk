@@ -19,7 +19,7 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22, §23
 (including §6.1 mTLS, the §10.1 minimum local-verification set — **including rule 9,
 sender-constrained tokens** — and §13 webhook signature verification).
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
@@ -182,6 +182,7 @@ dependencies for the transports/integrations it actually uses:
 | — | — | `webhook::verify_webhook` (CONTRACT.md §13) has no feature of its own: it is compiled whenever `rest` **or** `amqp` is on, since both already vendor its `hmac`/`sha2`/`hex`/`subtle` inputs. With the default feature set it is always available |
 | `actix` | off | The `AxiamUser` Actix-Web `FromRequest` extractor (CONTRACT.md §10 route guard). Implies `rest` (shares the same `JwksVerifier`) |
 | `macros` | off | The `#[require_access]` / `#[require_auth]` / `#[require_role]` declarative authorization attribute macros (CONTRACT.md §11), plus the programmatic `middleware::RequireAccess` guard. Implies `actix` |
+| `srp` | on | CONTRACT.md §23 Secure Remote Password: `login_srp`, `srp_enrollment`, `srp_available`. Its own feature because it is the only thing in this crate that needs big-integer arithmetic (`num-bigint`) and an Argon2 implementation — a build that will never call `login_srp` should not carry them. Implies `rest`: SRP is a login path, not a transport |
 | `reactor-macros` | off | The `#[reactor_handler("...")]` attribute macro (CONTRACT.md §22.14), which binds an `async fn` to one hook event and validates the name against the §22.5 registry **at compile time**. Implies `amqp`, and deliberately not `macros`: a reactor is an AMQP daemon with no HTTP surface, so it should not pull `actix-web` in to get an attribute macro |
 
 To build a REST-only client (no gRPC, no AMQP), disable the default feature set and opt back
@@ -873,6 +874,91 @@ async fn receive(req: HttpRequest, body: web::Bytes) -> HttpResponse {
 
 The `tolerance` (default 300 s) and a `now` injection seam for tests are both on
 `WebhookVerifyOptions`.
+
+## Secure Remote Password (§23)
+
+`login_srp` proves the password without sending it. What crosses the wire is
+`A` and a proof, neither of which is useful to anyone who does not already hold
+the account's verifier.
+
+```rust
+use axiam_sdk::AxiamClient;
+
+let client = AxiamClient::builder()
+    .base_url("https://axiam.example")?
+    .org_slug("acme")
+    .tenant_slug("default")
+    .build()?;
+
+// Same LoginResult as login(), including the MFA-challenge case.
+let result = client.login_srp("alice", "correct horse battery staple").await?;
+if result.mfa_required {
+    client.verify_mfa("123456").await?;
+}
+```
+
+Fall back to `login()` when the tenant does not offer SRP — that case is a
+`NetworkError` naming SRP, deliberately **not** an `AuthError`, so it cannot be
+mistaken for a bad password:
+
+```rust
+let result = match client.login_srp(user, password).await {
+    Ok(result) => result,
+    Err(e) if e.to_string().contains("does not offer Secure Remote Password") => {
+        client.login(user, password).await?
+    }
+    Err(e) => return Err(e),
+};
+```
+
+### Enrolment
+
+The server cannot compute a verifier — it never sees the plaintext — so one has
+to be sent with any request that sets a password:
+
+```rust
+use axiam_sdk::srp::{SrpGroup, kdf::SrpKdf};
+
+let enrollment = client.srp_enrollment(
+    "alice",                       // the USERNAME — see below
+    "new password",
+    SrpGroup::Rfc5054_4096,
+    &SrpKdf::Argon2id { memory_kib: 19456, iterations: 2, parallelism: 1 },
+)?;
+// send `enrollment` as the request's `srp` field
+```
+
+The tenant's group and KDF come from `GET /api/v1/auth/me` for an authenticated
+caller, or `GET /api/v1/auth/reset/context` for a reset-token holder.
+
+### Three things that will bite you
+
+**The identity is the username, always.** `x` is derived over
+`username ":" password`. A user may sign in with their email, but only the
+username is inside the KDF — which is why the challenge response carries an
+`identity` field and why `login_srp` uses that rather than what was typed.
+Enrolling against an email produces a verifier no login can satisfy.
+
+**`login_srp` blocks.** It runs the tenant's KDF: Argon2id at 19 MiB by default,
+tens to hundreds of milliseconds. That cost is the point — it is what makes a
+stolen verifier expensive to attack — but on an async runtime, treat the call as
+blocking work.
+
+**What it does and does not protect.** A TLS-terminating proxy, an accidentally
+verbose request log, or a heap dump on the server can no longer capture a
+plaintext password, because the server never has one. It does **not** protect
+against a compromised AXIAM server.
+
+## Browser builds (`axiam-sdk-wasm`)
+
+This crate compiles to `wasm32-unknown-unknown` and is published to npm as
+[`axiam-sdk-wasm`](axiam-sdk-wasm/README.md) — the same implementation, in a
+browser, rather than a second one written in JavaScript.
+
+The browser build is REST + SRP only: gRPC and AMQP need sockets, and mTLS and
+custom CA roots belong to the browser rather than to page script (both return a
+typed error rather than being silently ignored). See that package's README for
+the full list and for the CORS requirement that comes with `HttpOnly` cookies.
 
 ## Security notes
 

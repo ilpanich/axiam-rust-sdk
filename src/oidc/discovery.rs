@@ -8,9 +8,9 @@
 //! [`tokio::sync::OnceCell::get_or_try_init`] — the same single-flight
 //! primitive family CONTRACT.md §9 already prescribes for this language.
 
+use crate::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, RwLock};

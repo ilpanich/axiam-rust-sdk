@@ -29,9 +29,9 @@
 //! observe latency — and it would surprise every reader who assumed a cache is
 //! a cache. Uniform is both safer to reason about and simpler to implement.
 
+use crate::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 

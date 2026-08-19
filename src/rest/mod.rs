@@ -3,5 +3,7 @@
 
 pub mod auth;
 pub mod authz;
+#[cfg(feature = "srp")]
+pub mod srp;
 
 pub use auth::LoginResult;

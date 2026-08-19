@@ -6,6 +6,12 @@
 # live in a normal library crate (§11 declarative authorization helpers).
 [workspace]
 members = ["axiam-sdk-macros"]
+# `axiam-sdk-wasm` lives in this directory but is deliberately NOT a member: it
+# only ever builds for `wasm32-unknown-unknown`, and a plain `cargo test` at the
+# root would otherwise try to compile `wasm-bindgen` for the host and fail.
+# `wasm-pack` is pointed at the directory instead. Excluding it also keeps it
+# out of `cargo publish`'s file set for the root crate.
+exclude = ["axiam-sdk-wasm"]
 resolver = "2"
 
 [package]
@@ -43,7 +49,7 @@ include = [
 ]
 
 [features]
-default = ["rest", "grpc", "amqp"]
+default = ["rest", "grpc", "amqp", "srp"]
 # §12 OIDC/SSO relying-party helpers (`src/oidc/`) need a CSPRNG, SHA-256, and
 # base64url for PKCE (`oidc_begin`) — CONTRACT.md §12.1 rules 1-3. No new
 # runtime dependency is added for this: `getrandom` and `base64` are already
@@ -64,6 +70,13 @@ default = ["rest", "grpc", "amqp"]
 # `base64` above, this only promotes an already-present crate to a named direct
 # dependency for the code path that needs it. No new supply-chain surface.
 rest = ["dep:reqwest", "dep:sha2", "dep:getrandom", "dep:base64", "dep:hmac", "dep:hex", "dep:subtle"]
+# CONTRACT.md §23 Secure Remote Password. Its own feature, and in `default`,
+# because it is genuinely optional for a consumer: it is the only thing in this
+# crate that needs big-integer arithmetic and an Argon2 implementation, and a
+# size-conscious build that will never call `login_srp` should not carry them.
+# `--no-default-features --features rest` gets the §1-§22 surface with none of
+# this. It implies `rest` because SRP is a login path, not a transport.
+srp = ["dep:num-bigint", "dep:argon2", "rest"]
 grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
 # `tracing` is a required (non-optional) dependency of `amqp`, not gated by
 # `observability`: the CONTRACT.md §8.4 security-event log on HMAC
@@ -104,7 +117,9 @@ tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 # `form` (CONTRACT.md §12.1 note 1 — `POST /oauth2/token` etc. are
 # `application/x-www-form-urlencoded`, RFC 6749 §4.1.3, never JSON) is added
 # alongside the pre-existing `json`/`rustls`/`cookies` features for §12.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies", "form"], optional = true }
+# reqwest is declared per-target below: the browser build cannot have
+# `rustls` (the browser owns TLS) or `cookies` (the browser owns the jar).
+# See the two `[target.'cfg(...)'.dependencies]` tables near the bottom.
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "tls-ring", "tls-native-roots"], optional = true }
 tonic-prost = { version = "0.14", optional = true }
 prost = { version = "0.14", optional = true }
@@ -151,6 +166,23 @@ getrandom = { version = "0.4", optional = true }
 # base64url (no padding) encoding for §12.1 PKCE — already an unconditional
 # transitive dependency (via `tonic`); see the `rest` feature comment above.
 base64 = { version = "0.23", optional = true }
+# §23 SRP: modular exponentiation in the RFC 5054 groups. Pure Rust and
+# wasm-clean, which is why it rather than a bindings crate.
+#
+# NOT constant-time, and that is acceptable here for a reason worth stating: the
+# only secret exponent a *client* raises is its own per-exchange ephemeral `a`,
+# discarded when the exchange ends. `x` is also an exponent (`g^x` when
+# enrolling), so a local attacker with a timing channel into this process could
+# in principle learn something about it — but such an attacker is already
+# running code on the machine holding the plaintext password, which is a
+# strictly stronger position.
+num-bigint = { version = "0.4", optional = true }
+# §23 client KDF. Pure Rust and wasm-clean. PBKDF2-HMAC-SHA256 is implemented
+# in-crate (src/srp/kdf.rs) rather than taken from the `pbkdf2` crate, whose
+# current release is built against `hmac` 0.12 while this crate is on 0.13 —
+# taking it would mean carrying two incompatible copies of the RustCrypto stack
+# for twenty lines of code.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"], optional = true }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (SDK-Q01): backs `serde_json::Value`'s object map with an
@@ -240,6 +272,11 @@ strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
 name = "login_mfa"
 required-features = ["rest"]
 
+# CONTRACT.md §23 Secure Remote Password demonstration.
+[[example]]
+name = "srp_login"
+required-features = ["srp"]
+
 # CONTRACT.md §12 OIDC/SSO relying-party helpers demonstration.
 [[example]]
 name = "oidc_login"
@@ -286,3 +323,49 @@ required-features = ["rest", "actix"]
 [[example]]
 name = "uma_client"
 required-features = ["rest"]
+
+# ---------------------------------------------------------------------------
+# Target-gated dependencies (browser vs everything else)
+# ---------------------------------------------------------------------------
+#
+# The `axiam-sdk-wasm` npm package compiles THIS crate to
+# `wasm32-unknown-unknown`. Three things differ there and cannot be papered
+# over with a feature flag, because they are properties of the platform rather
+# than choices:
+#
+#   * TLS belongs to the browser. `rustls` has no socket to configure, and a
+#     custom CA or a client certificate cannot be presented from page script at
+#     all — `with_custom_ca` and `with_client_cert` therefore return a typed
+#     error on wasm rather than silently doing nothing (see src/client.rs).
+#   * Cookies belong to the browser. reqwest's `cookies` feature drives a
+#     process-local jar that a `fetch` call would ignore; the browser attaches
+#     them itself once the request is made with `credentials: include`.
+#   * Timeouts and redirect policy are not configurable through `fetch`.
+#
+# Everything else — the REST surface, §12 OIDC helpers, JWKS verification, the
+# decision memo, §23 SRP — is portable and shared.
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies", "form"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# No `rustls`, no `cookies`: see above. `json` and `form` are the two body
+# encodings the REST and OIDC surfaces use, and both work over `fetch`.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form"], optional = true }
+# `Instant`/`SystemTime` panic on wasm32-unknown-unknown — std has no clock
+# there and chose to abort rather than lie. `web-time` backs them with
+# `performance.now()`/`Date.now()`. See src/time.rs.
+web-time = "1"
+# `getrandom` reaches the platform CSPRNG through `crypto.getRandomValues` only
+# with this feature; without it a wasm build fails to link. Used by PKCE state
+# generation (§12.1) and SRP client ephemerals (§23).
+getrandom = { version = "0.4", features = ["wasm_js"] }
+# uuid's v4 needs the same JS entropy source.
+uuid = { version = "1", features = ["serde", "v4", "js"] }
+# `jsonwebtoken` still depends on getrandom 0.2 (via p256/p384 -> elliptic-curve
+# -> rand_core 0.6), which is a separate crate from the 0.4 above and needs its
+# OWN wasm opt-in — a different one, spelled `js` rather than `wasm_js`. Named
+# here purely so feature unification turns it on; nothing in this crate calls
+# it directly. Without it the build fails inside getrandom with "the
+# wasm*-unknown-unknown targets are not supported by default".
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }

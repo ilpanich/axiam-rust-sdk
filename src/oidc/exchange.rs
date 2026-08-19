@@ -462,8 +462,8 @@ impl AxiamClient {
                     nonce,
                     clock_skew_sec: self.oidc_clock_skew_sec(),
                 };
-                let now_sec = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let now_sec = crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 Some(check_id_token_claims(claims, &expectations, now_sec)?)

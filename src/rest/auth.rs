@@ -12,7 +12,6 @@ use crate::AxiamError;
 use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
 use crate::token::jwks::Claims;
-use crate::token::manager::{extract_access_token_from_jar, extract_refresh_token_from_jar};
 use crate::token::refresh_guard::RefreshedTokens;
 
 const LOGIN_PATH: &str = "/api/v1/auth/login";
@@ -152,7 +151,7 @@ pub struct LoginResult {
 }
 
 impl LoginResult {
-    fn mfa_required(challenge_token: String, available_methods: Vec<String>) -> Self {
+    pub(crate) fn mfa_required(challenge_token: String, available_methods: Vec<String>) -> Self {
         Self {
             mfa_required: true,
             challenge_token: Some(Sensitive::new(challenge_token)),
@@ -162,7 +161,7 @@ impl LoginResult {
         }
     }
 
-    fn success(session_id: Uuid, expires_in: u64) -> Self {
+    pub(crate) fn success(session_id: Uuid, expires_in: u64) -> Self {
         Self {
             mfa_required: false,
             challenge_token: None,
@@ -187,7 +186,10 @@ impl LoginResult {
 /// sync rather than a partial copy of it — see
 /// [`AxiamClient::sso_complete`](crate::client::AxiamClient::sso_complete).
 pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claims, AxiamError> {
-    let access = extract_access_token_from_jar(&client.inner.jar, &client.inner.base_url)
+    let access = client
+        .inner
+        .jar
+        .access_token(&client.inner.base_url)
         .ok_or_else(|| AxiamError::Auth {
             message: "server response did not set the axiam_access cookie".into(),
             oauth: None,
@@ -204,7 +206,7 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
     // (token/refresh_guard.rs) despite the server having issued one. Look it
     // up at the REFRESH_PATH-scoped URL instead, matching the URL the cookie
     // was actually set against.
-    let refresh = extract_refresh_token_from_jar(&client.inner.jar, &client.url(REFRESH_PATH));
+    let refresh = client.inner.jar.refresh_token(&client.url(REFRESH_PATH));
 
     let claims = client
         .jwks_verifier()
@@ -396,15 +398,15 @@ impl AxiamClient {
                             // §9.3 requires the refresh call to not retry on
                             // failure, but on SUCCESS we still must read the
                             // rotated cookies before reporting the new token.
-                            let access = extract_access_token_from_jar(
-                                &client.inner.jar,
-                                &client.inner.base_url,
-                            )
-                            .ok_or_else(|| AxiamError::Auth {
-                                message: "refresh response did not set axiam_access".into(),
-                                oauth: None,
-                                reason: None,
-                            })?;
+                            let access = client
+                                .inner
+                                .jar
+                                .access_token(&client.inner.base_url)
+                                .ok_or_else(|| AxiamError::Auth {
+                                    message: "refresh response did not set axiam_access".into(),
+                                    oauth: None,
+                                    reason: None,
+                                })?;
                             // Same REFRESH_PATH-scoped lookup as
                             // absorb_session_cookies above, and just as
                             // load-bearing here: on a `base_url` lookup this
@@ -414,10 +416,8 @@ impl AxiamClient {
                             // refresh token in its state forever — meaning
                             // even a fixed first refresh() call would still
                             // make every subsequent refresh() fail.
-                            let refresh_token = extract_refresh_token_from_jar(
-                                &client.inner.jar,
-                                &client.url(REFRESH_PATH),
-                            );
+                            let refresh_token =
+                                client.inner.jar.refresh_token(&client.url(REFRESH_PATH));
                             let claims = client
                                 .jwks_verifier()
                                 .verify_session_token(access.expose())
@@ -527,7 +527,7 @@ impl AxiamClient {
         }
     }
 
-    fn url(&self, path: &str) -> url::Url {
+    pub(crate) fn url(&self, path: &str) -> url::Url {
         self.inner
             .base_url
             .join(path)
@@ -538,7 +538,7 @@ impl AxiamClient {
 /// Map a non-2xx REST response to an [`AxiamError`] per CONTRACT.md §2,
 /// pulling a human-readable message out of the body if present (never a
 /// raw token — these responses never carry one).
-async fn map_error_response(status: u16, response: reqwest::Response) -> AxiamError {
+pub(crate) async fn map_error_response(status: u16, response: reqwest::Response) -> AxiamError {
     let message = response
         .text()
         .await
@@ -546,7 +546,7 @@ async fn map_error_response(status: u16, response: reqwest::Response) -> AxiamEr
     AxiamError::from_http_status(status, message)
 }
 
-fn deser_err(e: reqwest::Error) -> AxiamError {
+pub(crate) fn deser_err(e: reqwest::Error) -> AxiamError {
     AxiamError::Network {
         message: format!("failed to parse response body: {e}"),
         source: Some(Box::new(e)),

@@ -31,7 +31,11 @@ use crate::AxiamError;
 use crate::token::TokenManager;
 use crate::token::jwks::JwksVerifier;
 
+// `fetch` has no configurable deadline, so these govern the native transport
+// only. Kept out of the browser build rather than defined-and-ignored.
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The tenant identifier a client was built with — either form is accepted
@@ -180,15 +184,33 @@ impl AxiamClientBuilder {
     /// there is deliberately no way to disable or weaken verification.
     ///
     /// Returns a construction-time error if `pem` is not valid PEM.
+    // `mut self` is used only on the native path; the browser path returns
+    // before touching it.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     pub fn with_custom_ca(mut self, pem: &[u8]) -> Result<Self, AxiamError> {
-        // Validate eagerly so a malformed CA is caught here rather than at
-        // first request time.
-        reqwest::Certificate::from_pem(pem).map_err(|e| AxiamError::Network {
-            message: format!("invalid custom CA PEM: {e}"),
-            source: None,
-        })?;
-        self.custom_ca_pem = Some(pem.to_vec());
-        Ok(self)
+        // A browser will not let page script choose trust roots. Refusing here
+        // is the only honest answer: accepting the call and ignoring it would
+        // leave a caller believing they had pinned a CA when every request was
+        // still validated against the browser's own store.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = pem;
+            return Err(AxiamError::network(
+                "with_custom_ca is not available in a browser: TLS trust roots \
+                 belong to the browser and cannot be set from page script",
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Validate eagerly so a malformed CA is caught here rather than at
+            // first request time.
+            reqwest::Certificate::from_pem(pem).map_err(|e| AxiamError::Network {
+                message: format!("invalid custom CA PEM: {e}"),
+                source: None,
+            })?;
+            self.custom_ca_pem = Some(pem.to_vec());
+            Ok(self)
+        }
     }
 
     /// Configure a **client certificate** for mutual TLS (mTLS), per
@@ -228,20 +250,37 @@ impl AxiamClientBuilder {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     pub fn with_client_cert(mut self, cert_pem: &[u8], key_pem: &[u8]) -> Result<Self, AxiamError> {
         // Validate eagerly so a malformed cert/key is caught here rather than
         // at first-request time. `reqwest::Identity::from_pem` (rustls backend)
         // takes a single buffer holding the cert chain followed by the PKCS#8
         // private key — build it once to surface parse errors now, then store
         // the two PEMs separately (the key behind `Sensitive`, §7).
-        let combined = concat_cert_and_key(cert_pem, key_pem);
-        reqwest::Identity::from_pem(&combined).map_err(|e| AxiamError::Network {
-            message: format!("invalid client certificate / key PEM: {e}"),
-            source: None,
-        })?;
-        self.client_cert_pem = Some(cert_pem.to_vec());
-        self.client_key = Some(crate::Sensitive::new(key_pem.to_vec()));
-        Ok(self)
+        // Same reasoning as `with_custom_ca`: a browser selects the client
+        // certificate itself, from the user's own store, in response to the
+        // server's CertificateRequest. Page script cannot supply one, and
+        // silently dropping it would let an mTLS-configured client believe it
+        // was presenting an identity it never sent.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (cert_pem, key_pem);
+            return Err(AxiamError::network(
+                "with_client_cert is not available in a browser: the client \
+                 certificate is chosen by the browser, not by page script",
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let combined = concat_cert_and_key(cert_pem, key_pem);
+            reqwest::Identity::from_pem(&combined).map_err(|e| AxiamError::Network {
+                message: format!("invalid client certificate / key PEM: {e}"),
+                source: None,
+            })?;
+            self.client_cert_pem = Some(cert_pem.to_vec());
+            self.client_key = Some(crate::Sensitive::new(key_pem.to_vec()));
+            Ok(self)
+        }
     }
 
     /// The relying-party OAuth2 `client_id` used by the CONTRACT.md §12
@@ -355,67 +394,86 @@ impl AxiamClientBuilder {
 reason: None,
 })?;
 
-        let jar = Arc::new(reqwest::cookie::Jar::default());
+        let jar = crate::cookies::CookieJar::new();
 
-        // Host-isolation (3A, defense in depth): never follow a redirect that
-        // leaves our own origin. reqwest strips Authorization/Cookie on a
-        // cross-host redirect but forwards custom headers (X-Tenant-ID /
-        // X-CSRF-Token) — so a redirect to a third-party host would leak the
-        // tenant identifier and CSRF token. Same-host redirects are followed
-        // (capped at 10, matching reqwest's default); cross-host redirects are
-        // not followed (the 3xx is returned as-is).
-        //
-        // Scheme-downgrade isolation (SDK-04): comparing host alone would let a
-        // same-host `https://…` -> `http://…` redirect be followed, re-sending
-        // X-Tenant-ID / X-CSRF-Token over cleartext. So a redirect that drops
-        // from the original secure scheme to a less-secure one (https -> http)
-        // is also refused, even on the same host.
-        let redirect_base_host = base_url.host_str().map(str::to_owned);
-        let redirect_base_scheme = base_url.scheme().to_owned();
-        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error("too many redirects");
+        // Everything reqwest lets us configure here — redirect policy, cookie
+        // provider, timeouts, custom CA, client identity — exists only on a
+        // native transport. `fetch` exposes none of it: the browser owns
+        // redirects, cookies, TLS and the request deadline. So the whole block
+        // is native-only, and the two capabilities a caller could have *asked*
+        // for and silently not received (custom CA, client certificate) are
+        // refused at the builder methods above rather than dropped here.
+        #[cfg(not(target_arch = "wasm32"))]
+        let client_builder = {
+            // Host-isolation (3A, defense in depth): never follow a redirect that
+            // leaves our own origin. reqwest strips Authorization/Cookie on a
+            // cross-host redirect but forwards custom headers (X-Tenant-ID /
+            // X-CSRF-Token) — so a redirect to a third-party host would leak the
+            // tenant identifier and CSRF token. Same-host redirects are followed
+            // (capped at 10, matching reqwest's default); cross-host redirects are
+            // not followed (the 3xx is returned as-is).
+            //
+            // Scheme-downgrade isolation (SDK-04): comparing host alone would let a
+            // same-host `https://…` -> `http://…` redirect be followed, re-sending
+            // X-Tenant-ID / X-CSRF-Token over cleartext. So a redirect that drops
+            // from the original secure scheme to a less-secure one (https -> http)
+            // is also refused, even on the same host.
+            let redirect_base_host = base_url.host_str().map(str::to_owned);
+            let redirect_base_scheme = base_url.scheme().to_owned();
+            let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("too many redirects");
+                }
+                // Refuse a downgrade from the original secure scheme (https) to a
+                // non-https scheme, regardless of host.
+                if redirect_base_scheme.eq_ignore_ascii_case("https")
+                    && !attempt.url().scheme().eq_ignore_ascii_case("https")
+                {
+                    return attempt.stop();
+                }
+                match (attempt.url().host_str(), redirect_base_host.as_deref()) {
+                    (Some(next), Some(base)) if !next.eq_ignore_ascii_case(base) => attempt.stop(),
+                    _ => attempt.follow(),
+                }
+            });
+
+            let mut client_builder = reqwest::Client::builder()
+                .cookie_provider(jar.provider())
+                .redirect(redirect_policy)
+                .connect_timeout(self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT))
+                .timeout(self.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
+
+            if let Some(pem) = &self.custom_ca_pem {
+                let cert =
+                    reqwest::Certificate::from_pem(pem).map_err(|e| AxiamError::Network {
+                        message: format!("invalid custom CA PEM: {e}"),
+                        source: None,
+                    })?;
+                client_builder = client_builder.add_root_certificate(cert);
             }
-            // Refuse a downgrade from the original secure scheme (https) to a
-            // non-https scheme, regardless of host.
-            if redirect_base_scheme.eq_ignore_ascii_case("https")
-                && !attempt.url().scheme().eq_ignore_ascii_case("https")
-            {
-                return attempt.stop();
+
+            // §6.1: apply the client-certificate identity (mTLS) to the REST
+            // transport. `reqwest::Identity::from_pem` takes ONE buffer with
+            // the cert chain followed by the private key. This never weakens
+            // server verification — it only adds the client identity we
+            // present.
+            if let (Some(cert), Some(key)) = (&self.client_cert_pem, &self.client_key) {
+                let combined = concat_cert_and_key(cert, key.expose());
+                let identity =
+                    reqwest::Identity::from_pem(&combined).map_err(|e| AxiamError::Network {
+                        message: format!("invalid client certificate / key PEM: {e}"),
+                        source: None,
+                    })?;
+                client_builder = client_builder.identity(identity);
             }
-            match (attempt.url().host_str(), redirect_base_host.as_deref()) {
-                (Some(next), Some(base)) if !next.eq_ignore_ascii_case(base) => attempt.stop(),
-                _ => attempt.follow(),
-            }
-        });
+            client_builder
+        };
 
-        let mut client_builder = reqwest::Client::builder()
-            .cookie_provider(Arc::clone(&jar))
-            .redirect(redirect_policy)
-            .connect_timeout(self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT))
-            .timeout(self.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
-
-        if let Some(pem) = &self.custom_ca_pem {
-            let cert = reqwest::Certificate::from_pem(pem).map_err(|e| AxiamError::Network {
-                message: format!("invalid custom CA PEM: {e}"),
-                source: None,
-            })?;
-            client_builder = client_builder.add_root_certificate(cert);
-        }
-
-        // §6.1: apply the client-certificate identity (mTLS) to the REST
-        // transport. `reqwest::Identity::from_pem` takes ONE buffer with the
-        // cert chain followed by the private key. This never weakens server
-        // verification — it only adds the client identity we present.
-        if let (Some(cert), Some(key)) = (&self.client_cert_pem, &self.client_key) {
-            let combined = concat_cert_and_key(cert, key.expose());
-            let identity =
-                reqwest::Identity::from_pem(&combined).map_err(|e| AxiamError::Network {
-                    message: format!("invalid client certificate / key PEM: {e}"),
-                    source: None,
-                })?;
-            client_builder = client_builder.identity(identity);
-        }
+        // The browser build takes reqwest's defaults, which are the browser's
+        // defaults: same-origin credentials, browser redirect handling, no
+        // configurable deadline.
+        #[cfg(target_arch = "wasm32")]
+        let client_builder = reqwest::Client::builder();
 
         let http = client_builder.build().map_err(|e| AxiamError::Network {
             message: format!("failed to construct HTTP client: {e}"),
@@ -500,6 +558,8 @@ reason: None,
 /// `reqwest::Identity::from_pem` expects (cert(s) first, then key), ensuring a
 /// newline separates the two so an already-trailing-newline-less cert does not
 /// run into the key's `-----BEGIN` armor.
+// mTLS is native-only: a browser chooses the client certificate itself.
+#[cfg(not(target_arch = "wasm32"))]
 fn concat_cert_and_key(cert_pem: &[u8], key_pem: &[u8]) -> Vec<u8> {
     let mut combined = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
     combined.extend_from_slice(cert_pem);
@@ -546,7 +606,7 @@ pub(crate) struct AxiamClientInner {
     /// `/oauth2/introspect` produces zero `/api/v1/auth/refresh` calls.
     /// Cross-SDK conformance review follow-up F-14.
     pub(crate) http: reqwest::Client,
-    pub(crate) jar: Arc<reqwest::cookie::Jar>,
+    pub(crate) jar: crate::cookies::CookieJar,
     pub(crate) base_url: url::Url,
     pub(crate) tenant: TenantIdentifier,
     pub(crate) org: Option<OrgIdentifier>,
@@ -576,12 +636,20 @@ pub(crate) struct AxiamClientInner {
     /// Custom CA PEM this client was built with, if any — retained so a gRPC
     /// channel built from the same client can share the identical trust chain
     /// (see [`AxiamClient::grpc_channel_config`]).
+    ///
+    /// Read only by the gRPC transport, so a REST-only build (including every
+    /// browser build, which has no gRPC) never touches it. Retained rather
+    /// than `cfg`-ed away so the struct's shape does not change with a
+    /// feature — the field is inert, not absent.
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
     pub(crate) custom_ca_pem: Option<Vec<u8>>,
     /// §6.1 client-certificate chain (PEM), if mTLS was configured — retained
     /// so the same identity applies to the gRPC transport (§6.1 rule 4).
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
     pub(crate) client_cert_pem: Option<Vec<u8>>,
     /// §6.1 client private key (PEM), held behind [`crate::Sensitive`] so it
     /// never leaks via `Debug`/log/getter (§6.1 rule 3, §7).
+    #[cfg_attr(not(feature = "grpc"), allow(dead_code))]
     pub(crate) client_key: Option<crate::Sensitive<Vec<u8>>>,
     /// The CONTRACT.md §12 relying-party `client_id`, if configured.
     pub(crate) oidc_client_id: Option<String>,
@@ -815,10 +883,7 @@ impl AxiamClient {
     /// (used right after login/verify_mfa/refresh, mirroring how the
     /// `axiam_access` cookie is read — RESEARCH.md Pattern 1).
     pub(crate) fn capture_csrf_from_jar(&self) {
-        if let Some(csrf) = crate::token::manager::extract_csrf_token_from_jar(
-            &self.inner.jar,
-            &self.inner.base_url,
-        ) {
+        if let Some(csrf) = self.inner.jar.csrf_token(&self.inner.base_url) {
             self.set_csrf_token(csrf);
         }
     }

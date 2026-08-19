@@ -9,9 +9,9 @@
 //! Semantics mirror the server's `federation_login_state` table: 10-minute
 //! TTL, single-use consume.
 
+use crate::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use crate::Sensitive;
 
