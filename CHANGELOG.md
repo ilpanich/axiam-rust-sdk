@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha31] - 2026-08-20
+
+### Fixed
+
+- Release: `npm publish` of the `axiam-sdk-wasm` package is called with an
+  explicit `--tag`, derived from the version, so a prerelease publishes under
+  `alpha` instead of being refused. npm >= 11 rejects publishing a prerelease
+  with no dist-tag, and the publish job upgrades to npm@latest because Trusted
+  Publishing needs >= 11.5.1 — so v1.0.0-alpha30 failed at the pre-publish dry
+  run after the build, the wasm smoke test and all six contract verifiers had
+  already passed. The fix landed on main after the alpha30 tag was cut, so this
+  is the first release to carry it. The crates.io publishers were unaffected.
+
 ## [1.0.0-alpha30] - 2026-08-20
 
 ### Changed
