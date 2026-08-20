@@ -16,7 +16,21 @@
 name = "axiam-opaque"
 version = "1.0.0-alpha31"
 edition = "2024"
-rust-version = "1.93"
+# The ONE line that differs from the upstream copy, and it is deliberate.
+#
+# Upstream inherits `rust-version.workspace = true` from the AXIAM server
+# workspace, which is 1.93. That is the server's floor, not this crate's: its
+# only non-trivial dependency, `opaque-ke`, declares 1.85, and everything else
+# in its tree is far below. Verified by compiling this crate and the whole SDK
+# under `cargo +1.88`.
+#
+# It matters because this SDK's MSRV is 1.88 and CI enforces it. Carrying the
+# server's number here made `Test (1.88)` fail with "axiam-opaque requires
+# rustc 1.93" — a floor nothing actually needed.
+#
+# ilpanich/axiam is being changed to declare 1.88 explicitly on this crate, at
+# which point the two copies match again and this comment can go.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/ilpanich/axiam"
 description = "AXIAM's OPAQUE (RFC 9807) ciphersuite, key-stretching functions and client operations"
