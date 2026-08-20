@@ -96,6 +96,42 @@ jobs:
       - name: Upgrade npm
         run: npm install -g npm@latest && npm --version
 
+      # Which credential will npm ACTUALLY use? Answer it here, in two seconds,
+      # rather than after a wasm toolchain install, two release builds and a
+      # smoke test — and answer it without printing the secret.
+      #
+      # This package matters more than most for that question: `axiam-sdk-wasm`
+      # does not exist on npm yet, and npm cannot attach a trusted publisher to
+      # a package that does not exist. So the FIRST publish has to be by token,
+      # no matter what the header above plans for afterwards. If NPM_TOKEN is
+      # missing here, no amount of Trusted Publishing configuration will help
+      # and the job should say so before it spends five minutes building.
+      - name: Report which npm credential this job will use
+        env:
+          NPM_TOKEN_PRESENT: ${{ secrets.NPM_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          echo "npm version:       $(npm --version)"
+          echo "package:           axiam-sdk-wasm"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "OIDC token:        available"
+          else
+            echo "OIDC token:        NOT available (id-token: write missing?)"
+          fi
+          echo "NPM_TOKEN secret:  ${NPM_TOKEN_PRESENT}"
+          if [ "${NPM_TOKEN_PRESENT}" = "true" ]; then
+            echo "==> This job will authenticate with the NPM_TOKEN secret."
+            echo "    Correct for a first publish: Trusted Publishing cannot be"
+            echo "    configured for a package that does not exist on npm yet."
+          else
+            echo "::error::NPM_TOKEN is not set in this repository."
+            echo "::error::axiam-sdk-wasm has never been published, so npm has no"
+            echo "::error::package to attach a trusted publisher to — the first"
+            echo "::error::publish MUST use an npm automation token. Set the"
+            echo "::error::NPM_TOKEN repository secret and re-run this release."
+            exit 1
+          fi
+
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
