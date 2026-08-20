@@ -74,8 +74,6 @@ pub mod cookies;
 #[cfg(feature = "rest")]
 mod memo;
 /// CONTRACT.md §23 Secure Remote Password — the protocol half, with no I/O.
-#[cfg(feature = "srp")]
-pub mod srp;
 /// Clock types that work on wasm32 as well as native — see the module docs for
 /// why `std::time` cannot be used directly.
 pub mod time;

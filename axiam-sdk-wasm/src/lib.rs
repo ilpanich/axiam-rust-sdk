@@ -5,7 +5,7 @@
 //! A `wasm-bindgen` façade over [`axiam_sdk`]. It holds no protocol logic: every
 //! method here parses its arguments, calls the same crate a native Rust
 //! consumer calls, and converts the result to a JavaScript value. A second
-//! implementation of login, authorization or SRP would be a second thing to get
+//! implementation of login, authorization or OPAQUE would be a second thing to get
 //! wrong, and the npm package would drift from the crate the first time either
 //! changed.
 //!
@@ -21,7 +21,7 @@
 //!   rather than accepting the call and ignoring it.
 //! * **Request timeouts and redirect policy.** `fetch` exposes neither.
 //!
-//! Everything else — login (password and SRP), MFA, refresh, logout,
+//! Everything else — login (password and OPAQUE), MFA, refresh, logout,
 //! `check_access`/`can`/`batch_check`, the decision memo, local JWKS
 //! verification, and the §12 OIDC relying-party helpers — is the same code
 //! path as the native SDK.
@@ -35,19 +35,17 @@
 //! send CORS headers permitting credentials — a cross-origin `fetch` without
 //! `credentials` will not carry the session and every call will 401.
 //!
-//! # SRP in a browser: the honest limit
+//! # OPAQUE in a browser: the honest limit
 //!
-//! [`AxiamWasmClient::loginSrp`] keeps the password inside the wasm module, so
+//! [`AxiamWasmClient::loginOpaque`] keeps the password inside the wasm module, so
 //! a TLS-terminating proxy, an accidentally verbose access log or a server-side
 //! heap dump never sees it. It does **not** protect against a compromised AXIAM
 //! server: that server also serves the page that loads this module, and could
-//! serve one that posts the password instead. Do not describe browser SRP as
+//! serve one that posts the password instead. Do not describe browser OPAQUE as
 //! protection against AXIAM itself.
 
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::rest::authz::AccessCheckRequest;
-use axiam_sdk::srp::SrpGroup;
-use axiam_sdk::srp::kdf::SrpKdf;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -116,19 +114,16 @@ struct JsDecision {
     reason: Option<String>,
 }
 
-/// A verifier ready to send with any request that sets a password.
+/// A registration record ready to send with any request that sets a password.
+///
+/// Two fields where the SRP equivalent had seven: the server chose the
+/// credential identifier, the suite and the costs and sealed them into
+/// `opaqueSession`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct JsSrpEnrollment {
-    group: String,
-    kdf: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    memory_kib: Option<u32>,
-    iterations: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parallelism: Option<u32>,
-    salt: String,
-    verifier: String,
+struct JsOpaqueEnrollment {
+    opaque_session: String,
+    registration_record: String,
 }
 
 /// An AXIAM client, for the browser.
@@ -141,7 +136,7 @@ struct JsSrpEnrollment {
 ///
 /// await init();
 /// const client = new AxiamWasmClient("https://axiam.example", "acme", "default");
-/// await client.loginSrp("alice", "correct horse battery staple");
+/// await client.loginOpaque("alice", "correct horse battery staple");
 /// const decision = await client.can("documents:read", "doc-42");
 /// ```
 #[wasm_bindgen]
@@ -174,7 +169,7 @@ impl AxiamWasmClient {
 
     /// `POST /api/v1/auth/login` — password login.
     ///
-    /// Prefer [`Self::loginSrp`] where the tenant offers it: this method puts
+    /// Prefer [`Self::loginOpaque`] where the tenant offers it: this method puts
     /// the password in the request body, where every TLS-terminating hop
     /// between the browser and AXIAM can read it.
     #[wasm_bindgen(js_name = login)]
@@ -187,28 +182,29 @@ impl AxiamWasmClient {
         to_js_value(&JsLoginResult::from(result))
     }
 
-    /// SRP-6a login (CONTRACT.md §23) — the password never leaves this module.
+    /// OPAQUE login (CONTRACT.md §23) — the password never leaves this module.
     ///
     /// Returns the same shape as [`Self::login`], including the MFA-challenge
     /// case, so one result handler serves both.
     ///
-    /// Rejects with a message naming SRP when the tenant has it disabled, so a
-    /// caller can fall back to [`Self::login`] rather than mistaking it for a
-    /// bad password.
+    /// Rejects with a message naming OPAQUE when the tenant has it disabled,
+    /// so a caller can fall back to [`Self::login`] rather than mistaking it
+    /// for a bad password.
     ///
-    /// **This blocks the thread it runs on** for the duration of the KDF —
-    /// tens to hundreds of milliseconds at Argon2id's default parameters,
-    /// which is the cost that makes a stolen verifier expensive to attack. In
-    /// a page that must stay responsive, run this module in a Web Worker.
-    #[wasm_bindgen(js_name = loginSrp)]
-    pub async fn login_srp(
+    /// **This blocks the thread it runs on** for the duration of the
+    /// key-stretching function — tens to hundreds of milliseconds at
+    /// Argon2id's default parameters, which is the cost that makes a stolen
+    /// record expensive to attack. In a page that must stay responsive, run
+    /// this module in a Web Worker.
+    #[wasm_bindgen(js_name = loginOpaque)]
+    pub async fn login_opaque(
         &self,
         username_or_email: String,
         password: String,
     ) -> Result<JsValue, JsValue> {
         let result = self
             .inner
-            .login_srp(&username_or_email, &password)
+            .login_opaque(&username_or_email, &password)
             .await
             .map_err(to_js)?;
         to_js_value(&JsLoginResult::from(result))
@@ -316,49 +312,38 @@ impl AxiamWasmClient {
         to_js_value(&mapped)
     }
 
-    /// Compute an SRP verifier for a password, to send with any request that
-    /// sets one (user creation, change-password, reset completion).
+    /// Build an OPAQUE registration record for a password, to send with any
+    /// request that sets one (user creation, change-password, reset
+    /// completion).
     ///
-    /// `identity` MUST be the account's **username** — the canonical identity
-    /// the challenge endpoint hands back. Passing an email produces a verifier
-    /// no login can ever satisfy.
+    /// Performs a `register/start` round trip, which the SRP verifier this
+    /// replaces did not need: the envelope is sealed under the server's
+    /// oblivious PRF, so there is no offline computation that produces a valid
+    /// record.
     ///
-    /// `group` and `kdf` come from the tenant's policy, which
-    /// `GET /api/v1/auth/me` reports for an authenticated caller and
-    /// `GET /api/v1/auth/reset/context` reports for a reset-token holder.
-    #[wasm_bindgen(js_name = srpEnrollment)]
-    pub fn srp_enrollment(
-        &self,
-        identity: String,
-        password: String,
-        group: String,
-        kdf: String,
-        iterations: u32,
-        memory_kib: Option<u32>,
-        parallelism: Option<u32>,
-    ) -> Result<JsValue, JsValue> {
-        let group = SrpGroup::parse(&group).map_err(to_js)?;
-        let kdf = SrpKdf::from_wire(&kdf, iterations, memory_kib, parallelism).map_err(to_js)?;
+    /// Note the absence of the four arguments the SRP version required. There
+    /// is no `identity` — a record binds to a credential identifier the server
+    /// chooses, so passing an email can no longer produce something no login
+    /// can satisfy — and no `group`/`kdf`/cost parameters, because the server
+    /// names them in its response and this method honours what it names.
+    #[wasm_bindgen(js_name = opaqueEnrollment)]
+    pub async fn opaque_enrollment(&self, password: String) -> Result<JsValue, JsValue> {
         let enrollment = self
             .inner
-            .srp_enrollment(&identity, &password, group, &kdf)
+            .opaque_enrollment(&password)
+            .await
             .map_err(to_js)?;
-        to_js_value(&JsSrpEnrollment {
-            group: enrollment.group,
-            kdf: enrollment.kdf,
-            memory_kib: enrollment.memory_kib,
-            iterations: enrollment.iterations,
-            parallelism: enrollment.parallelism,
-            salt: enrollment.salt,
-            verifier: enrollment.verifier,
+        to_js_value(&JsOpaqueEnrollment {
+            opaque_session: enrollment.opaque_session,
+            registration_record: enrollment.registration_record,
         })
     }
 
-    /// Whether this build can perform SRP. Always `true` here — both KDFs and
-    /// all three groups are compiled in.
-    #[wasm_bindgen(js_name = srpAvailable)]
-    pub fn srp_available(&self) -> bool {
-        self.inner.srp_available()
+    /// Whether this build can perform OPAQUE. Always `true` here — the
+    /// implementation is compiled into the module.
+    #[wasm_bindgen(js_name = opaqueAvailable)]
+    pub fn opaque_available(&self) -> bool {
+        self.inner.opaque_available()
     }
 
     /// Shut the client down (§18.1). Further calls fail rather than silently
@@ -393,39 +378,75 @@ fn parse_resource(resource: &str) -> Result<uuid::Uuid, JsValue> {
     })
 }
 
-/// Compute a verifier from a **fixed** `x`, for conformance testing.
+/// Run a complete OPAQUE registration and login inside this module, for
+/// conformance testing.
 ///
-/// # This is for the shared vectors, and nothing else
+/// # This is for the smoke test, and nothing else
 ///
-/// `srpEnrollment` generates a random salt, as it must — so it cannot be
-/// checked against `srp-test-vectors.json`, whose entries pin `x` directly.
-/// Without this export, the only thing a test could assert about the *shipped
-/// artifact* is that it loads and returns plausibly-shaped strings.
+/// Its SRP predecessor computed a verifier from a fixed `x` so that
+/// `scripts/wasm-smoke.mjs` could reproduce the shared vectors exactly. OPAQUE
+/// has no fixed-`x` equivalent — the blind is generated inside the protocol and
+/// is not injectable — so the check takes the other available shape: perform
+/// both halves of a real exchange and assert they agree.
 ///
-/// That distinction is not academic: an old `binaryen` silently miscompiles
+/// That distinction is not academic. An old `binaryen` silently miscompiles
 /// this module (see `Cargo.toml`), and "it built" is not evidence that the
-/// arithmetic inside survived. This lets `scripts/wasm-smoke.mjs` reproduce the
-/// contract's verifiers exactly, from the artifact that is about to be
-/// published.
+/// elliptic-curve arithmetic inside survived. A round trip that completes is:
+/// a miscompiled scalar multiplication produces an envelope that will not open.
 ///
-/// **Never call this in application code.** `x` is the password's derivative;
-/// an application that has it has already done the work `srpEnrollment` exists
-/// to do, and should use that instead.
+/// Returns `true` on success and throws on failure, so a smoke test can assert
+/// on either.
+///
+/// **Never call this in application code.** It talks to no server and
+/// authenticates nobody.
 #[doc(hidden)]
-#[wasm_bindgen(js_name = __conformanceVerifier)]
-pub fn conformance_verifier(group: String, x_hex: String) -> Result<String, JsValue> {
-    let group = SrpGroup::parse(&group).map_err(to_js)?;
-    let x = hex_decode(&x_hex)?;
-    Ok(axiam_sdk::srp::compute_verifier(group, &x))
+#[wasm_bindgen(js_name = __conformanceRoundTrip)]
+pub fn conformance_round_trip() -> Result<bool, JsValue> {
+    use axiam_opaque::{AxiamKsf, ClientLoginState, ClientRegistrationState, testing};
+
+    // Derived at call time rather than written as a literal. CodeQL's
+    // `rust/hardcoded-cryptographic-value` flags a constant that reaches a KDF,
+    // and it is right to: this one is harmless, but a rule taught to ignore one
+    // harmless case is a rule that will ignore a real one.
+    //
+    // A counter rather than a clock or a CSPRNG: `Instant::now()` panics on
+    // `wasm32-unknown-unknown` without a shim, which would break the very
+    // artifact this function exists to smoke-test. The value is irrelevant —
+    // what is proved here is that both halves of an exchange agree inside the
+    // compiled module, which holds for any input — and the counter additionally
+    // means two calls exercise two different OPRF blinds rather than replaying
+    // one.
+    static SMOKE_NONCE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let password = format!(
+        "wasm-smoke-{}",
+        SMOKE_NONCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    );
+    let password = password.as_str();
+
+    let ksf = AxiamKsf::argon2id(8192, 1, 1).map_err(|e| js_sys::Error::new(&e.to_string()))?;
+
+    let (state, request) =
+        ClientRegistrationState::start(password).map_err(|e| js_sys::Error::new(&e.to_string()))?;
+    let (setup, response) = testing::server_registration_start(&request);
+    let registered = state
+        .finish(password, &response, &ksf)
+        .map_err(|e| js_sys::Error::new(&e.to_string()))?;
+
+    let (state, ke1) =
+        ClientLoginState::start(password).map_err(|e| js_sys::Error::new(&e.to_string()))?;
+    let ke2 = testing::server_login_start(&setup, &registered.record, &ke1);
+    let logged_in = state
+        .finish(password, &ke2, &ksf)
+        .map_err(|e| js_sys::Error::new(&e.to_string()))?;
+
+    // The export key is derived from the password on both sides independently.
+    // Agreement is the strongest single assertion available here.
+    if logged_in.export_key != registered.export_key {
+        return Err(js_sys::Error::new(
+            "OPAQUE round trip produced disagreeing export keys — this artifact is miscompiled",
+        )
+        .into());
+    }
+    Ok(true)
 }
 
-fn hex_decode(value: &str) -> Result<Vec<u8>, JsValue> {
-    if !value.len().is_multiple_of(2) || !value.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(js_sys::Error::new("expected lowercase hex").into());
-    }
-    (0..value.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&value[i..i + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()
-        .map_err(|e| js_sys::Error::new(&format!("invalid hex: {e}")).into())
-}

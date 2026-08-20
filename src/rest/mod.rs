@@ -3,7 +3,7 @@
 
 pub mod auth;
 pub mod authz;
-#[cfg(feature = "srp")]
-pub mod srp;
+#[cfg(feature = "opaque")]
+pub mod opaque;
 
 pub use auth::LoginResult;

@@ -21,7 +21,8 @@ on:
       - 'CONTRACT.md'
       - 'openapi.json'
       - 'axiam-sdk-wasm/**'
-      - 'srp-test-vectors.json'
+      - 'opaque-test-vectors.json'
+      - 'vendor/**'
       - '.github/workflows/sdk-ci-rust.yml'
   push:
     tags:
@@ -86,14 +87,14 @@ jobs:
         with:
           node-version: '22'
 
-      # The browser build is REST + SRP only. gRPC needs sockets and AMQP needs
+      # The browser build is REST + OPAQUE only. gRPC needs sockets and AMQP needs
       # a broker connection, neither of which exists in a page — building them
       # for wasm32 would fail, and shipping them would be a lie about what the
       # package can do.
       - name: Check the SDK itself compiles for wasm32
         env:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
-        run: cargo check --lib --target wasm32-unknown-unknown --no-default-features --features rest,srp
+        run: cargo check --lib --target wasm32-unknown-unknown --no-default-features --features rest,opaque
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
@@ -115,7 +116,7 @@ jobs:
       # module works: a wasm-opt that disagrees with wasm-bindgen produces an
       # artifact that builds cleanly and throws on first import (see
       # axiam-sdk-wasm/Cargo.toml). This imports what was just built and
-      # reproduces the CONTRACT §23.7 SRP verifiers through it.
+      # runs a complete CONTRACT §23 OPAQUE exchange through it.
       - name: Smoke-test the built artifact
         working-directory: axiam-sdk-wasm
         run: node scripts/wasm-smoke.mjs pkg-node
@@ -278,8 +279,21 @@ jobs:
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
     # Manual-on-tag, side-effecting job: it runs only when a maintainer pushes
-    # a tag matching vX.Y.Z. It is never triggered by a PR, so
-    # CARGO_REGISTRY_TOKEN is never exposed to PR-triggered jobs (T-16-26).
+    # a tag matching vX.Y.Z, never from a PR (T-16-26).
+    #
+    # Authentication is crates.io Trusted Publishing (OIDC): the short-lived
+    # token below is minted by exchanging this workflow's GitHub identity, and
+    # there is no long-lived CRATES_IO_TOKEN secret to leak, rotate or forget
+    # to scope. Both crates published here — axiam-sdk and axiam-sdk-macros —
+    # must have this repository, this workflow file and the environment below
+    # registered as a trusted publisher on crates.io.
+    #
+    # Renaming or moving this file breaks that relationship: the workflow path
+    # is part of what crates.io matches. Update the publisher there first.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write   # crates.io Trusted Publishing OIDC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
@@ -337,12 +351,25 @@ jobs:
       # then axiam-sdk, which `=`-depends on it. `cargo publish` waits for each newly
       # published crate to appear in the registry index before returning, so axiam-sdk's
       # dependency on axiam-sdk-macros resolves by the time it publishes.
+      # Exchange this workflow's OIDC identity for a short-lived crates.io
+      # token. It is scoped to the crates this repository is a trusted
+      # publisher for and expires in minutes, so there is nothing here worth
+      # stealing from a log.
+      #
+      # A leftover CRATES_IO_TOKEN secret would NOT silently win here the way a
+      # stray NPM_TOKEN does — cargo reads only what this job sets — but it
+      # should be deleted anyway: a long-lived publish credential that nothing
+      # uses is a credential nobody is watching.
+      - name: Mint a crates.io token (Trusted Publishing)
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@e919bc7605cde86df457cf0dfceab40babcea886  # v1.0.1
+
       - name: Publish axiam-sdk-macros to crates.io
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cd axiam-sdk-macros && cargo publish --all-features --allow-dirty
 
       - name: Publish axiam-sdk to crates.io
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: cargo publish --all-features --allow-dirty
