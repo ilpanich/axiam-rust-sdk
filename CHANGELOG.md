@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: `login_srp` becomes `login_opaque`** — CONTRACT.md §23 is now
+  OPAQUE (RFC 9807), and SRP-6a is removed from AXIAM entirely.
+  - `login_srp` → `login_opaque`, `srp_enrollment` → `opaque_enrollment`,
+    `srp_available` → `opaque_available`; the `srp` feature becomes `opaque`.
+  - `opaque_enrollment` is now **async** and takes only a password. The SRP
+    version took four arguments including the account's canonical username,
+    and passing an email produced a verifier no login could satisfy. A record
+    binds to a credential identifier the server chooses, so that mistake is
+    not expressible — and a later rename no longer invalidates a credential.
+  - `SrpEnrollment`'s seven fields become `OpaqueEnrollment`'s two. The server
+    chose the identifier, the suite and the costs and sealed them into
+    `opaque_session`.
+- **This SDK no longer implements the protocol.** CONTRACT §23.1 forbids it:
+  SRP was hand-written eleven times because it is modular arithmetic every
+  language has, whereas OPAQUE needs an OPRF, `hash_to_curve`,
+  `expand_message_xmd` and a three-message AKE. `src/srp/` — three modules,
+  ~870 lines of group arithmetic, RFC 5054 constants and a hand-rolled PBKDF2 —
+  is replaced by a dependency on `axiam-opaque`, the same crate the AXIAM
+  server links.
+
+### Removed
+
+- The server-proof check. RFC 9807's AKE authenticates the server during the
+  handshake, so opening `KE2` *is* the proof it holds the record. §23.3 rule 6
+  had to mandate an `M2` check in capitals because skipping it kept only half
+  the protocol; there is now nothing to skip.
+- `num-bigint` from the feature's dependency set.
+- `srp-test-vectors.json`, replaced by the smaller `opaque-test-vectors.json`
+  — see CONTRACT §23.7 for why the fixture shrank rather than being ported.
+- `__conformanceVerifier` from the wasm build, replaced by
+  `__conformanceRoundTrip`, which runs both halves of a real exchange inside
+  the published artifact. Same purpose — catching a `wasm-opt` miscompilation —
+  by the only means OPAQUE offers, since its blind is not injectable.
+
+### Added
+
+- `vendor/axiam-opaque`, a vendored copy of the implementation, on the same
+  terms as the existing `CONTRACT.md`/`openapi.json`/`proto/` copies: the
+  source of truth is the server repository and a drift gate fails if it falls
+  behind. It becomes an ordinary crates.io version requirement once the crate
+  is published.
+
 ## [1.0.0-alpha31] - 2026-08-20
 
 ### Fixed

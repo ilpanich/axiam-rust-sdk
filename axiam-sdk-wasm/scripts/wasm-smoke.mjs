@@ -63,50 +63,32 @@ check('sdkVersion() returns a version', /^\d+\.\d+\.\d+/.test(wasm.sdkVersion())
 
 const client = new wasm.AxiamWasmClient('https://axiam.example', 'acme', 'default');
 check('client constructs', client instanceof wasm.AxiamWasmClient);
-check('srpAvailable() is true for this build', client.srpAvailable() === true);
+check('opaqueAvailable() is true for this build', client.opaqueAvailable() === true);
 
-// (2) Reproduce the contract vectors through the wasm boundary.
-const vectorsPath = join(here, '..', '..', 'srp-test-vectors.json');
-const vectors = JSON.parse(readFileSync(vectorsPath, 'utf8')).vectors;
-check('vector file is non-empty', vectors.length > 0);
+// (2) Prove the elliptic-curve arithmetic inside the artifact actually works.
+//
+// The SRP version of this step replayed `srp-test-vectors.json` through
+// `__conformanceVerifier`, because SRP's `x` could be pinned and a verifier
+// recomputed from it. OPAQUE's blind is generated inside the protocol and is
+// not injectable, so there is no fixed input to replay — the available check
+// is to run both halves of a real exchange inside the module and assert they
+// agree. A miscompiled scalar multiplication produces an envelope that will
+// not open, which is exactly what this catches.
+check('a full OPAQUE round trip completes inside the artifact', wasm.__conformanceRoundTrip() === true);
 
-let verifierMismatches = 0;
-for (const v of vectors) {
-  const got = wasm.__conformanceVerifier(v.group, v.x);
-  if (got !== v.verifier) {
-    verifierMismatches += 1;
-    console.error(`        ${v.group}/${v.identity}: expected ${v.verifier.slice(0, 24)}… got ${got.slice(0, 24)}…`);
-  }
+// (3) The KSF wire fields are honoured as the server names them, and an
+// unknown one is refused rather than substituted (CONTRACT §23.4 rule 3).
+//
+// `opaqueEnrollment` now performs a network round trip, so it cannot run in
+// this offline smoke test — that path is covered by `tests/opaque_login_test.rs`
+// against a mock that really speaks the protocol. What is checkable here is
+// that the exported surface is the one CONTRACT §23.2 names.
+for (const name of ['loginOpaque', 'opaqueEnrollment', 'opaqueAvailable']) {
+  check(`${name} is exported`, typeof client[name] === 'function');
 }
-check(
-  `all ${vectors.length} contract verifiers reproduce through wasm`,
-  verifierMismatches === 0,
-  verifierMismatches ? `${verifierMismatches} mismatch(es)` : '',
-);
-
-// (3) Enrolment produces well-formed, freshly-salted output.
-const groups = { rfc5054_2048: 512, rfc5054_3072: 768, rfc5054_4096: 1024 };
-for (const [group, verifierHexLen] of Object.entries(groups)) {
-  const e = client.srpEnrollment('alice', 'hunter2', group, 'pbkdf2_sha256', 1000, null, null);
-  check(`${group}: salt is 32 bytes`, e.salt.length === 64, `${e.salt.length} hex chars`);
-  check(
-    `${group}: verifier is padded to the group width`,
-    e.verifier.length === verifierHexLen,
-    `${e.verifier.length} hex chars`,
-  );
-  check(`${group}: kdf and group echo back`, e.group === group && e.kdf === 'pbkdf2_sha256');
+for (const gone of ['loginSrp', 'srpEnrollment', 'srpAvailable']) {
+  check(`${gone} is gone`, client[gone] === undefined);
 }
-
-const first = client.srpEnrollment('alice', 'hunter2', 'rfc5054_2048', 'pbkdf2_sha256', 1000, null, null);
-const second = client.srpEnrollment('alice', 'hunter2', 'rfc5054_2048', 'pbkdf2_sha256', 1000, null, null);
-check('each enrolment gets a fresh salt', first.salt !== second.salt);
-check('a fresh salt yields a different verifier', first.verifier !== second.verifier);
-
-// Argon2id runs too — the memory-hard path is the default, and a build where it
-// silently failed would fall back to nothing.
-const argon = client.srpEnrollment('alice', 'hunter2', 'rfc5054_2048', 'argon2id', 1, 8192, 1);
-check('argon2id enrolment produces a verifier', argon.verifier.length === 512);
-check('argon2id echoes its parameters', argon.memoryKib === 8192 && argon.parallelism === 1);
 
 // (4) Refusals cross the boundary as Errors, not panics.
 function refuses(label, fn) {
@@ -117,15 +99,6 @@ function refuses(label, fn) {
     check(label, err instanceof Error, `threw ${typeof err}`);
   }
 }
-refuses('an unknown group is refused', () =>
-  client.srpEnrollment('a', 'b', 'rfc5054_1024', 'pbkdf2_sha256', 1000, null, null),
-);
-refuses('an unknown KDF is refused', () =>
-  client.srpEnrollment('a', 'b', 'rfc5054_2048', 'scrypt', 1000, null, null),
-);
-refuses('argon2id without its parameters is refused', () =>
-  client.srpEnrollment('a', 'b', 'rfc5054_2048', 'argon2id', 1, null, null),
-);
 refuses('a malformed base URL is refused', () => new wasm.AxiamWasmClient('not a url', 'o', 't'));
 
 // Async refusals arrive as rejected promises.

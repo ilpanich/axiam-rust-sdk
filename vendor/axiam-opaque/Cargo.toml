@@ -1,0 +1,41 @@
+# VENDORED from ilpanich/axiam `crates/axiam-opaque`. Do not edit here.
+#
+# The same arrangement this repository already uses for CONTRACT.md,
+# openapi.json and proto/: the source of truth is the server repository, and
+# `scripts/check-sdk-artifact-drift.py` there fails if a copy falls behind.
+#
+# It is vendored rather than depended on from crates.io because the crate is
+# not published yet. When it is, this directory is deleted and the dependency
+# below becomes an ordinary version requirement — the code does not change.
+#
+# What it must NOT become is a place where AXIAM's OPAQUE implementation is
+# edited. CONTRACT §23.1 exists because eleven implementations of this protocol
+# is the thing to avoid, and a vendored copy that diverges is exactly that with
+# extra steps.
+[package]
+name = "axiam-opaque"
+version = "1.0.0-alpha31"
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0"
+repository = "https://github.com/ilpanich/axiam"
+description = "AXIAM's OPAQUE (RFC 9807) ciphersuite, key-stretching functions and client operations"
+
+[dependencies]
+# RFC 9807, independently audited. Pinned to a patch range rather than a caret
+# range because the wire format is a cross-language contract: a minor bump that
+# changed a byte would break every SDK at once, silently.
+opaque-ke = { version = "4.0.1", default-features = false, features = ["ristretto255", "std"] }
+# opaque-ke 4.0.1 is built on the digest 0.10 generation of RustCrypto while the
+# AXIAM workspace has moved to 0.11. Both are in the tree; the aliases keep it
+# unambiguous which is meant at each use site.
+sha2_v10 = { version = "0.10", package = "sha2" }
+argon2 = "0.5"
+scrypt = "0.11"
+hex = "0.4"
+thiserror = "2"
+rand08 = { version = "0.8", package = "rand", features = ["getrandom"] }
+
+
+[dev-dependencies]
+serde_json = "1"

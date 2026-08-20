@@ -17,8 +17,8 @@ const client = new AxiamWasmClient(
   "default",                                    // tenant slug
 );
 
-// SRP login — the password never leaves the browser.
-await client.loginSrp("alice", "correct horse battery staple");
+// OPAQUE login — the password never leaves the browser.
+await client.loginOpaque("alice", "correct horse battery staple");
 
 if (await client.can("documents:read", "3f8a…-uuid")) {
   renderDocument();
@@ -39,7 +39,7 @@ the TypeScript SDK. They are different trade-offs:
 | Shares code with | itself | the Rust server and SDK |
 
 Reach for this one when you want the *same* implementation the Rust SDK and
-the AXIAM server run — the SRP arithmetic, the JWKS verifier, the decision memo
+the AXIAM server run — the OPAQUE implementation, the JWKS verifier, the decision memo
 are literally the same compiled code, not a second implementation that has to be
 kept in agreement. Reach for the TypeScript SDK when payload size matters, which
 for most web applications it does.
@@ -48,9 +48,9 @@ for most web applications it does.
 
 Everything the Rust SDK's REST surface offers:
 
-- `login`, `loginSrp`, `verifyMfa`, `refresh`, `logout`
+- `login`, `loginOpaque`, `verifyMfa`, `refresh`, `logout`
 - `checkAccess`, `can`, `batchCheck` (with the client-side decision memo)
-- `srpEnrollment`, `srpAvailable`
+- `opaqueEnrollment`, `opaqueAvailable`
 - local JWKS verification and the §12 OIDC relying-party helpers
 
 ## What is not, and why
@@ -81,20 +81,20 @@ same-origin with the AXIAM API, or configure the API to send
 without credentials carries no session and every call 401s — which looks like a
 broken login and is actually a CORS configuration.
 
-## SRP in a browser: the honest limit
+## OPAQUE in a browser: the honest limit
 
-`loginSrp` keeps the password inside the wasm module. A TLS-terminating proxy,
+`loginOpaque` keeps the password inside the wasm module. A TLS-terminating proxy,
 an accidentally verbose access log, or a server-side heap dump never sees it,
 because the server never has it.
 
 It does **not** protect you against a compromised AXIAM server. That server also
 serves the page that loads this module, and could serve one that posts the
-password instead. Browser SRP defends against the infrastructure between you and
+password instead. Browser OPAQUE defends against the infrastructure between you and
 AXIAM, not against AXIAM. Do not tell your users otherwise.
 
 ### It blocks
 
-`loginSrp` runs the tenant's KDF — Argon2id at 19 MiB by default. That is tens
+`loginOpaque` runs the tenant's KDF — Argon2id at 19 MiB by default. That is tens
 to hundreds of milliseconds of synchronous work, and the cost is the point: it
 is what makes a stolen verifier expensive to attack offline. In a page that must
 stay responsive, run this module in a Web Worker.
@@ -112,7 +112,7 @@ node scripts/wasm-smoke.mjs pkg-node
 ```
 
 The smoke test is not optional ceremony. It imports the built artifact and
-reproduces the cross-language SRP vectors *through* it, because "wasm-pack
+runs a complete OPAQUE exchange *through* it, because "wasm-pack
 succeeded" is not evidence that the module works — see the `wasm-opt` note in
 `Cargo.toml` for the concrete case where it built cleanly and was broken.
 

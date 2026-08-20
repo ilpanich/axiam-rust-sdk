@@ -5,7 +5,7 @@
 # `members` additionally pulls in the proc-macro companion crate, which cannot
 # live in a normal library crate (§11 declarative authorization helpers).
 [workspace]
-members = ["axiam-sdk-macros"]
+members = ["axiam-sdk-macros", "vendor/axiam-opaque"]
 # `axiam-sdk-wasm` lives in this directory but is deliberately NOT a member: it
 # only ever builds for `wasm32-unknown-unknown`, and a plain `cargo test` at the
 # root would otherwise try to compile `wasm-bindgen` for the host and fail.
@@ -49,7 +49,7 @@ include = [
 ]
 
 [features]
-default = ["rest", "grpc", "amqp", "srp"]
+default = ["rest", "grpc", "amqp", "opaque"]
 # §12 OIDC/SSO relying-party helpers (`src/oidc/`) need a CSPRNG, SHA-256, and
 # base64url for PKCE (`oidc_begin`) — CONTRACT.md §12.1 rules 1-3. No new
 # runtime dependency is added for this: `getrandom` and `base64` are already
@@ -70,13 +70,19 @@ default = ["rest", "grpc", "amqp", "srp"]
 # `base64` above, this only promotes an already-present crate to a named direct
 # dependency for the code path that needs it. No new supply-chain surface.
 rest = ["dep:reqwest", "dep:sha2", "dep:getrandom", "dep:base64", "dep:hmac", "dep:hex", "dep:subtle"]
-# CONTRACT.md §23 Secure Remote Password. Its own feature, and in `default`,
-# because it is genuinely optional for a consumer: it is the only thing in this
-# crate that needs big-integer arithmetic and an Argon2 implementation, and a
-# size-conscious build that will never call `login_srp` should not carry them.
-# `--no-default-features --features rest` gets the §1-§22 surface with none of
-# this. It implies `rest` because SRP is a login path, not a transport.
-srp = ["dep:num-bigint", "dep:argon2", "rest"]
+# CONTRACT.md §23 OPAQUE (RFC 9807). Its own feature, and in `default`, because
+# it is genuinely optional for a consumer: it is the only thing in this crate
+# that pulls an elliptic-curve stack and an Argon2/scrypt implementation, and a
+# size-conscious build that will never call `login_opaque` should not carry
+# them. `--no-default-features --features rest` gets the §1-§22 surface with
+# none of this. It implies `rest` because OPAQUE is a login path, not a
+# transport.
+#
+# Note what this feature no longer pulls: `num-bigint`. §23.1 forbids an SDK
+# from implementing OPAQUE, so the protocol comes from `axiam-opaque` — the
+# same crate the AXIAM server links — and the ~870 lines of group arithmetic,
+# RFC 5054 constants and hand-rolled PBKDF2 that SRP required are gone.
+opaque = ["dep:axiam-opaque", "rest"]
 grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
 # `tracing` is a required (non-optional) dependency of `amqp`, not gated by
 # `observability`: the CONTRACT.md §8.4 security-event log on HMAC
@@ -166,23 +172,18 @@ getrandom = { version = "0.4", optional = true }
 # base64url (no padding) encoding for §12.1 PKCE — already an unconditional
 # transitive dependency (via `tonic`); see the `rest` feature comment above.
 base64 = { version = "0.23", optional = true }
-# §23 SRP: modular exponentiation in the RFC 5054 groups. Pure Rust and
-# wasm-clean, which is why it rather than a bindings crate.
+# CONTRACT.md §23 OPAQUE (RFC 9807).
 #
-# NOT constant-time, and that is acceptable here for a reason worth stating: the
-# only secret exponent a *client* raises is its own per-exchange ephemeral `a`,
-# discarded when the exchange ends. `x` is also an exponent (`g^x` when
-# enrolling), so a local attacker with a timing channel into this process could
-# in principle learn something about it — but such an attacker is already
-# running code on the machine holding the plaintext password, which is a
-# strictly stronger position.
-num-bigint = { version = "0.4", optional = true }
-# §23 client KDF. Pure Rust and wasm-clean. PBKDF2-HMAC-SHA256 is implemented
-# in-crate (src/srp/kdf.rs) rather than taken from the `pbkdf2` crate, whose
-# current release is built against `hmac` 0.12 while this crate is on 0.13 —
-# taking it would mean carrying two incompatible copies of the RustCrypto stack
-# for twenty lines of code.
-argon2 = { version = "0.5", default-features = false, features = ["alloc"], optional = true }
+# Vendored under `vendor/axiam-opaque` rather than taken from crates.io because
+# the crate is not published yet; see that directory's Cargo.toml. When it is
+# published this becomes an ordinary version requirement and the vendored copy
+# is deleted — no code changes either way.
+#
+# It is a path dependency to exactly one implementation on purpose. §23.1
+# forbids an SDK from writing its own, because eleven independent
+# implementations of an OPRF, hash_to_curve and a three-message AKE is the
+# thing this design exists to avoid.
+axiam-opaque = { path = "vendor/axiam-opaque", optional = true }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (SDK-Q01): backs `serde_json::Value`'s object map with an
@@ -272,10 +273,10 @@ strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
 name = "login_mfa"
 required-features = ["rest"]
 
-# CONTRACT.md §23 Secure Remote Password demonstration.
+# CONTRACT.md §23 OPAQUE demonstration.
 [[example]]
-name = "srp_login"
-required-features = ["srp"]
+name = "opaque_login"
+required-features = ["opaque"]
 
 # CONTRACT.md §12 OIDC/SSO relying-party helpers demonstration.
 [[example]]

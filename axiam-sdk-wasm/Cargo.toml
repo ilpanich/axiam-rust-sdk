@@ -3,7 +3,7 @@
 # This crate is a thin `wasm-bindgen` façade. It contains no protocol logic of
 # its own: every call delegates to `axiam-sdk`, which compiles to
 # `wasm32-unknown-unknown` unchanged. That is the point — a second
-# implementation of login, authorization or SRP would be a second thing to get
+# implementation of login, authorization or OPAQUE would be a second thing to get
 # wrong, and the npm package would drift from the crate the moment either
 # changed.
 #
@@ -27,9 +27,13 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# REST + OIDC + token + SRP. No gRPC (no sockets in a browser), no AMQP, no
+# REST + OIDC + token + OPAQUE. No gRPC (no sockets in a browser), no AMQP, no
 # Actix middleware — see README.md for what that means for a consumer.
-axiam-sdk = { path = "..", default-features = false, features = ["rest", "srp"] }
+axiam-sdk = { path = "..", default-features = false, features = ["rest", "opaque"] }
+# Reached directly only by `__conformanceRoundTrip`, which runs both halves of
+# a real exchange inside the published artifact so that a miscompiled build is
+# caught by the smoke test rather than by a user who cannot log in.
+axiam-opaque = { path = "../vendor/axiam-opaque" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 serde = { version = "1", features = ["derive"] }
