@@ -115,6 +115,28 @@ jobs:
           fi
           echo "OK: tag ${GITHUB_REF_NAME} matches ${crate_version}."
 
+          # npm >= 11 refuses to publish a prerelease without an explicit
+          # --tag, and it is right to: without one the release would land on
+          # `latest`, so a plain `npm install axiam-sdk-wasm` would hand every
+          # consumer an alpha. Derive the dist-tag from the version instead of
+          # hard-coding it, so the same workflow serves 1.0.0-alpha30 (alpha),
+          # 1.0.0-rc.1 (rc) and 1.0.0 (latest) with no edit.
+          case "${tag_version}" in
+            *-*)
+              pre="${tag_version#*-}"     # 1.0.0-alpha30 -> alpha30, 1.0.0-rc.1 -> rc.1
+              pre="${pre%%.*}"            # rc.1 -> rc
+              dist_tag="$(printf '%s' "${pre}" | sed 's/[0-9]*$//')"   # alpha30 -> alpha
+              # A purely numeric prerelease (1.0.0-30) leaves nothing behind;
+              # `next` keeps it off `latest`, which is the property that matters.
+              [ -n "${dist_tag}" ] || dist_tag="next"
+              ;;
+            *)
+              dist_tag="latest"
+              ;;
+          esac
+          echo "NPM_DIST_TAG=${dist_tag}" >> "${GITHUB_ENV}"
+          echo "npm dist-tag: ${dist_tag}"
+
       # `--target bundler` is what npm consumers get: webpack, Vite, Rollup and
       # esbuild all understand it, and it is the only target that works as a
       # plain `import` without a manual `init()` call in a bundled app.
@@ -144,7 +166,7 @@ jobs:
 
       - name: Verify the tarball before publishing
         working-directory: axiam-sdk-wasm/pkg
-        run: npm publish --dry-run
+        run: npm publish --dry-run --tag "${NPM_DIST_TAG}"
 
       - name: Publish to npm with provenance
         working-directory: axiam-sdk-wasm/pkg
@@ -153,4 +175,4 @@ jobs:
         # so leaving it would mean TP is configured and never used.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --tag "${NPM_DIST_TAG}"
