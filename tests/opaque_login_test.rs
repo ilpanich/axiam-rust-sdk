@@ -91,7 +91,7 @@ impl Respond for LoginStart {
 
 fn client(server: &MockServer) -> AxiamClient {
     AxiamClient::builder()
-        .base_url(&server.uri())
+        .base_url(server.uri())
         .expect("valid base url")
         .org_slug("acme")
         .tenant_slug("default")
