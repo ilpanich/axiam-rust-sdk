@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is replaced by a dependency on `axiam-opaque`, the same crate the AXIAM
   server links.
 
+- Release CI now authenticates by **Trusted Publishing (OIDC)** on both
+  registries rather than long-lived tokens: `rust-lang/crates-io-auth-action`
+  mints a short-lived crates.io token, and npm authenticates by workflow
+  identity with no `NODE_AUTH_TOKEN`. Provenance is implied on both.
+  - The npm job now **fails** if an `NPM_TOKEN` secret is still present. A
+    token takes precedence over OIDC, so leaving one would mean Trusted
+    Publishing is configured, believed to be in use, and silently bypassed.
+  - Both publishers are bound to this repository, the workflow file path and
+    the `production` environment. **Renaming or moving either workflow file
+    breaks publishing** until the trusted publisher is updated on the registry.
+  - The `CRATES_IO_TOKEN` and `NPM_TOKEN` repository secrets can be deleted.
+
 ### Removed
 
 - The server-proof check. RFC 9807's AKE authenticates the server during the

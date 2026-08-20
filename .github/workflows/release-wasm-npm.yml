@@ -6,33 +6,33 @@
 # both are tag-triggered only, so no PR ever sees a publishing credential.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# AUTHENTICATION — READ BEFORE THE FIRST PUBLISH
+# AUTHENTICATION — Trusted Publishing (OIDC), no token
 #
-# This workflow is written for the token path, because Trusted Publishing
-# cannot be configured for a package that does not exist yet: npm needs the
-# package present before you can attach a trusted publisher to it. So:
+# npm authenticates this workflow by its OIDC identity: the repository, the
+# workflow file path and the environment below are matched against the trusted
+# publisher configured on npmjs.com for `axiam-sdk-wasm`. There is no
+# `NPM_TOKEN` and there should not be — a token present takes precedence over
+# OIDC, so leaving one configured would mean Trusted Publishing is set up and
+# silently never used.
 #
-#   FIRST PUBLISH  — set the `NPM_TOKEN` repository secret to an npm
-#                    **automation** token with publish rights. That is the only
-#                    secret this workflow needs.
+# Three things have to stay true or the publish fails, usually with an OIDC
+# mismatch that does not say which one:
 #
-#   AFTER THAT     — configure Trusted Publishing on npmjs.com for
-#                    `axiam-sdk-wasm`, pointing at this repository and
-#                    `.github/workflows/release-wasm-npm.yml`, then switch this
-#                    workflow over by making exactly three edits, all marked
-#                    `# [TRUSTED PUBLISHING]` below:
+#   1. `id-token: write` on this job. Without it there is no OIDC token to
+#      present, and npm falls back to looking for a credential that is not
+#      there.
+#   2. `environment: production` matches the environment named in npm's trusted
+#      publisher configuration. If npm names one and this omits it — or names a
+#      different one — the claim does not match.
+#   3. npm >= 11.5.1. `setup-node` with Node 22 ships npm 10.x, which does not
+#      know about Trusted Publishing at all, so the upgrade step below is
+#      load-bearing rather than hygiene.
 #
-#                      1. add `environment:` to this job if the npm
-#                         configuration names one (it will fail otherwise —
-#                         the OIDC claim has to match);
-#                      2. delete the `NODE_AUTH_TOKEN` env block;
-#                      3. keep the npm upgrade step — Trusted Publishing needs
-#                         npm >= 11.5.1, and `setup-node` with Node 22 ships
-#                         npm 10.x, so without it TP silently does not engage
-#                         and the publish falls back to looking for a token
-#                         that is no longer there.
+# Renaming or moving this file breaks the trust relationship: the workflow path
+# is part of what npm matches. Update the publisher on npmjs.com first.
 #
-# `id-token: write` is already granted: provenance needs it on both paths.
+# Provenance is automatic under Trusted Publishing, so `--provenance` is no
+# longer passed explicitly.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Release — axiam-sdk-wasm to npm
@@ -70,13 +70,13 @@ jobs:
     name: Publish to npm
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
-    # [TRUSTED PUBLISHING] 1/3 — uncomment and set to the environment named in
-    # the npm trusted-publisher configuration. Leaving this out when npm expects
-    # an environment fails the publish with an opaque OIDC mismatch.
+    # Must match the environment named in npm's trusted-publisher configuration
+    # for this package. Omitting it, or naming a different one, fails the
+    # publish with an OIDC claim mismatch that does not say so.
     environment: production
     permissions:
       contents: read
-      id-token: write   # npm provenance (and Trusted Publishing) OIDC
+      id-token: write   # Trusted Publishing OIDC (and provenance, which it implies)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -90,47 +90,43 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      # [TRUSTED PUBLISHING] 3/3 — required for TP (needs npm >= 11.5.1) and
-      # harmless on the token path. Node 22 ships npm 10.x, which does not know
-      # about Trusted Publishing at all and would quietly look for a token.
+      # Load-bearing, not hygiene: Trusted Publishing needs npm >= 11.5.1, and
+      # `setup-node` with Node 22 ships npm 10.x, which does not know about it
+      # at all and would quietly look for a token that is not there.
       - name: Upgrade npm
         run: npm install -g npm@latest && npm --version
 
-      # Which credential will npm ACTUALLY use? Answer it here, in two seconds,
-      # rather than after a wasm toolchain install, two release builds and a
-      # smoke test — and answer it without printing the secret.
+      # Which credential will npm ACTUALLY use? Answer it here, in two
+      # seconds, rather than after a wasm toolchain install, two release builds
+      # and a smoke test.
       #
-      # This package matters more than most for that question: `axiam-sdk-wasm`
-      # does not exist on npm yet, and npm cannot attach a trusted publisher to
-      # a package that does not exist. So the FIRST publish has to be by token,
-      # no matter what the header above plans for afterwards. If NPM_TOKEN is
-      # missing here, no amount of Trusted Publishing configuration will help
-      # and the job should say so before it spends five minutes building.
-      - name: Report which npm credential this job will use
+      # The failure this catches is specific and quiet: a leftover NPM_TOKEN
+      # secret takes precedence over OIDC, so Trusted Publishing would be
+      # configured, believed to be in use, and never actually used. Refusing
+      # here is better than a green publish that did not do what the repository
+      # says it does.
+      - name: Assert Trusted Publishing will be used
         env:
           NPM_TOKEN_PRESENT: ${{ secrets.NPM_TOKEN != '' }}
         run: |
           set -euo pipefail
-          echo "npm version:       $(npm --version)"
-          echo "package:           axiam-sdk-wasm"
-          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "OIDC token:        available"
-          else
-            echo "OIDC token:        NOT available (id-token: write missing?)"
-          fi
-          echo "NPM_TOKEN secret:  ${NPM_TOKEN_PRESENT}"
-          if [ "${NPM_TOKEN_PRESENT}" = "true" ]; then
-            echo "==> This job will authenticate with the NPM_TOKEN secret."
-            echo "    Correct for a first publish: Trusted Publishing cannot be"
-            echo "    configured for a package that does not exist on npm yet."
-          else
-            echo "::error::NPM_TOKEN is not set in this repository."
-            echo "::error::axiam-sdk-wasm has never been published, so npm has no"
-            echo "::error::package to attach a trusted publisher to — the first"
-            echo "::error::publish MUST use an npm automation token. Set the"
-            echo "::error::NPM_TOKEN repository secret and re-run this release."
+          echo "npm version: $(npm --version)"
+          echo "package:     axiam-sdk-wasm"
+
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token available. This job needs \`id-token: write\`;"
+            echo "::error::without it npm cannot use Trusted Publishing."
             exit 1
           fi
+          echo "OIDC token:  available"
+
+          if [ "${NPM_TOKEN_PRESENT}" = "true" ]; then
+            echo "::error::The NPM_TOKEN secret is still set. npm prefers a token over"
+            echo "::error::OIDC, so this publish would silently bypass Trusted"
+            echo "::error::Publishing. Delete the NPM_TOKEN repository secret."
+            exit 1
+          fi
+          echo "NPM_TOKEN:   absent (correct — OIDC will be used)"
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
@@ -204,11 +200,10 @@ jobs:
         working-directory: axiam-sdk-wasm/pkg
         run: npm publish --dry-run --tag "${NPM_DIST_TAG}"
 
-      - name: Publish to npm with provenance
+      # No NODE_AUTH_TOKEN: npm authenticates by OIDC. Provenance is implied by
+      # Trusted Publishing, so `--provenance` is not passed — npm rejects it as
+      # redundant on this path in some versions and attaches the attestation
+      # either way.
+      - name: Publish to npm
         working-directory: axiam-sdk-wasm/pkg
-        # [TRUSTED PUBLISHING] 2/3 — delete this `env:` block once Trusted
-        # Publishing is configured. A token present takes precedence over OIDC,
-        # so leaving it would mean TP is configured and never used.
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance --tag "${NPM_DIST_TAG}"
+        run: npm publish --access public --tag "${NPM_DIST_TAG}"
