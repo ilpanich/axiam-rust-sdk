@@ -73,7 +73,7 @@ jobs:
     # [TRUSTED PUBLISHING] 1/3 — uncomment and set to the environment named in
     # the npm trusted-publisher configuration. Leaving this out when npm expects
     # an environment fails the publish with an opaque OIDC mismatch.
-    # environment: npm-publish
+    environment: production
     permissions:
       contents: read
       id-token: write   # npm provenance (and Trusted Publishing) OIDC
