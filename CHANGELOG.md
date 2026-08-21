@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The `axiam-sdk-wasm` package page on npmjs.com documented SRP. The README in
+  the repository has described OPAQUE since alpha34 and each tarball carried
+  it, but npm renders the README of whatever version the `latest` dist-tag
+  names, and `latest` had pointed at 1.0.0-alpha31 — the last SRP release —
+  ever since the first publish. While no stable version exists, the npm
+  release workflow now publishes each prerelease to `latest` rather than to a
+  channel tag nobody reads; once 1.0.0 ships, prereleases go back to their own
+  channel and never displace it.
+- `axiam-sdk-wasm`'s quickstart called `init()`. The published package is
+  wasm-pack's `bundler` target, which has no default export to call — that
+  form belongs to the `web` target, and is now shown where the `web` target is
+  built. Same fix in the crate doc comment, which becomes the shipped
+  `.d.ts`.
+- `axiam-sdk-wasm`'s README listed local JWKS verification and the §12 OIDC
+  relying-party helpers among what the module offers. Neither crosses the wasm
+  boundary; they are in the "what is not, and why" table now, with the reason
+  (session tokens are `HttpOnly` cookies, so page script holds no token to
+  verify).
+
+### Added
+
+- An `axiam-sdk-wasm` README section for readers arriving from 1.0.0-alpha31
+  or earlier, mapping `loginSrp`/`srpEnrollment`/`srpAvailable` onto their
+  OPAQUE replacements and saying plainly that a verifier does not migrate into
+  a record.
+
 ## [1.0.0-alpha36] - 2026-08-21
 
 ### Fixed
@@ -35,8 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop a needless borrow flagged by clippy under -D warnings
 - Lower the vendored axiam-opaque MSRV to 1.88, which is its real floor
 - Derive the conformance password instead of hard-coding it
-
-## [Unreleased]
 
 ## [1.0.0-alpha33] - 2026-08-21
 

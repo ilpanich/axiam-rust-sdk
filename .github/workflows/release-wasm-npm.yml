@@ -166,6 +166,58 @@ jobs:
               dist_tag="latest"
               ;;
           esac
+
+          # ...with one exception, which holds only while this package has no
+          # stable release at all.
+          #
+          # npmjs.com renders the README of whatever version `latest` names,
+          # and a plain `npm install axiam-sdk-wasm` resolves to it. The first
+          # publish put `latest` on 1.0.0-alpha31 and nothing has moved it
+          # since, so the package page kept serving that release's README —
+          # still documenting SRP long after SRP was removed from AXIAM —
+          # while every alpha after it shipped to a channel tag nobody reads.
+          # Keeping `latest` off a prerelease protects a stable release; there
+          # is no stable release here to protect, and pointing `latest` at a
+          # five-versions-old alpha is not the safer default, only the older
+          # one.
+          #
+          # This has to be decided here, at publish time. Only `npm publish`
+          # performs the OIDC token exchange — npm/cli calls
+          # `lib/utils/oidc.js` from `lib/commands/publish.js` and nowhere
+          # else — so a follow-up `npm dist-tag add` would need the NPM_TOKEN
+          # this workflow deliberately refuses to have.
+          #
+          # The moment 1.0.0 is published the condition stops holding and
+          # every prerelease after it goes to its own channel again.
+          #
+          # The cost, stated plainly: the channel tag (`alpha`) does not
+          # advance while this branch is taken, so `@alpha` keeps naming
+          # whichever prerelease last used it. `latest` is the tag that
+          # consumers and the package page actually read.
+          if [ "${dist_tag}" != "latest" ]; then
+            # `|| true`, and a separate step from the parse: `npm view` exits
+            # non-zero for a package with no published versions, and under
+            # `set -o pipefail` that would abort the release rather than
+            # answer "no stable version" — which is the answer.
+            versions_json="$(npm view axiam-sdk-wasm versions --json 2>/dev/null || true)"
+            stable_count="$(printf '%s' "${versions_json}" | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d).on("end", () => {
+                let v = [];
+                try { v = JSON.parse(s); } catch {}
+                if (!Array.isArray(v)) { v = v ? [v] : []; }
+                process.stdout.write(String(v.filter(x => !x.includes("-")).length));
+              });
+            ')"
+            if [ "${stable_count}" = "0" ]; then
+              echo "No stable version is published, so \`latest\` would otherwise stay on an old prerelease."
+              echo "Publishing ${tag_version} to \`latest\` instead of \`${dist_tag}\`."
+              dist_tag="latest"
+            else
+              echo "${stable_count} stable version(s) published; leaving \`latest\` alone."
+            fi
+          fi
+
           echo "NPM_DIST_TAG=${dist_tag}" >> "${GITHUB_ENV}"
           echo "npm dist-tag: ${dist_tag}"
 
