@@ -183,7 +183,7 @@ base64 = { version = "0.23", optional = true }
 # forbids an SDK from writing its own, because eleven independent
 # implementations of an OPRF, hash_to_curve and a three-message AKE is the
 # thing this design exists to avoid.
-axiam-opaque = { path = "vendor/axiam-opaque", optional = true }
+axiam-opaque = { version = "1.0.0-alpha34", optional = true }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (SDK-Q01): backs `serde_json::Value`'s object map with an
