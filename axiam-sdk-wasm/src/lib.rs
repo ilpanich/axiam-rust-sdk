@@ -132,9 +132,11 @@ struct JsOpaqueEnrollment {
 /// native SDK exposes.
 ///
 /// ```js
-/// import init, { AxiamWasmClient } from "axiam-sdk-wasm";
+/// // The npm package is wasm-pack's `bundler` target, which a bundler
+/// // instantiates for you — there is no `init()` to await. A `web`-target
+/// // build exports a default `init()` that must be awaited first.
+/// import { AxiamWasmClient } from "axiam-sdk-wasm";
 ///
-/// await init();
 /// const client = new AxiamWasmClient("https://axiam.example", "acme", "default");
 /// await client.loginOpaque("alice", "correct horse battery staple");
 /// const decision = await client.can("documents:read", "doc-42");

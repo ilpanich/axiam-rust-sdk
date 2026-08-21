@@ -7,9 +7,11 @@ npm install axiam-sdk-wasm
 ```
 
 ```js
-import init, { AxiamWasmClient } from "axiam-sdk-wasm";
-
-await init();                                   // loads the .wasm module
+// The published package is wasm-pack's `bundler` target: webpack, Vite,
+// Rollup and esbuild instantiate the module for you, so there is no `init()`
+// to await. A `web`-target build, which you make yourself, does have one —
+// see "Building from source".
+import { AxiamWasmClient } from "axiam-sdk-wasm";
 
 const client = new AxiamWasmClient(
   "https://axiam.example",                      // base URL
@@ -17,13 +19,41 @@ const client = new AxiamWasmClient(
   "default",                                    // tenant slug
 );
 
-// OPAQUE login — the password never leaves the browser.
+// OPAQUE login (RFC 9807) — the password never leaves the browser.
 await client.loginOpaque("alice", "correct horse battery staple");
 
 if (await client.can("documents:read", "3f8a…-uuid")) {
   renderDocument();
 }
 ```
+
+1.0.0 has not shipped: every release so far is a prerelease, and the API can
+still change between them. Until it does, `latest` names the newest prerelease,
+so the install line above is the one to use — pin the exact version in
+`package.json` if you would rather choose when to move.
+
+## Coming from 1.0.0-alpha31 or earlier?
+
+Those releases spoke **SRP-6a**. AXIAM replaced SRP with **OPAQUE (RFC 9807)**
+in 1.0.0-alpha34 and removed SRP from the platform entirely, so the three
+methods that named it are gone rather than deprecated:
+
+| alpha31 and earlier | now |
+|---|---|
+| `loginSrp(user, password)` | `loginOpaque(user, password)` |
+| `srpEnrollment(identity, password, group, kdf, iterations, …)` | `await opaqueEnrollment(password)` |
+| `srpAvailable()` | `opaqueAvailable()` |
+
+`opaqueEnrollment` is asynchronous and takes only a password. It is
+asynchronous because a registration record is sealed under the server's
+oblivious PRF, so there is no offline computation that produces a valid one —
+it performs a `register/start` round trip. It takes no identity because the
+server names the credential identifier, which removes the alpha31 failure mode
+where enrolling with an email produced a verifier no login could satisfy.
+
+This is a server-side break too, not only an SDK rename: an SRP verifier cannot
+be converted into an OPAQUE record, so accounts re-enroll. See CONTRACT.md §23
+and the CHANGELOG for the full account.
 
 ## Which package do I want?
 
@@ -39,19 +69,24 @@ the TypeScript SDK. They are different trade-offs:
 | Shares code with | itself | the Rust server and SDK |
 
 Reach for this one when you want the *same* implementation the Rust SDK and
-the AXIAM server run — the OPAQUE implementation, the JWKS verifier, the decision memo
+the AXIAM server run — the OPAQUE implementation, the token handling, the decision memo
 are literally the same compiled code, not a second implementation that has to be
 kept in agreement. Reach for the TypeScript SDK when payload size matters, which
 for most web applications it does.
 
 ## What is in it
 
-Everything the Rust SDK's REST surface offers:
+The whole exported surface, which is the REST surface a browser can use:
 
+- `new AxiamWasmClient(baseUrl, orgSlug, tenantSlug)`, and `close()`
 - `login`, `loginOpaque`, `verifyMfa`, `refresh`, `logout`
 - `checkAccess`, `can`, `batchCheck` (with the client-side decision memo)
 - `opaqueEnrollment`, `opaqueAvailable`
-- local JWKS verification and the §12 OIDC relying-party helpers
+- `sdkVersion()`, module-level
+
+`axiam_sdk_wasm.d.ts` ships with the package and documents each of them; that
+file is generated from the Rust doc comments, so it cannot drift from the code
+it describes.
 
 ## What is not, and why
 
@@ -60,6 +95,7 @@ Everything the Rust SDK's REST surface offers:
 | gRPC | A browser has no sockets |
 | AMQP, the reactor runtime | Same |
 | Actix middleware / route guards | They guard a server; there is no server here |
+| Local JWKS verification, the §12 OIDC relying-party helpers | Compiled into the module but not exported across the wasm boundary: session tokens arrive as `HttpOnly` cookies, so page script never holds a token to verify locally |
 | mTLS (`with_client_cert`) | The browser picks the client certificate, not page script |
 | Custom CA roots (`with_custom_ca`) | The browser owns the trust store |
 | Request timeouts, redirect policy | `fetch` exposes neither |
@@ -96,7 +132,7 @@ AXIAM, not against AXIAM. Do not tell your users otherwise.
 
 `loginOpaque` runs the tenant's KDF — Argon2id at 19 MiB by default. That is tens
 to hundreds of milliseconds of synchronous work, and the cost is the point: it
-is what makes a stolen verifier expensive to attack offline. In a page that must
+is what makes a stolen record expensive to attack offline. In a page that must
 stay responsive, run this module in a Web Worker.
 
 ## Building from source
@@ -110,6 +146,17 @@ wasm-pack build --target nodejs --out-dir pkg-node   --release
 # Always run this against what you built:
 node scripts/wasm-smoke.mjs pkg-node
 ```
+
+The `web` target is the one that exports a default `init()`, because nothing
+instantiates the module for you there:
+
+```js
+import init, { AxiamWasmClient } from "./pkg-web/axiam_sdk_wasm.js";
+
+await init();                                   // loads the .wasm module
+```
+
+`examples/browser-opaque-login.html` is a runnable page built on that target.
 
 The smoke test is not optional ceremony. It imports the built artifact and
 runs a complete OPAQUE exchange *through* it, because "wasm-pack
