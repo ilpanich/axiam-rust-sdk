@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [1.0.0-alpha31] - 2026-08-20
 
 ### Fixed
@@ -43,22 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - §22.14 declarative handler binding — ReactorRouter + #[reactor_handler]
-
-### Changed
-
-- Do not intra-doc-link a private module from public docs
-- Re-vendor CONTRACT.md 1.23 (§8b rules 7 and 8)
-- Re-vendor openapi.json for the SCIM provisioning-token endpoints
-- Re-vendor CONTRACT.md 1.22 from the server repo
-
-### Fixed
-
-- Make §8b rule 2 implementable, and stop the guard failing open
-
-## [Unreleased]
-
-### Added
-
 - **A named D5 conformance suite, and §19 telemetry is finally tested (F7).**
   `tests/d5_conformance.rs` carries the §19 assertions this SDK did not have —
   `src/telemetry.rs` had no test at all — and names where the rest of D5
@@ -89,17 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signature and delegates), `ReactorConfigBuilder::tls()`, and the exported
   `ensure_amqps()` for validating a broker URL at config-load time.
 
-### Fixed
-
-- **The §8b scheme guard failed open on an unparseable URL.** It was written as
-  `if let Ok(parsed) = url::Url::parse(amqp_url) { … }`, so a URL that did not
-  parse skipped the check entirely and went straight to lapin. That is backwards
-  for a security check — an input nobody can parse is the one to refuse, not the
-  one to wave through. It is now an error, in both `consume()` and the reactor
-  builder.
-
 ### Changed
 
+- Do not intra-doc-link a private module from public docs
+- Re-vendor CONTRACT.md 1.23 (§8b rules 7 and 8)
+- Re-vendor openapi.json for the SCIM provisioning-token endpoints
+- Re-vendor CONTRACT.md 1.22 from the server repo
 - Re-vendor `openapi.json` at 1.0.0-alpha27 — the copy was pinned at alpha26 and
   failing the cross-repo artifact-drift gate
 - **BREAKING (AMQP only): plaintext `amqp://` is refused on loopback too.** The
@@ -114,6 +95,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/gen-broker-tls.sh` in the server repo mints suitable material, and
   its certificate carries `localhost` in the SAN for exactly this case.
 
+### Fixed
+
+- Make §8b rule 2 implementable, and stop the guard failing open
+- **The §8b scheme guard failed open on an unparseable URL.** It was written as
+  `if let Ok(parsed) = url::Url::parse(amqp_url) { … }`, so a URL that did not
+  parse skipped the check entirely and went straight to lapin. That is backwards
+  for a security check — an input nobody can parse is the one to refuse, not the
+  one to wave through. It is now an error, in both `consume()` and the reactor
+  builder.
+
 ## [1.0.0-alpha25] - 2026-08-16
 
 ### Added
@@ -127,30 +118,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report clamped settings via §19 ConfigClamped (contract 1.9)
 - Contract 1.8 — §16 retry, §17 memo, §18 close(), §19 telemetry (D5) (#45)
 - Device grant, token exchange, logout helpers; re-vendor (D6)
-
-### Changed
-
-- Re-vendor CONTRACT.md 1.19, openapi.json and proto/ from main (R5.8) (#61)
-- Name the no-401-interceptor invariant at the transport seam (R5.7, F-14) (#60)
-- Contract 1.15 — §10.1 rule 9, sender-constrained access tokens (#58)
-- Drop a needless borrow in the timeout test
-- Rustfmt import order
-- Add the §20.7 required timeout assertion
-- Retire the "measured residual" justification (contract 1.14)
-- Re-sync to contract 1.14 (#302 closed)
-- Bump github/codeql-action from 4.37.4 to 4.37.6
-- Bump Swatinem/rust-cache from 2.9.1 to 2.9.2
-- Bump dtolnay/rust-toolchain
-- Bump taiki-e/install-action from 2.85.5 to 2.85.10
-
-### Fixed
-
-- Never print the raw UMA challenge header (#53)
-
-## [Unreleased]
-
-### Added
-
 - **CONTRACT.md §22 — Reactors (AMQP extension actors).** New `amqp::reactor`
   module and the `reactor_serve(config, handler)` runtime: it consumes the
   server-declared per-reactor queue, verifies every event (§8 v2 — `key_version`,
@@ -228,9 +195,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TokenService`, so there is no gRPC path here that could read a `cnf`. The
   vendored `proto/` is re-synced regardless, so the fields are present the day
   that changes.
+- **§15.7 external-IdP subject tokens (X4).** `token_exchange` can now exchange a token minted
+  by a trusted external IdP — a partner's Entra, Okta or Keycloak — for an AXIAM token scoped
+  to what the resolved AXIAM user may actually do. No new operation: the same method, plus
+  `TokenExchangeParams::subject_token_type` and the new `JWT_TOKEN_TYPE` constant alongside the
+  existing `ACCESS_TOKEN_TYPE`.
+
+  **The type is the caller's to name, never the SDK's to guess.** §15.7 forbids inspecting the
+  subject token to pick it, because which kind of token you hold is something only you know and
+  a wrong guess is the difference between a request that is refused and one that is silently
+  reinterpreted. A JWT-shaped subject token does **not** change what is sent, which is asserted
+  by a test. (This shipped with an `…:access_token` default; contract 1.13 removed it — see
+  *Changed* above.)
+
+  Also asserted: an `actor_token` alongside an external subject token surfaces `invalid_request`
+  with no retry and no request rewriting; a refused refresh or ID token type is never retried as
+  a different type; the one normative description — `the subject token's issuer is not
+  configured for token exchange`, meaning *fix the AXIAM trust config* rather than *fix your
+  token* — reaches the caller intact; and nothing re-exchanges an exchanged token, which both
+  server paths refuse because exchanges do not compose.
+
+  `CONTRACT.md` and `openapi.json` re-synced from `ilpanich/axiam@main` (contract 1.10 → 1.12
+  plus §15.7), which also brings contract 1.11's lifted §12.6 deferral, contract 1.12's
+  `/oauth2/*` error rows dispatching on the `error` field at any status, and the
+  `TokenExchangeTrust` schemas behind the X4 provider configuration.
+
+- **§20.3 challenge emission wired into the §11 route guard.** `RequireAccess::with_uma_challenge`
+  takes a new `middleware::UmaChallenger`; on denial the guard mints a permission ticket for
+  the action it just refused and returns `WWW-Authenticate: UMA` alongside the 403. New
+  `AuthzGuardError::DeniedWithChallenge` carries the formatted header, because minting is a
+  wire call and `ResponseError::error_response` is synchronous — by the time the variant
+  exists the ticket is already in hand.
+
+  **Opt-in by construction.** Emitting a challenge means minting a credential, so a guard
+  that did it by default would turn every unauthorized request into a Protection API call.
+  And **failure is not escalation**: if minting fails the denial still surfaces as a plain
+  403, because a caller who was going to be refused is refused either way and an outage must
+  not turn a deny into a 500 — still less into an allow.
+
+- **A runnable UMA example pair**: [`examples/uma_resource_server.rs`](examples/uma_resource_server.rs)
+  mints a PAT, registers a resource and guards a route with the challenger;
+  [`examples/uma_client.rs`](examples/uma_client.rs) catches the refusal, parses the
+  challenge, **makes the trust decision about `as_uri` explicitly**, exchanges the ticket and
+  retries with the RPT. The client half exists partly to show what §20.3 is protecting: the
+  `as_uri` is chosen by the server you just failed against, and the example refuses to redeem
+  against a host that is not the issuer it already trusts.
+
+- **§20 UMA 2.0 — Protection API and ticket grant (contract 1.10).** New `uma` module:
+  `uma_register_resource` / `uma_read_resource` / `uma_update_resource` /
+  `uma_delete_resource` / `uma_list_resources`, `uma_request_ticket`,
+  `uma_exchange_ticket`, and the `WWW-Authenticate: UMA` challenge helpers
+  (`uma_parse_challenge`, `uma_challenge_header`).
+
+  Two behaviours are load-bearing rather than incidental, and both are asserted at
+  the wire. **`uma_exchange_ticket` never retries** — it is the one documented
+  exception to the §16 retry policy, because a ticket is consumed before the
+  request is evaluated, so a retry cannot succeed and under concurrency is exactly
+  the second redemption that ilpanich/axiam#302's measured residual describes.
+  And **`uma_parse_challenge` does not exchange the ticket it parsed**: the
+  `as_uri` names an authorization server the client has not chosen to trust.
+
+  The PAT is an explicit parameter on every Protection API call rather than being
+  taken from the client's session, because that session is usually a *user*
+  session and a ticket binds to a `client_id`.
+
+- **§19 `TelemetryEvent::ConfigClamped` (contract 1.9).** The SDK now reports a clamped
+  setting at construction rather than applying it silently — currently the §17.1 rule 2 memo
+  TTL. Clamping is right; clamping *silently* is not: an operator who set a 60-second TTL
+  believes their staleness bound is 60 seconds, and it is five. Nothing is emitted for a value
+  already within its limit, or for the disabled default — an event that fires when nothing
+  happened trains its reader to ignore it.
+- **§16 bounded read-only retry policy.** §11.2 rule 5 and §14.2 rule 6 had both been
+  *requiring* retries "under the SDK's existing bounded read-only retry policy" while no
+  such policy existed in the contract; this crate's improvisation was `backon`'s defaults
+  with `with_max_times(2)`. Contract 1.8 wrote the table down and `src/retry.rs`
+  implements it: 3 attempts, 200 ms base, 5 s cap, **full jitter** over `[0, backoff]`,
+  and `Retry-After` honored as a floor. Hand-rolled rather than reconfigured because
+  `backon`'s `with_jitter()` adds a value in `[0, min_delay)` — a much narrower
+  distribution, and partial jitter is what *causes* the thundering herd retries are meant
+  to prevent — and because it has no seam for `Retry-After`. Both non-deterministic inputs
+  are injected, so the tests pin the jitter fraction to 0.0 and 1.0 to prove the range and
+  record delays instead of sleeping.
+- **§18 deterministic shutdown.** `AxiamClient::close()`, idempotent, with use-after-close
+  raising rather than silently reconnecting. It does **not** log out and never reaches the
+  network: the server-side session outlives the client object, and a `close()` that logged
+  out would end every user's session on each deploy.
+- **§19 telemetry hooks.** `AxiamClientBuilder::telemetry_hook` and the `telemetry` module,
+  so callers can wire OpenTelemetry or Prometheus without this crate depending on either.
+  A panicking hook cannot fail the operation that fired it, and `TelemetryEvent` has a
+  closed field set so no payload can carry a token. One request pair per *attempt*, not per
+  logical call, so callers can count real wire calls.
+- **§17 client-side decision memo — opt-in, off by default.**
+  `AxiamClientBuilder::decision_memo_ttl`, TTL clamped to 5 s. Allows and denies are
+  memoized identically (asymmetric caching leaks the outcome through latency), failures
+  are never memoized, and the memo is cleared on any credential change. **Reads-your-own-
+  writes is not guaranteed** — an admin UI that grants a role and immediately re-checks is
+  the case that breaks, and it breaks silently.
+- `AxiamClientBuilder::retry_enabled` (§16.6), default on. There is deliberately no knob
+  for the attempt cap, base or delay cap: §16.1 forbids raising them.
+- `examples/telemetry_hook.rs` — a runnable §19 sink aggregating request counts, latency
+  and retries, with the exact OpenTelemetry mapping alongside it. Running it against an
+  unreachable host prints `count=3` and `retries=2`, which is the §16 attempt cap made
+  observable: without the hook a retried call is indistinguishable from a slow one.
 
 ### Changed
 
+- Re-vendor CONTRACT.md 1.19, openapi.json and proto/ from main (R5.8) (#61)
+- Name the no-401-interceptor invariant at the transport seam (R5.7, F-14) (#60)
+- Contract 1.15 — §10.1 rule 9, sender-constrained access tokens (#58)
+- Drop a needless borrow in the timeout test
+- Rustfmt import order
+- Add the §20.7 required timeout assertion
+- Retire the "measured residual" justification (contract 1.14)
+- Re-sync to contract 1.14 (#302 closed)
+- Bump github/codeql-action from 4.37.4 to 4.37.6
+- Bump Swatinem/rust-cache from 2.9.1 to 2.9.2
+- Bump dtolnay/rust-toolchain
+- Bump taiki-e/install-action from 2.85.5 to 2.85.10
 - **Re-sync vendored `CONTRACT.md`, `openapi.json` and `proto/` to contract 1.19**
   (upstream **R5.8**). The vendored copies had been pinned at the 1.15-era artifacts
   and drifted three contract revisions behind `ilpanich/axiam@main`. All five files are
@@ -321,9 +402,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`profile`, `token_endpoint_auth_method`, the `tls_client_auth_*` parameters,
   certificate binding), RFC 9207 `iss` on authorization responses, and the discovery
   additions. Only rule 9 above is normative for this SDK; the rest is informative.
-
-### Changed
-
 - **Re-sync vendored `CONTRACT.md` / `openapi.json` to contract 1.15.** The spec gains the
   `ClientProfile`, `ClientAuthMethod` and `CnfClaim` schemas and seven client-registration
   fields.
@@ -368,132 +446,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wire*, and the SDK was covering for that with a constant which stopped being the only
   legal value when X4 landed. For a caller who actually held a refresh token, the old default
   traded the `invalid_request` that names the type for a generic `invalid_grant`.
-
-### Added
-
-- **§15.7 external-IdP subject tokens (X4).** `token_exchange` can now exchange a token minted
-  by a trusted external IdP — a partner's Entra, Okta or Keycloak — for an AXIAM token scoped
-  to what the resolved AXIAM user may actually do. No new operation: the same method, plus
-  `TokenExchangeParams::subject_token_type` and the new `JWT_TOKEN_TYPE` constant alongside the
-  existing `ACCESS_TOKEN_TYPE`.
-
-  **The type is the caller's to name, never the SDK's to guess.** §15.7 forbids inspecting the
-  subject token to pick it, because which kind of token you hold is something only you know and
-  a wrong guess is the difference between a request that is refused and one that is silently
-  reinterpreted. A JWT-shaped subject token does **not** change what is sent, which is asserted
-  by a test. (This shipped with an `…:access_token` default; contract 1.13 removed it — see
-  *Changed* above.)
-
-  Also asserted: an `actor_token` alongside an external subject token surfaces `invalid_request`
-  with no retry and no request rewriting; a refused refresh or ID token type is never retried as
-  a different type; the one normative description — `the subject token's issuer is not
-  configured for token exchange`, meaning *fix the AXIAM trust config* rather than *fix your
-  token* — reaches the caller intact; and nothing re-exchanges an exchanged token, which both
-  server paths refuse because exchanges do not compose.
-
-  `CONTRACT.md` and `openapi.json` re-synced from `ilpanich/axiam@main` (contract 1.10 → 1.12
-  plus §15.7), which also brings contract 1.11's lifted §12.6 deferral, contract 1.12's
-  `/oauth2/*` error rows dispatching on the `error` field at any status, and the
-  `TokenExchangeTrust` schemas behind the X4 provider configuration.
-
-- **§20.3 challenge emission wired into the §11 route guard.** `RequireAccess::with_uma_challenge`
-  takes a new `middleware::UmaChallenger`; on denial the guard mints a permission ticket for
-  the action it just refused and returns `WWW-Authenticate: UMA` alongside the 403. New
-  `AuthzGuardError::DeniedWithChallenge` carries the formatted header, because minting is a
-  wire call and `ResponseError::error_response` is synchronous — by the time the variant
-  exists the ticket is already in hand.
-
-  **Opt-in by construction.** Emitting a challenge means minting a credential, so a guard
-  that did it by default would turn every unauthorized request into a Protection API call.
-  And **failure is not escalation**: if minting fails the denial still surfaces as a plain
-  403, because a caller who was going to be refused is refused either way and an outage must
-  not turn a deny into a 500 — still less into an allow.
-
-- **A runnable UMA example pair**: [`examples/uma_resource_server.rs`](examples/uma_resource_server.rs)
-  mints a PAT, registers a resource and guards a route with the challenger;
-  [`examples/uma_client.rs`](examples/uma_client.rs) catches the refusal, parses the
-  challenge, **makes the trust decision about `as_uri` explicitly**, exchanges the ticket and
-  retries with the RPT. The client half exists partly to show what §20.3 is protecting: the
-  `as_uri` is chosen by the server you just failed against, and the example refuses to redeem
-  against a host that is not the issuer it already trusts.
-
-- **§20 UMA 2.0 — Protection API and ticket grant (contract 1.10).** New `uma` module:
-  `uma_register_resource` / `uma_read_resource` / `uma_update_resource` /
-  `uma_delete_resource` / `uma_list_resources`, `uma_request_ticket`,
-  `uma_exchange_ticket`, and the `WWW-Authenticate: UMA` challenge helpers
-  (`uma_parse_challenge`, `uma_challenge_header`).
-
-  Two behaviours are load-bearing rather than incidental, and both are asserted at
-  the wire. **`uma_exchange_ticket` never retries** — it is the one documented
-  exception to the §16 retry policy, because a ticket is consumed before the
-  request is evaluated, so a retry cannot succeed and under concurrency is exactly
-  the second redemption that ilpanich/axiam#302's measured residual describes.
-  And **`uma_parse_challenge` does not exchange the ticket it parsed**: the
-  `as_uri` names an authorization server the client has not chosen to trust.
-
-  The PAT is an explicit parameter on every Protection API call rather than being
-  taken from the client's session, because that session is usually a *user*
-  session and a ticket binds to a `client_id`.
-
-- **§19 `TelemetryEvent::ConfigClamped` (contract 1.9).** The SDK now reports a clamped
-  setting at construction rather than applying it silently — currently the §17.1 rule 2 memo
-  TTL. Clamping is right; clamping *silently* is not: an operator who set a 60-second TTL
-  believes their staleness bound is 60 seconds, and it is five. Nothing is emitted for a value
-  already within its limit, or for the disabled default — an event that fires when nothing
-  happened trains its reader to ignore it.
-
-### Changed
-
 - Re-vendored `CONTRACT.md` at **1.10** and `openapi.json` with the UMA paths.
-
-## [Unreleased]
-
-### Added
-
-- **§16 bounded read-only retry policy.** §11.2 rule 5 and §14.2 rule 6 had both been
-  *requiring* retries "under the SDK's existing bounded read-only retry policy" while no
-  such policy existed in the contract; this crate's improvisation was `backon`'s defaults
-  with `with_max_times(2)`. Contract 1.8 wrote the table down and `src/retry.rs`
-  implements it: 3 attempts, 200 ms base, 5 s cap, **full jitter** over `[0, backoff]`,
-  and `Retry-After` honored as a floor. Hand-rolled rather than reconfigured because
-  `backon`'s `with_jitter()` adds a value in `[0, min_delay)` — a much narrower
-  distribution, and partial jitter is what *causes* the thundering herd retries are meant
-  to prevent — and because it has no seam for `Retry-After`. Both non-deterministic inputs
-  are injected, so the tests pin the jitter fraction to 0.0 and 1.0 to prove the range and
-  record delays instead of sleeping.
-- **§18 deterministic shutdown.** `AxiamClient::close()`, idempotent, with use-after-close
-  raising rather than silently reconnecting. It does **not** log out and never reaches the
-  network: the server-side session outlives the client object, and a `close()` that logged
-  out would end every user's session on each deploy.
-- **§19 telemetry hooks.** `AxiamClientBuilder::telemetry_hook` and the `telemetry` module,
-  so callers can wire OpenTelemetry or Prometheus without this crate depending on either.
-  A panicking hook cannot fail the operation that fired it, and `TelemetryEvent` has a
-  closed field set so no payload can carry a token. One request pair per *attempt*, not per
-  logical call, so callers can count real wire calls.
-- **§17 client-side decision memo — opt-in, off by default.**
-  `AxiamClientBuilder::decision_memo_ttl`, TTL clamped to 5 s. Allows and denies are
-  memoized identically (asymmetric caching leaks the outcome through latency), failures
-  are never memoized, and the memo is cleared on any credential change. **Reads-your-own-
-  writes is not guaranteed** — an admin UI that grants a role and immediately re-checks is
-  the case that breaks, and it breaks silently.
-- `AxiamClientBuilder::retry_enabled` (§16.6), default on. There is deliberately no knob
-  for the attempt cap, base or delay cap: §16.1 forbids raising them.
-- `examples/telemetry_hook.rs` — a runnable §19 sink aggregating request counts, latency
-  and retries, with the exact OpenTelemetry mapping alongside it. Running it against an
-  unreachable host prints `count=3` and `retries=2`, which is the §16 attempt cap made
-  observable: without the hook a retried call is indistinguishable from a slow one.
+- Re-vendored `CONTRACT.md` at **1.8**. `openapi.json` is unchanged — 1.8 is docs-only.
+- `check_access`/`can`/`batch_check` now run under the §16 runner rather than `backon`, so
+  they gain full jitter and `Retry-After` handling. The retry-eligible set is unchanged and
+  remains authz reads only; no mutation became retryable.
 
 ### Removed
 
 - The direct `backon` dependency. Nothing referenced it after §16 landed; it remains in
   the lockfile only as a transitive dependency of `lapin` under the `amqp` feature.
 
-### Changed
+### Fixed
 
-- Re-vendored `CONTRACT.md` at **1.8**. `openapi.json` is unchanged — 1.8 is docs-only.
-- `check_access`/`can`/`batch_check` now run under the §16 runner rather than `backon`, so
-  they gain full jitter and `Retry-After` handling. The retry-eligible set is unchanged and
-  remains authz reads only; no mutation became retryable.
+- Never print the raw UMA challenge header (#53)
 
 ### Notes
 
@@ -511,6 +477,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Enforce the full CONTRACT §10.1 local-verification set
 - Add CONTRACT §13 verify_webhook; trim build-time dependency surface
+- **Conditional issuer/audience expectations (CONTRACT §10.1 rules 5 and 6).**
+  New `JwksVerifier::expect_issuer(impl Into<String>)` and
+  `JwksVerifier::expect_audience(impl Into<String>)`, both optional and unset
+  by default — the rules are explicitly conditional on configuration, and the
+  SDK never hardcodes an expected issuer. When configured, a mismatched value
+  is rejected, and the corresponding claim additionally becomes required (an
+  absent `aud` does not "contain" the expected audience).
+- **`JwksVerifier::verify_signature_only_unchecked`** — the §10.1 raw
+  signature-only primitive, for integrators deliberately implementing their
+  own policy. It verifies the EdDSA signature and *nothing else*: no `exp`,
+  `nbf`, `tenant_id`, `iss` or `aud` check. The `_unchecked` suffix is the
+  contract's reference spelling, chosen so the omission is obvious at the call
+  site. It is not, and must not become, the documented guard entry point.
+- `tests/local_verification_set_test.rs` — the complete §10.1 required
+  negative-test set: expired; no `exp`; non-numeric `exp`; future `nbf`;
+  different tenant; no `tenant_id`; no configured tenant; `alg: none`;
+  HS-signed token bearing the EdDSA `kid`; foreign signature; plus
+  issuer-mismatch and audience-mismatch cases for the newly-configurable
+  expectations, and proof that the raw primitive waves through exactly what
+  the guard rejects.
+- CONTRACT.md in this repository is re-synced with the upstream
+  `ilpanich/axiam` copy: §10.1 is vendored verbatim.
+- **Webhook signature verification (CONTRACT §13, T-145).** New
+  `axiam_sdk::webhook::verify_webhook`: HMAC-SHA256 over `<t>.<raw_body>`,
+  `t=`/`v1=` header parsing with forward-compatible unknown-key tolerance,
+  constant-time comparison over the *decoded* MAC bytes via `subtle`, and a
+  two-sided freshness window defaulting to 300 s (a future-dated timestamp is
+  rejected as well as a stale one). The secret is taken as `Sensitive<String>`
+  (§7) and the typed `WebhookVerifyError` never surfaces the expected
+  signature. Compiled whenever `rest` **or** `amqp` is enabled — both already
+  vendor `hmac`/`sha2`/`hex`/`subtle`, so no new dependency is added.
+- `benches/jwks_verify.rs` — a dependency-free (`harness = false`) micro-benchmark
+  for the SDK's hottest CPU path, per-request access-token verification behind
+  the §10/§11 route guard, including a "floor" row that measures
+  `jsonwebtoken::decode` directly so SDK-side overhead can be read off
+  independently of the Ed25519 cost.
 
 ### Changed
 
@@ -520,8 +522,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump github/codeql-action from 4 to 4.37.4
 - Bump taiki-e/install-action from 2.85.2 to 2.85.5
 - Sync CONTRACT.md §10.1 rule 8 — subject of the decision (#38)
+- **`actix-web` is now depended on with `default-features = false`**
+  (`features = ["cookies", "macros"]`). The SDK only uses `HttpRequest`,
+  `web::Data`, `HttpResponse`, `Responder` and `ResponseError`; actix-web's
+  default set additionally forced its response-compression stack
+  (brotli/zstd/flate2), `h2` 0.3 — a second `h2` major alongside the 0.4 that
+  tonic and reqwest already use — `encoding_rs`, `language-tags`, WebSockets
+  and the `regex`-based router onto every build. A cold
+  `cargo build --all-features` graph drops from 295 to 276 crates, removing
+  roughly 60 s of measured compile work (zstd-sys 15.9 s, h2 0.3 15.7 s,
+  brotli 8.1 s, regex-automata 7.6 s, encoding_rs 7.1 s, language-tags 5.1 s,
+  regex-syntax 3.9 s). This takes nothing away from applications: an app using
+  the `actix`/`macros` features has its own `actix-web` dependency, and Cargo
+  unifies features across the graph.
+- Documented the scope of `[profile.release]` in `Cargo.toml` and README:
+  Cargo honours only the **top-level workspace's** profile tables, so the
+  release-build settings in this repository govern its own examples/benches and
+  are *not* inherited by consumers. README gains a "Release-profile tuning (for
+  consumers)" section with the block to copy into their own manifest, and a
+  "Build-time notes" section identifying `aws-lc-sys` (pulled in by `rustls`'s
+  default crypto provider via both `reqwest` and `lapin`) as the dominant
+  remaining cold-build cost.
 
-## [Unreleased]
+### Removed
+
+- The `[profile.release]` table in `axiam-sdk-macros/Cargo.toml`. Cargo ignores
+  profile tables in non-root workspace members and printed
+  "profiles for the non root package will be ignored" on **every** cargo
+  invocation in this repository; the table had no effect other than that
+  warning. The workspace-root profile already covers both members.
 
 ### Security — BREAKING
 
@@ -576,80 +605,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against yet). No public API changes; no relaxation of any check that
   previously ran on that path.
 
-### Added
-
-- **Conditional issuer/audience expectations (CONTRACT §10.1 rules 5 and 6).**
-  New `JwksVerifier::expect_issuer(impl Into<String>)` and
-  `JwksVerifier::expect_audience(impl Into<String>)`, both optional and unset
-  by default — the rules are explicitly conditional on configuration, and the
-  SDK never hardcodes an expected issuer. When configured, a mismatched value
-  is rejected, and the corresponding claim additionally becomes required (an
-  absent `aud` does not "contain" the expected audience).
-- **`JwksVerifier::verify_signature_only_unchecked`** — the §10.1 raw
-  signature-only primitive, for integrators deliberately implementing their
-  own policy. It verifies the EdDSA signature and *nothing else*: no `exp`,
-  `nbf`, `tenant_id`, `iss` or `aud` check. The `_unchecked` suffix is the
-  contract's reference spelling, chosen so the omission is obvious at the call
-  site. It is not, and must not become, the documented guard entry point.
-- `tests/local_verification_set_test.rs` — the complete §10.1 required
-  negative-test set: expired; no `exp`; non-numeric `exp`; future `nbf`;
-  different tenant; no `tenant_id`; no configured tenant; `alg: none`;
-  HS-signed token bearing the EdDSA `kid`; foreign signature; plus
-  issuer-mismatch and audience-mismatch cases for the newly-configurable
-  expectations, and proof that the raw primitive waves through exactly what
-  the guard rejects.
-- CONTRACT.md in this repository is re-synced with the upstream
-  `ilpanich/axiam` copy: §10.1 is vendored verbatim.
-
-### Added
-
-- **Webhook signature verification (CONTRACT §13, T-145).** New
-  `axiam_sdk::webhook::verify_webhook`: HMAC-SHA256 over `<t>.<raw_body>`,
-  `t=`/`v1=` header parsing with forward-compatible unknown-key tolerance,
-  constant-time comparison over the *decoded* MAC bytes via `subtle`, and a
-  two-sided freshness window defaulting to 300 s (a future-dated timestamp is
-  rejected as well as a stale one). The secret is taken as `Sensitive<String>`
-  (§7) and the typed `WebhookVerifyError` never surfaces the expected
-  signature. Compiled whenever `rest` **or** `amqp` is enabled — both already
-  vendor `hmac`/`sha2`/`hex`/`subtle`, so no new dependency is added.
-- `benches/jwks_verify.rs` — a dependency-free (`harness = false`) micro-benchmark
-  for the SDK's hottest CPU path, per-request access-token verification behind
-  the §10/§11 route guard, including a "floor" row that measures
-  `jsonwebtoken::decode` directly so SDK-side overhead can be read off
-  independently of the Ed25519 cost.
-
-### Changed
-
-- **`actix-web` is now depended on with `default-features = false`**
-  (`features = ["cookies", "macros"]`). The SDK only uses `HttpRequest`,
-  `web::Data`, `HttpResponse`, `Responder` and `ResponseError`; actix-web's
-  default set additionally forced its response-compression stack
-  (brotli/zstd/flate2), `h2` 0.3 — a second `h2` major alongside the 0.4 that
-  tonic and reqwest already use — `encoding_rs`, `language-tags`, WebSockets
-  and the `regex`-based router onto every build. A cold
-  `cargo build --all-features` graph drops from 295 to 276 crates, removing
-  roughly 60 s of measured compile work (zstd-sys 15.9 s, h2 0.3 15.7 s,
-  brotli 8.1 s, regex-automata 7.6 s, encoding_rs 7.1 s, language-tags 5.1 s,
-  regex-syntax 3.9 s). This takes nothing away from applications: an app using
-  the `actix`/`macros` features has its own `actix-web` dependency, and Cargo
-  unifies features across the graph.
-- Documented the scope of `[profile.release]` in `Cargo.toml` and README:
-  Cargo honours only the **top-level workspace's** profile tables, so the
-  release-build settings in this repository govern its own examples/benches and
-  are *not* inherited by consumers. README gains a "Release-profile tuning (for
-  consumers)" section with the block to copy into their own manifest, and a
-  "Build-time notes" section identifying `aws-lc-sys` (pulled in by `rustls`'s
-  default crypto provider via both `reqwest` and `lapin`) as the dominant
-  remaining cold-build cost.
-
-### Removed
-
-- The `[profile.release]` table in `axiam-sdk-macros/Cargo.toml`. Cargo ignores
-  profile tables in non-root workspace members and printed
-  "profiles for the non root package will be ignored" on **every** cargo
-  invocation in this repository; the table had no effect other than that
-  warning. The workspace-root profile already covers both members.
-
 ## [1.0.0-alpha23] - 2026-08-02
 
 ### Changed
@@ -661,75 +616,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add OIDC/SSO relying-party helpers (CONTRACT §12)
-
-### Changed
-
-- Re-sync vendored CONTRACT.md to contract 1.6
-- Update base64 requirement from 0.22 to 0.23
-- Update ed25519-dalek requirement from 2 to 3
-- Update jsonwebtoken requirement from 10 to 11
-- Bump coverallsapp/github-action from 2.3.7 to 2.3.8
-- Bump taiki-e/install-action from 2.84.0 to 2.85.2
-- Re-sync vendored CONTRACT.md to contract 1.5
-
-### Fixed
-
-- Publish the single-flight refresh outcome before vacating the slot
-- Read axiam_refresh from its REFRESH_PATH-scoped URL, not base_url (H8 SDK bench)
-- Disable aud validation in JwksVerifier::verify (H8 SDK bench)
-- Share the single-flight oidc_refresh result (CONTRACT §9 rule 2)
-
-## [Unreleased]
-
-### ⚠ Breaking
-
-This release is **source-breaking for downstream code that constructs
-`AxiamError` variants with struct-expression syntax.** The earlier draft of
-these notes described the §12 work as "additive, not breaking"; that was
-wrong, and this section replaces it.
-
-- **`AxiamError::Auth` gained two fields** (`oauth: Option<OAuthProtocolError>`
-  and `reason: Option<IdTokenFailureReason>`) for CONTRACT.md §12.3 rule 3 and
-  §12.4. Because the variant was not `#[non_exhaustive]`, that addition alone
-  already broke downstream code: every `AxiamError::Auth { message: … }`
-  construction became `E0063` (missing fields) and every exhaustive
-  destructure `AxiamError::Auth { message }` became `E0027`. 33 constructions
-  and 9 patterns inside this repository — including one in a shipped
-  `examples/` file — had to be rewritten. Nothing prevented the same break
-  recurring on the next field addition.
-- **All three variants are now `#[non_exhaustive]`** (`Auth`, `Authz`,
-  `Network`) so that no future field addition can break a consumer again. The
-  cost is a one-time break, taken deliberately at `1.0.0-alpha18`:
-  - **Constructing** a variant from outside this crate with struct-expression
-    syntax is no longer possible (`E0639`). Use the constructors instead — the
-    new `AxiamError::auth`, `AxiamError::authz`, `AxiamError::network`,
-    `AxiamError::network_with_source`, alongside the existing
-    `AxiamError::oauth_protocol_error`, `AxiamError::id_token_invalid`,
-    `AxiamError::from_http_status` and `AxiamError::from_grpc_code`. They cover
-    every shape the SDK itself builds.
-  - **Destructuring** now requires a trailing `..`
-    (`AxiamError::Auth { message, .. }`, `E0638` without it). Patterns that
-    already ended in `..` — including every `matches!(e, AxiamError::Auth { .. })`
-    — are unaffected.
-  - The **enum itself is deliberately *not* `#[non_exhaustive]`**: CONTRACT.md
-    §2 fixes the taxonomy at exactly three error types, so no fourth variant
-    can ever be added and `match`ing all three exhaustively stays valid.
-- **`AxiamClient::oidc_begin` now panics** instead of returning
-  `Err(AxiamError::Network { .. })` when caller-supplied `extra_params` try to
-  override one of the eight SDK-owned authorization query parameters. Per
-  CONTRACT.md §12.1 rule 5 that is a programming error, not a §2 taxonomy
-  outcome; every sibling SDK raises its language's unchecked
-  programming-error type there, and a panic is Rust's equivalent. Correct code
-  cannot trigger it — the condition depends only on parameter names the
-  calling code chooses. Tenant/organization resolution failures remain
-  `AxiamError::Auth` (§12.3 rule 4).
-- **`AxiamClient::sso_complete` now fails** (with `AxiamError::Auth`) when the
-  callback response sets no usable `axiam_access` cookie, where it previously
-  returned `Ok`. This is the same behaviour `login()` has always had, and is
-  required by the post-login session sync described under *Fixed* below.
-
-### Added
-
 - CONTRACT.md §12 OIDC/SSO relying-party helpers (contract 1.4): nine new
   methods directly on `AxiamClient` — `oidc_discover`, `oidc_begin`,
   `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`,
@@ -767,8 +653,29 @@ wrong, and this section replaces it.
   accessor. `Serialize`/`Deserialize` remain deliberately unimplemented.
 - New example `examples/oidc_login.rs`.
 
+### Changed
+
+- Re-sync vendored CONTRACT.md to contract 1.6
+- Update base64 requirement from 0.22 to 0.23
+- Update ed25519-dalek requirement from 2 to 3
+- Update jsonwebtoken requirement from 10 to 11
+- Bump coverallsapp/github-action from 2.3.7 to 2.3.8
+- Bump taiki-e/install-action from 2.84.0 to 2.85.2
+- Re-sync vendored CONTRACT.md to contract 1.5
+- `Sensitive::expose()` is now `pub` (previously `pub(crate)`): §12's
+  `OidcTokenSet` hands `access_token`/`refresh_token`/`id_token` directly to
+  the caller (unlike the §1 cookie-only session), so a relying party needs a
+  way to read them back out to use them. Still the only path to the wrapped
+  value; still never touched by `Debug`/`Display`.
+- Conformance statement updated to "CONTRACT.md §1–§12 (including §6.1
+  mTLS)".
+
 ### Fixed
 
+- Publish the single-flight refresh outcome before vacating the slot
+- Read axiam_refresh from its REFRESH_PATH-scoped URL, not base_url (H8 SDK bench)
+- Disable aud validation in JwksVerifier::verify (H8 SDK bench)
+- Share the single-flight oidc_refresh result (CONTRACT §9 rule 2)
 - **`oidc_refresh` now satisfies CONTRACT.md §9 rule 2 (result sharing).** It
   previously took a bare `tokio::sync::Mutex<()>` with no result slot, so a
   burst of N concurrent callers produced **N serialized wire calls**; because
@@ -827,15 +734,52 @@ wrong, and this section replaces it.
   longer a dead constant — it is the single definition of the wire spelling
   reported in the `invalid_alg` error.
 
-### Changed
+### ⚠ Breaking
 
-- `Sensitive::expose()` is now `pub` (previously `pub(crate)`): §12's
-  `OidcTokenSet` hands `access_token`/`refresh_token`/`id_token` directly to
-  the caller (unlike the §1 cookie-only session), so a relying party needs a
-  way to read them back out to use them. Still the only path to the wrapped
-  value; still never touched by `Debug`/`Display`.
-- Conformance statement updated to "CONTRACT.md §1–§12 (including §6.1
-  mTLS)".
+This release is **source-breaking for downstream code that constructs
+`AxiamError` variants with struct-expression syntax.** The earlier draft of
+these notes described the §12 work as "additive, not breaking"; that was
+wrong, and this section replaces it.
+
+- **`AxiamError::Auth` gained two fields** (`oauth: Option<OAuthProtocolError>`
+  and `reason: Option<IdTokenFailureReason>`) for CONTRACT.md §12.3 rule 3 and
+  §12.4. Because the variant was not `#[non_exhaustive]`, that addition alone
+  already broke downstream code: every `AxiamError::Auth { message: … }`
+  construction became `E0063` (missing fields) and every exhaustive
+  destructure `AxiamError::Auth { message }` became `E0027`. 33 constructions
+  and 9 patterns inside this repository — including one in a shipped
+  `examples/` file — had to be rewritten. Nothing prevented the same break
+  recurring on the next field addition.
+- **All three variants are now `#[non_exhaustive]`** (`Auth`, `Authz`,
+  `Network`) so that no future field addition can break a consumer again. The
+  cost is a one-time break, taken deliberately at `1.0.0-alpha18`:
+  - **Constructing** a variant from outside this crate with struct-expression
+    syntax is no longer possible (`E0639`). Use the constructors instead — the
+    new `AxiamError::auth`, `AxiamError::authz`, `AxiamError::network`,
+    `AxiamError::network_with_source`, alongside the existing
+    `AxiamError::oauth_protocol_error`, `AxiamError::id_token_invalid`,
+    `AxiamError::from_http_status` and `AxiamError::from_grpc_code`. They cover
+    every shape the SDK itself builds.
+  - **Destructuring** now requires a trailing `..`
+    (`AxiamError::Auth { message, .. }`, `E0638` without it). Patterns that
+    already ended in `..` — including every `matches!(e, AxiamError::Auth { .. })`
+    — are unaffected.
+  - The **enum itself is deliberately *not* `#[non_exhaustive]`**: CONTRACT.md
+    §2 fixes the taxonomy at exactly three error types, so no fourth variant
+    can ever be added and `match`ing all three exhaustively stays valid.
+- **`AxiamClient::oidc_begin` now panics** instead of returning
+  `Err(AxiamError::Network { .. })` when caller-supplied `extra_params` try to
+  override one of the eight SDK-owned authorization query parameters. Per
+  CONTRACT.md §12.1 rule 5 that is a programming error, not a §2 taxonomy
+  outcome; every sibling SDK raises its language's unchecked
+  programming-error type there, and a panic is Rust's equivalent. Correct code
+  cannot trigger it — the condition depends only on parameter names the
+  calling code chooses. Tenant/organization resolution failures remain
+  `AxiamError::Auth` (§12.3 rule 4).
+- **`AxiamClient::sso_complete` now fails** (with `AxiamError::Auth`) when the
+  callback response sets no usable `axiam_access` cookie, where it previously
+  returned `Ok`. This is the same behaviour `login()` has always had, and is
+  required by the post-login session sync described under *Fixed* below.
 
 ## [1.0.0-alpha18] - 2026-07-24
 
@@ -863,22 +807,17 @@ wrong, and this section replaces it.
 ### Added
 
 - Add get_user_info (UserInfoGrpcClient)
+- gRPC `get_user_info` (`UserInfoGrpcClient`) — OIDC-style identity read over
+  `axiam.v1.UserInfoService/GetUserInfo` (CONTRACT §1.1). Returns a `UserInfo`
+  with `sub`/`tenant_id`/`org_id` and scope-gated `email`/`preferred_username`,
+  reusing the shared `tonic::Channel`, auth/tenant interceptor, and
+  single-flight refresh guard. Adopts CONTRACT.md 1.3.
 
 ### Changed
 
 - Exclude generated gRPC stubs from the line-coverage gate
 - Expand userinfo coverage above the 89% gate
 - Vendor userinfo.proto + CONTRACT 1.3
-
-## [Unreleased]
-
-### Added
-
-- gRPC `get_user_info` (`UserInfoGrpcClient`) — OIDC-style identity read over
-  `axiam.v1.UserInfoService/GetUserInfo` (CONTRACT §1.1). Returns a `UserInfo`
-  with `sub`/`tenant_id`/`org_id` and scope-gated `email`/`preferred_username`,
-  reusing the shared `tonic::Channel`, auth/tenant interceptor, and
-  single-flight refresh guard. Adopts CONTRACT.md 1.3.
 
 ## [1.0.0-alpha15] - 2026-07-21
 
@@ -900,12 +839,6 @@ wrong, and this section replaces it.
 
 ## [1.0.0-alpha10] - 2026-07-18
 
-### Changed
-
-- Maintenance release — no notable changes since v1.0.0-alpha9.
-
-## [Unreleased]
-
 ### Added
 
 - **Client-certificate / mutual-TLS (mTLS) support (CONTRACT.md §6.1).** New
@@ -920,6 +853,10 @@ wrong, and this section replaces it.
   verification — strict TLS stays on (kept as a separate code path from
   `with_custom_ca`). Malformed cert/key PEM is rejected at construction time.
   The crate now states conformance to "§1–§10 (including §6.1 mTLS)".
+
+### Changed
+
+- Maintenance release — no notable changes since v1.0.0-alpha9.
 
 ## [1.0.0-alpha7] - 2026-07-17
 
