@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **WebAuthn and passkeys — CONTRACT.md §24.** Six relying-party operations on
+  `AxiamClient`: `webauthn_register_start`/`_finish`,
+  `webauthn_authenticate_start`/`_finish`,
+  `webauthn_discoverable_start`/`_finish`. The native build has no
+  authenticator, so §24.6b's linked-API helper is deliberately absent —
+  §24.6b rule 2 forbids emulating one in software. `axiam-sdk-wasm` is the one
+  build that reaches `navigator.credentials`.
+- **The §24.6a JSON bridge.** `WebauthnChallenge::request_json()` produces the
+  exact string a platform authenticator API takes, and
+  `webauthn_response_from_json` accepts the platform's response JSON string —
+  so a service driving an Android or iOS client passes both directions through
+  untouched. Plus `WebauthnFailure::classify`/`message`, which give a
+  server-side caller the same five outcomes a browser sees.
+- **Account lifecycle and MFA enrolment — CONTRACT.md §25.** Nine operations:
+  `mfa_enroll`/`mfa_confirm`, `mfa_setup_enroll`/`mfa_setup_confirm`,
+  `verify_email`, `resend_verification`, `request_password_reset`,
+  `confirm_password_reset`, `password_reset_context`.
+- **Pushed authorization requests — CONTRACT.md §26 (RFC 9126).** `oidc_par`,
+  plus `pushed_authorization_request_endpoint` on `OidcConfiguration`.
+- Examples: `webauthn_relying_party`, `account_lifecycle`, `par_login`.
+
+### Changed
+
+- **`LoginResult` gains `mfa_setup_required` and `setup_token`** (§25.2 rule 1).
+  A tenant that requires MFA answers `403 mfa_setup_required` with a setup token
+  for an account that has none; that used to arrive as `AxiamError::Authz`,
+  telling the caller they lacked permission to log in when what the server said
+  was recoverable and came with the means to recover.
+
+  **Additive, not breaking.** `LoginResult` has always been a struct with flags
+  rather than a discriminated enum, so nothing that reads `mfa_required` has to
+  change — unlike the SDKs whose login result is a union, where the same
+  contract rule adds a variant. A genuine authorization refusal still returns
+  `AxiamError::Authz`: the branch is matched on the body's discriminant, not the
+  status.
+
 ## [1.0.0-alpha37] - 2026-08-21
 
 ### Changed

@@ -187,7 +187,7 @@ fn percent_encode_query_spaces(url: &mut url::Url) {
 
 /// Normalize the requested scope to a space-separated string that always
 /// contains `openid` (§12.1 rule 4). Duplicate entries are collapsed.
-fn normalize_scope(scope: Option<&str>) -> String {
+pub(crate) fn normalize_scope(scope: Option<&str>) -> String {
     let mut seen = BTreeSet::new();
     let mut ordered = Vec::new();
     ordered.push(OPENID_SCOPE.to_string());
