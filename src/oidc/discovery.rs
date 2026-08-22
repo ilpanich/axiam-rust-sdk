@@ -82,6 +82,15 @@ pub struct OidcConfiguration {
     #[serde(default)]
     pub device_authorization_endpoint: Option<String>,
 
+    /// RFC 9126 pushed authorization request endpoint, used by
+    /// [`crate::client::AxiamClient::oidc_par`] (§26.1).
+    ///
+    /// `Option` for the same reason as the two around it, and with the same
+    /// rule: its absence is an error at call time, never a cue to build
+    /// `<issuer>/oauth2/par` by concatenation.
+    #[serde(default)]
+    pub pushed_authorization_request_endpoint: Option<String>,
+
     /// OIDC RP-Initiated Logout 1.0 `end_session_endpoint`, used by
     /// [`crate::client::AxiamClient::logout_url`] (§12.7.2 rule 1).
     ///

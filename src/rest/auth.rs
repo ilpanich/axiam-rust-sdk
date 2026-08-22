@@ -71,6 +71,15 @@ impl std::fmt::Debug for MfaVerifyRequestBody {
     }
 }
 
+/// The `403` body of `POST /api/v1/auth/login` when the tenant requires MFA
+/// and the account has none (CONTRACT.md §25.2).
+#[derive(Deserialize)]
+struct MfaSetupRequiredResponseWire {
+    #[serde(default)]
+    mfa_setup_required: bool,
+    setup_token: String,
+}
+
 #[derive(Debug, Serialize)]
 struct RefreshRequestBody {
     tenant_id: Uuid,
@@ -148,6 +157,24 @@ pub struct LoginResult {
     /// Access token lifetime in seconds, as reported by the server (only
     /// populated on a completed login/verify_mfa).
     pub expires_in: Option<u64>,
+    /// `true` when the tenant requires MFA and this account has none —
+    /// CONTRACT.md §25.2 rule 1.
+    ///
+    /// An **outcome**, not an error. The server answers `403` here with the
+    /// token to finish, and mapping that through §2 to
+    /// [`AxiamError::Authz`] told the caller they lacked permission to log in,
+    /// when what the server said was recoverable and came with the means to
+    /// recover. Pass `setup_token` to [`AxiamClient::mfa_setup_enroll`], show
+    /// the user the URI, then [`AxiamClient::mfa_setup_confirm`], which
+    /// completes this login.
+    ///
+    /// Additive here rather than a new type, because this result has always
+    /// been one struct with flags rather than a discriminated union — so
+    /// nothing that reads `mfa_required` today has to change.
+    pub mfa_setup_required: bool,
+    /// Authorizes the `mfa_setup_enroll`/`mfa_setup_confirm` pair; populated
+    /// only when `mfa_setup_required` is `true`.
+    pub setup_token: Option<Sensitive<String>>,
 }
 
 impl LoginResult {
@@ -158,6 +185,22 @@ impl LoginResult {
             available_methods,
             session_id: None,
             expires_in: None,
+            mfa_setup_required: false,
+            setup_token: None,
+        }
+    }
+
+    /// CONTRACT.md §25.2 rule 1 — the tenant requires MFA and this account has
+    /// none.
+    pub(crate) fn mfa_setup_required(setup_token: String) -> Self {
+        Self {
+            mfa_required: false,
+            challenge_token: None,
+            available_methods: Vec::new(),
+            session_id: None,
+            expires_in: None,
+            mfa_setup_required: true,
+            setup_token: Some(Sensitive::new(setup_token)),
         }
     }
 
@@ -168,6 +211,8 @@ impl LoginResult {
             available_methods: Vec::new(),
             session_id: Some(session_id),
             expires_in: Some(expires_in),
+            mfa_setup_required: false,
+            setup_token: None,
         }
     }
 }
@@ -278,6 +323,24 @@ impl AxiamClient {
                     wire.challenge_token,
                     wire.available_methods,
                 ))
+            }
+            403 => {
+                // CONTRACT.md §25.2 rule 1: a `403` carrying
+                // `mfa_setup_required` is an OUTCOME, not a refusal.
+                //
+                // Matched on the body's own discriminant rather than the
+                // status alone: a genuine authorization refusal is also a
+                // `403`, and only one of the two carries a `setup_token`. The
+                // body is read as text first so a non-matching `403` still
+                // reaches the taxonomy mapper with its message intact.
+                let body = response.text().await.unwrap_or_default();
+                if let Ok(wire) = serde_json::from_str::<MfaSetupRequiredResponseWire>(&body)
+                    && wire.mfa_setup_required
+                    && !wire.setup_token.is_empty()
+                {
+                    return Ok(LoginResult::mfa_setup_required(wire.setup_token));
+                }
+                Err(AxiamError::from_http_status(403, body))
             }
             status => Err(map_error_response(status, response).await),
         }

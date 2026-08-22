@@ -228,6 +228,7 @@ pub fn discovery_document(base_url: &str) -> Value {
             "urn:ietf:params:oauth:grant-type:token-exchange",
         ],
         "device_authorization_endpoint": format!("{base_url}/oauth2/device_authorization"),
+        "pushed_authorization_request_endpoint": format!("{base_url}/oauth2/par"),
         "end_session_endpoint": format!("{base_url}/oauth2/end_session"),
         "backchannel_logout_supported": true,
         "backchannel_logout_session_supported": true,
@@ -243,6 +244,7 @@ pub fn discovery_document_without_optional_endpoints(base_url: &str) -> Value {
     let obj = doc.as_object_mut().expect("discovery is an object");
     obj.remove("device_authorization_endpoint");
     obj.remove("end_session_endpoint");
+    obj.remove("pushed_authorization_request_endpoint");
     doc
 }
 

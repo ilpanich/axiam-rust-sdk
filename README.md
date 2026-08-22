@@ -21,15 +21,16 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22, §23
-(including §6.1 mTLS, the §10.1 minimum local-verification set — **including rule 9,
-sender-constrained tokens** — and §13 webhook signature verification).
+This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22, §23,
+§24, §25, §26 (including §6.1 mTLS, the §10.1 minimum local-verification set — **including
+rule 9, sender-constrained tokens** — and §13 webhook signature verification).
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§12.7, §14, §15, §17, §19, §20 and §22 are named rather than folded into the range because
-they landed after this SDK already claimed §1–§13: widening the range silently would turn a
-statement that was true when written into a different claim without anyone editing it.
+§12.7, §14, §15, §17, §19, §20, §22, §24, §25 and §26 are named rather than folded into the
+range because they landed after this SDK already claimed §1–§13: widening the range silently
+would turn a statement that was true when written into a different claim without anyone
+editing it.
 
 ### Retry policy (§16)
 
@@ -877,6 +878,207 @@ async fn receive(req: HttpRequest, body: web::Bytes) -> HttpResponse {
 The `tolerance` (default 300 s) and a `now` injection seam for tests are both on
 `WebhookVerifyOptions`.
 
+## WebAuthn and passkeys (§24)
+
+A passkey ceremony is **two exchanges stacked**: one with an *authenticator*,
+which needs a platform API, and one with *AXIAM*, which is four ordinary JSON
+round trips. The native build has no authenticator, so it ships the second half.
+
+That is not a consolation prize. A Rust service completing a ceremony that ran on
+an Android or iOS handset is the relying party exactly as a browser is — and
+§24.6b rule 2 forbids the alternative outright: an SDK must not emulate an
+authenticator in software, because a "credential" held in process memory is not a
+second factor. `axiam-sdk-wasm` is the one build that *does* reach an
+authenticator, through `web-sys`.
+
+### The three-step shape
+
+```rust
+let challenge = client.webauthn_discoverable_start(None).await?;
+
+// The JSON form every platform authenticator API takes (§24.6a) — the exact
+// string Android's CreatePublicKeyCredentialRequest and a browser's
+// parseCreationOptionsFromJSON() both want.
+let response_json = your_device_channel(&challenge.request_json())?;
+
+let session = client
+    .webauthn_discoverable_finish(
+        &challenge.state_token,
+        webauthn_response_from_json(&response_json)?,
+    )
+    .await?;
+```
+
+The client is authenticated when that returns — §24.3 rule 1 is not a "MAY
+adopt". `webauthn_register_start`/`_finish` and
+`webauthn_authenticate_start`/`_finish` follow the same shape, for enrolling a
+credential and for a passkey used as a second factor after `login()` set
+`mfa_required`.
+
+The challenge is a `serde_json::Value`, not a modelled struct — precisely so
+there is nothing to normalize through. `webauthn_response_from_json` takes the
+platform's own string; making a caller model one as a Rust struct this SDK
+immediately re-serializes is three chances to corrupt a signed buffer in service
+of nothing.
+
+### What the SDK will not do
+
+**It never adjusts an option.** The server generates the challenge and chooses
+`residentKey`, `userVerification`, the attestation conveyance, the exclusion list
+and the timeout; this SDK carries all of it through unchanged and posts the
+answer back unchanged. Not because those fields are hard — because they are not,
+and relaxing `userVerification` to `"preferred"` because a test authenticator
+kept prompting weakens a ceremony the server believes it configured. The server
+cannot catch it: an assertion produced under weaker options is a valid assertion.
+
+**It never parses `state_token`.** It is opaque, it is `Sensitive`, and it goes
+straight back to the matching `*_finish`.
+
+### Classifying a device's failure
+
+Every platform reports a ceremony failure as one opaque type whose only
+machine-readable part is a name — so a handset can relay just that name, and a
+Rust service can turn it into the same five outcomes a browser would see:
+
+```rust
+let failure = WebauthnFailure::classify(name_relayed_by_the_device);
+if failure == WebauthnFailure::AlreadyRegistered {
+    // the only outcome whose remedy is "use a different device"
+}
+show(failure.message());
+```
+
+`Cancelled` covers **both** an explicit refusal and a silent timeout. The
+WebAuthn spec deliberately refuses to distinguish them, because telling a website
+which one happened leaks whether an authenticator was present — so the copy does
+not accuse anyone of cancelling, and the distinction must not be recovered by
+timing the call.
+
+### Two error rows that are not the generic mapping
+
+- A **`403` on `webauthn_register_finish`** is the tenant's attestation policy
+  refusing *this authenticator* — an AAGUID that is not allow-listed, a missing
+  FIDO certification, a revoked status — not a permission problem with the user.
+  The policy message survives into `AxiamError::Authz`, because it is the only
+  way the person holding the key learns a different one would work.
+- A **`503` on `webauthn_register_start`** means attestation is required and the
+  FIDO metadata service has no usable snapshot. A server configuration state, not
+  a transient failure, and deliberately **not** retried.
+
+Worked example: [`examples/webauthn_relying_party.rs`](examples/webauthn_relying_party.rs).
+
+## Account lifecycle and MFA enrolment (§25)
+
+§1 locks the *middle* of an account's life — `login`, `verify_mfa`, `refresh`,
+`logout` all assume an account that already exists, is verified, and already has
+its second factor. These nine operations are how it gets there.
+
+```rust
+let enrolment = client.mfa_enroll().await?;
+render_qr(enrolment.totp_uri.expose());
+let enabled = client.mfa_confirm(code_typed_by_user).await?;
+```
+
+`secret_base32` and `totp_uri` are both `Sensitive`, and the URI is the one that
+matters: it *is* `otpauth://…?secret=…`, so it contains the secret it sits beside.
+Wrapping only the secret would have wrapped nothing — the URI is the field that
+actually reaches a log, because it is the field you hand to a QR renderer.
+
+### `login()` has a third outcome
+
+`LoginResult` gains `mfa_setup_required` and `setup_token`. The server has always
+been able to answer `403 mfa_setup_required` for an account in a tenant that
+requires MFA; it used to reach you as `AxiamError::Authz`, saying you lacked
+permission to log in when what the server said was recoverable.
+
+```rust
+let result = client.login(email, password).await?;
+if result.mfa_setup_required {
+    let setup_token = result.setup_token.as_ref().expect("populated by §25.2 rule 1");
+    let enrolment = client.mfa_setup_enroll(setup_token).await?;
+    render_qr(enrolment.totp_uri.expose());
+    client.mfa_setup_confirm(setup_token, code).await?;   // completes the login
+}
+```
+
+Additive here rather than a new type, because `LoginResult` has always been one
+struct with flags rather than a discriminated enum — so nothing that reads
+`mfa_required` today has to change. A genuine authorization refusal is still
+`AxiamError::Authz`: the branch is matched on the body's discriminant, not the
+`403` alone.
+
+### Email verification and password reset
+
+```rust
+client.verify_email(&token, tenant_id).await?;
+client.resend_verification(email, tenant_id).await?;
+client.request_password_reset(&PasswordResetRequest { email, ..Default::default() }).await?;
+```
+
+`request_password_reset` returns `Ok(())` **whether or not the address exists**,
+and this SDK exposes no way to tell them apart. Any signal distinguishing them —
+including one inferred from timing — turns the endpoint into the account
+enumeration oracle its uniform response exists to prevent.
+
+Setting the new password takes one extra call on any tenant that might have
+OPAQUE enabled, because the client has to build a registration record and cannot
+know the parameters before it has a token to ask with:
+
+```rust
+let context = client.password_reset_context(&token).await?;
+client.confirm_password_reset(&PasswordResetConfirmation {
+    token, new_password, tenant_id,
+    opaque: /* build a §23 record when context.opaque is Some */ None,
+}).await?;
+```
+
+The context discloses no identity, and a `404` covers unknown, expired and
+already-consumed without distinguishing them.
+
+Worked example: [`examples/account_lifecycle.rs`](examples/account_lifecycle.rs).
+
+## Pushed authorization requests (§26)
+
+PAR (RFC 9126) moves the authorization request off the browser: the client POSTs
+`scope`, `redirect_uri`, `state` and the PKCE challenge straight to AXIAM over an
+authenticated back channel and puts an opaque `request_uri` in the redirect, so
+what travels through the user agent is a random string that cannot be edited into
+meaning something else.
+
+Required for a FAPI 2.0 client — `profile: "fapi2"` refuses a registration that
+does not set `require_par`.
+
+```rust
+let configuration = client.oidc_discover().await?;
+let request = client.oidc_begin(&configuration, OidcBeginParams {
+    redirect_uri: redirect_uri.clone(), scope: Some("openid profile".into()), ..Default::default()
+})?;
+
+let pushed = client.oidc_par(OidcParParams {
+    request, redirect_uri: redirect_uri.clone(), scope: Some("openid profile".into()),
+    tenant_id: None, configuration: Some(configuration),
+}).await?;
+redirect(&pushed.url);
+```
+
+`oidc_begin` still does the computing — there is no second generator for `state`,
+`nonce` and PKCE — and `pushed.code_verifier` is the one it produced, so there is
+exactly one value to keep.
+
+Three things that are easy to get wrong:
+
+1. **The endpoint answers `201`, not `200`.** RFC 9126 §2.2 specifies Created, and
+   a success predicate written `== 200` treats every successful push as a failure.
+2. **The authorization URL carries exactly `client_id` and `request_uri`.** The
+   server *refuses* a request mixing a `request_uri` with inline authorization
+   parameters rather than merging them, and re-adding them "for compatibility"
+   restores the parameter-confusion attack the refusal prevents.
+3. **`request_uri` is single-use and short-lived.** There is nothing to retry with
+   it; the safe recovery is a fresh push. `oidc_par` is correspondingly never
+   retried on a `5xx` or a transport failure — it is a POST that creates state.
+
+Worked example: [`examples/par_login.rs`](examples/par_login.rs).
+
 ## OPAQUE (§23)
 
 `login_opaque` proves the password without sending it. What crosses the wire is
@@ -971,6 +1173,11 @@ The browser build is REST + OPAQUE only: gRPC and AMQP need sockets, and mTLS an
 custom CA roots belong to the browser rather than to page script (both return a
 typed error rather than being silently ignored). See that package's README for
 the full list and for the CORS requirement that comes with `HttpOnly` cookies.
+
+It is also the one build of this SDK that can run a **WebAuthn ceremony**
+(§24.6b): `navigator.credentials` is reachable there through `web-sys`, where the
+native build has no authenticator at all and ships the relying-party layer plus
+the §24.6a JSON bridge instead.
 
 ## Security notes
 

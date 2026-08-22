@@ -287,6 +287,21 @@ required-features = ["rest"]
 name = "rest_check_access"
 required-features = ["rest"]
 
+# CONTRACT.md §24 WebAuthn relying-party layer demonstration.
+[[example]]
+name = "webauthn_relying_party"
+required-features = ["rest"]
+
+# CONTRACT.md §25 account lifecycle and MFA enrolment demonstration.
+[[example]]
+name = "account_lifecycle"
+required-features = ["rest"]
+
+# CONTRACT.md §26 pushed authorization requests demonstration.
+[[example]]
+name = "par_login"
+required-features = ["rest"]
+
 [[example]]
 name = "grpc_check_access"
 required-features = ["rest", "grpc"]
