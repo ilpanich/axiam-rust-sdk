@@ -465,3 +465,104 @@ impl AxiamClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // §7 rule 3: a request body that carries a credential renders it as
+    // `[REDACTED]`. These five types are `Serialize` but hand-write `Debug`
+    // precisely so a `tracing` span or a `dbg!` left in a caller's code cannot
+    // spill them — a guard nobody exercises is a guard that quietly rots.
+
+    #[test]
+    fn totp_code_body_debug_redacts_the_code() {
+        let rendered = format!(
+            "{:?}",
+            TotpCodeBody {
+                totp_code: "654321".into()
+            }
+        );
+        assert!(!rendered.contains("654321"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+    }
+
+    #[test]
+    fn setup_token_body_debug_redacts_the_token() {
+        let rendered = format!(
+            "{:?}",
+            SetupTokenBody {
+                setup_token: "setup-token-abc".into()
+            }
+        );
+        assert!(!rendered.contains("setup-token-abc"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+    }
+
+    #[test]
+    fn setup_confirm_body_debug_redacts_both_secrets() {
+        let rendered = format!(
+            "{:?}",
+            SetupConfirmBody {
+                setup_token: "setup-token-abc".into(),
+                totp_code: "123456".into(),
+            }
+        );
+        assert!(!rendered.contains("setup-token-abc"), "{rendered}");
+        assert!(!rendered.contains("123456"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+    }
+
+    #[test]
+    fn verify_email_body_debug_redacts_the_token_but_keeps_the_tenant() {
+        let tenant_id = Uuid::nil();
+        let rendered = format!(
+            "{:?}",
+            VerifyEmailBody {
+                token: "verify-token-xyz".into(),
+                tenant_id
+            }
+        );
+        assert!(!rendered.contains("verify-token-xyz"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        // The tenant is not a secret, and a redaction that hides it makes the
+        // diagnostic useless.
+        assert!(rendered.contains(&tenant_id.to_string()), "{rendered}");
+    }
+
+    #[test]
+    fn reset_confirm_body_debug_redacts_the_token_and_the_new_password() {
+        let tenant_id = Uuid::nil();
+        let rendered = format!(
+            "{:?}",
+            ResetConfirmBody {
+                token: "reset-token-xyz".into(),
+                new_password: "hunter2-super-secret".into(),
+                tenant_id,
+                opaque: None,
+            }
+        );
+        assert!(!rendered.contains("reset-token-xyz"), "{rendered}");
+        assert!(!rendered.contains("hunter2-super-secret"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(rendered.contains(&tenant_id.to_string()), "{rendered}");
+    }
+
+    // §25.4: the OPAQUE envelope rides through untouched. It is an evaluated
+    // element and a masked response, not a password — visible in a diagnostic
+    // is exactly where it belongs, and hiding it would make the one field an
+    // integrator has to debug the one field they cannot see.
+    #[test]
+    fn reset_confirm_body_debug_keeps_the_opaque_envelope_visible() {
+        let rendered = format!(
+            "{:?}",
+            ResetConfirmBody {
+                token: "reset-token-xyz".into(),
+                new_password: String::new(),
+                tenant_id: Uuid::nil(),
+                opaque: Some(serde_json::json!({ "record": "opaque-record-b64" })),
+            }
+        );
+        assert!(rendered.contains("opaque-record-b64"), "{rendered}");
+    }
+}

@@ -233,3 +233,70 @@ impl AxiamClient {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // §12.3 rule 4: a confidential client's secret travels in the PAR form, so
+    // the form's `Debug` must not render it. The other eight fields stay
+    // visible — every one of them is about to appear in a redirect URL or in
+    // the server's own logs, and a form that renders as nothing but
+    // `[REDACTED]` is a form nobody can debug.
+    #[test]
+    fn par_form_debug_redacts_only_the_client_secret() {
+        let rendered = format!(
+            "{:?}",
+            ParForm {
+                client_id: "client-abc",
+                response_type: "code",
+                redirect_uri: "https://rp.example/callback",
+                scope: "openid profile",
+                state: "state-value",
+                nonce: "nonce-value",
+                code_challenge: "challenge-value",
+                code_challenge_method: CODE_CHALLENGE_METHOD_S256,
+                client_secret: Some("super-secret-value"),
+            }
+        );
+        assert!(!rendered.contains("super-secret-value"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        for visible in [
+            "client-abc",
+            "https://rp.example/callback",
+            "openid profile",
+            "state-value",
+            "nonce-value",
+            "challenge-value",
+            CODE_CHALLENGE_METHOD_S256,
+        ] {
+            assert!(
+                rendered.contains(visible),
+                "{visible} missing from {rendered}"
+            );
+        }
+    }
+
+    // A public client has no secret, and the render says `None` rather than
+    // `[REDACTED]` — the two are different facts and a reader of the log needs
+    // to be able to tell them apart.
+    #[test]
+    fn par_form_debug_distinguishes_a_public_client_from_a_redacted_secret() {
+        let rendered = format!(
+            "{:?}",
+            ParForm {
+                client_id: "client-abc",
+                response_type: "code",
+                redirect_uri: "https://rp.example/callback",
+                scope: "openid",
+                state: "state-value",
+                nonce: "nonce-value",
+                code_challenge: "challenge-value",
+                code_challenge_method: CODE_CHALLENGE_METHOD_S256,
+                client_secret: None,
+            }
+        );
+        assert!(rendered.contains("None"), "{rendered}");
+        assert!(!rendered.contains("[REDACTED]"), "{rendered}");
+    }
+}

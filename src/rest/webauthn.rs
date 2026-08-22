@@ -574,3 +574,45 @@ impl WebauthnFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // §24.2: `state_token` is the ceremony's bearer handle — whoever holds it
+    // can finish the ceremony — so §7 rule 3 applies to it exactly as it does
+    // to a password, and these bodies hand-write `Debug` to say so.
+
+    #[test]
+    fn register_finish_body_debug_redacts_the_state_token() {
+        let rendered = format!(
+            "{:?}",
+            RegisterFinishBody {
+                state_token: "state-token-abc".into(),
+                credential_name: "Alice's laptop".into(),
+                response: serde_json::json!({ "id": "credential-id" }),
+            }
+        );
+        assert!(!rendered.contains("state-token-abc"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        // The name and the authenticator response are not secrets: §24.0 hands
+        // the response through untouched, and a redaction here would hide the
+        // one field an integrator debugging a rejected attestation needs.
+        assert!(rendered.contains("Alice's laptop"), "{rendered}");
+        assert!(rendered.contains("credential-id"), "{rendered}");
+    }
+
+    #[test]
+    fn finish_body_debug_redacts_the_state_token() {
+        let rendered = format!(
+            "{:?}",
+            FinishBody {
+                state_token: "state-token-abc".into(),
+                response: serde_json::json!({ "id": "credential-id" }),
+            }
+        );
+        assert!(!rendered.contains("state-token-abc"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(rendered.contains("credential-id"), "{rendered}");
+    }
+}
