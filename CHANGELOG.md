@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-vendor `CONTRACT.md`. Repairs §14.1's link to the `device_login` heading,
+  which dropped a hyphen the em dash leaves behind and so rendered as a link
+  that went nowhere; the same heading's other two links were already correct.
+  Link target only — no normative change and no contract-version bump.
+
 - Re-vendor `openapi.json` at **1.0.0-alpha38**. The server registered the four
   GDPR data-subject endpoints (`POST /api/v1/account/export`,
   `GET /api/v1/account/export/{token}`, `POST /api/v1/account/delete`,
