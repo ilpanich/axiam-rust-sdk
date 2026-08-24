@@ -17,7 +17,42 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 - **Registry:** [crates.io/crates/axiam-sdk](https://crates.io/crates/axiam-sdk) _(reserved, not yet published)_
 - **API docs:** [docs.rs/axiam-sdk](https://docs.rs/axiam-sdk) — built automatically by docs.rs on each release
 - **License:** Apache-2.0
-- **MSRV:** Rust 1.88 (`rust-version = "1.88"` in `Cargo.toml`, enforced in CI)
+- **MSRV:** Rust 1.88 (`rust-version = "1.88"` in `Cargo.toml`, enforced in CI) — see [Supported Rust versions](#supported-rust-versions)
+
+## Supported Rust versions
+
+| | Toolchain | Why this one |
+|---|---|---|
+| **Floor** | 1.88 | `rust-version` in `Cargo.toml`. Exposed as `supported_versions::MIN_RUST_VERSION`. Edition 2024 sets the hard lower bound at 1.85. |
+| **Newest** | `stable` | Tracked, not pinned. Exposed as `supported_versions::NEWEST_TESTED`. |
+
+**The crate is built against the floor, and against current stable.** The gating
+matrix in `sdk-ci-rust.yml` runs the full suite on **both** (D-10). Style gates —
+`cargo fmt`, `clippy -D warnings` — run on stable only, deliberately: clippy's lint
+set grows with every release, so running it under the pinned MSRV compiler would turn
+each new lint into a spurious MSRV-job failure. The MSRV job's job is to prove the
+crate still *compiles* on 1.88.
+
+Rust enforces the floor better than most ecosystems do, and there is genuinely
+nothing to preflight there: `rust-version` is a hard constraint Cargo checks during
+resolution, so a consumer on an older toolchain gets a message naming this crate and
+the version it needs, rather than a compile error deep in someone else's source.
+
+The upper end has no enforcement anywhere, because there is no "maximum Rust" to
+declare. Code that compiles on the MSRV keeps compiling on newer toolchains almost
+always — and "almost" is where new `deny`-by-default lints and tightened inference
+live. Only a build on a current toolchain settles it, which is what the `stable` leg
+is for.
+
+The upper leg tracks `stable` rather than a pinned version on purpose. Pinning would
+freeze the newest end at whatever was current the day it was written and quietly stop
+testing anything after that, while still looking like a two-legged matrix.
+`tests/version_policy.rs` asserts it stays `stable`, along with everything else here
+— and additionally that the MSRV is high enough for the declared edition, since those
+two are set independently in the same file and lowering one without the other
+produces a manifest promising a toolchain the edition cannot compile on.
+
+See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 

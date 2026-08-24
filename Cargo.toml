@@ -273,6 +273,11 @@ strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
 name = "login_mfa"
 required-features = ["rest"]
 
+# No required-features: the supported-version surface is part of the crate root, so
+# this example must build in the same minimal configuration a consumer might use.
+[[example]]
+name = "version_compatibility"
+
 # CONTRACT.md §23 OPAQUE demonstration.
 [[example]]
 name = "opaque_login"

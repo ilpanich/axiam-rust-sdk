@@ -132,3 +132,46 @@ pub use axiam_sdk_macros::{require_access, require_auth, require_role};
 // would be a dependency for nothing.
 #[cfg(feature = "reactor-macros")]
 pub use axiam_sdk_macros::reactor_handler;
+
+/// The range of Rust toolchains this SDK is built and tested against.
+///
+/// The floor enforces itself, and does so well: `rust-version` in `Cargo.toml` is a
+/// hard constraint Cargo checks during resolution, so a consumer on an older
+/// toolchain gets a message naming the crate and the version it needs rather than a
+/// compile error deep in someone else's source.
+///
+/// Nothing enforces the upper end, and nothing can — there is no "maximum Rust" to
+/// declare. Code that compiles on the MSRV keeps compiling on newer toolchains
+/// almost always, but "almost" is where new `deny`-by-default lints, tightened
+/// inference, and edition-adjacent behaviour changes live. Only a build on a current
+/// toolchain settles it.
+///
+/// This SDK has gated on both ends since it was written (D-10), which is why it was
+/// the model the other ten AXIAM SDKs were brought in line with. These constants make
+/// the range readable from code, matching the equivalent surface those SDKs now
+/// expose.
+///
+/// `tests/version_policy.rs` asserts both against `Cargo.toml` and the CI matrix, so
+/// neither can go stale.
+pub mod supported_versions {
+    /// The minimum supported Rust version, mirroring `rust-version` in `Cargo.toml`.
+    ///
+    /// Cargo refuses to build the crate on anything older.
+    pub const MIN_RUST_VERSION: &str = "1.88";
+
+    /// The Rust edition the crate is compiled under.
+    ///
+    /// The edition is a per-crate choice and does not constrain consumers — a 2024
+    /// edition crate is usable from a 2015 edition one — but it does set the MSRV
+    /// floor, since edition 2024 requires Rust 1.85 or newer.
+    pub const EDITION: &str = "2024";
+
+    /// The newest toolchain the CI matrix builds.
+    ///
+    /// `"stable"` rather than a pinned number, deliberately: pinning would freeze
+    /// the upper end at whatever was current the day it was written and quietly stop
+    /// testing anything new. Tracking `stable` means the newest leg keeps moving on
+    /// its own, and a regression introduced by a Rust release surfaces here rather
+    /// than in a consumer's build.
+    pub const NEWEST_TESTED: &str = "stable";
+}
