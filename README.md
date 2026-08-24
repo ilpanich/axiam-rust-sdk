@@ -1115,9 +1115,25 @@ let result = match client.login_opaque(user, password).await {
 };
 ```
 
-Do **not** fall back on any other error. A failed exchange is a failed login,
-and retrying it over `login()` would hand the plaintext to a server that just
-failed to prove it holds the record.
+Do **not** fall back on any other error — and you no longer need to for the
+one case where a fallback is correct. `login/start` reports the tenant's
+`opaque_mode`, and CONTRACT.md §23.4 rule 7 makes `login_opaque` act on it when
+the exchange fails:
+
+- `optional` — the mid-migration state. Every account has no OPAQUE record
+  until its password is next set, so a failed exchange is the ordinary case
+  rather than a wrong password. `login_opaque` retries over `login()` itself
+  with the same credentials and returns that call's outcome, so most of a
+  tenant can still sign in.
+- `required`, an unrecognised mode, or a server too old to report one — the
+  failure is final and comes back as an `AuthError`. No plaintext password goes
+  on the wire; `required` answers `403 opaque_required` for every principal
+  anyway.
+
+In both cases no `KE3` is ever sent once the envelope fails. `mode` is **not**
+downgrade protection — a hostile server that wanted the plaintext could just
+answer `404` and take the fallback above. What closes that is `required`,
+server-side.
 
 ### Enrolment
 

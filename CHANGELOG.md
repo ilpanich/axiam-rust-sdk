@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **OPAQUE `login/start` now reports the tenant's mode, and §23.4 rule 7 acts
+  on it.** The response gained an optional `mode` field carrying `opaque_mode`
+  — `"optional"` or `"required"`, never `"disabled"` (that path still answers
+  `404`). When `KE2` fails to open, `login_opaque` still sends no `KE3`, but
+  what it does next now depends on that field and on nothing else: under
+  `optional` it retries over `POST /api/v1/auth/login` with the same
+  credentials and returns that call's outcome; under `required`, an
+  unrecognised value, or no `mode` at all (a server older than the field) the
+  failure stays an `AuthError` and the plaintext path is never tried. Without
+  the `optional` clause, enabling `optional` locked out every user of a tenant
+  mid-migration — every account has no OPAQUE record until its password is
+  next set, so the exchange fails for all of them. `mode` is **not** downgrade
+  protection and is not documented as such: a hostile server wanting the
+  plaintext could simply answer `404`.
+- Re-vendor `CONTRACT.md` at 1.29 and `openapi.json` at 1.0.0-alpha40.
+
 ## [1.0.0-alpha40] - 2026-08-23
 
 ### Changed
