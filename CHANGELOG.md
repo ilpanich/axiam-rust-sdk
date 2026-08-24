@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [1.0.0-alpha41] - 2026-08-24
 
 ### Added
@@ -14,11 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Re-vendor openapi.json for the vault_pki CA custodian (axiam#368)
+
 - Re-vendor CONTRACT.md 1.29 and openapi.json 1.0.0-alpha40
-
-## [Unreleased]
-
-### Changed
 
 - **Re-vendor `openapi.json`** for AXIAM server PR #368, which adds a third CA
   key custodian, `vault_pki`, having HashiCorp Vault's PKI secrets engine
@@ -72,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next set, so the exchange fails for all of them. `mode` is **not** downgrade
   protection and is not documented as such: a hostile server wanting the
   plaintext could simply answer `404`.
+
 - Re-vendor `CONTRACT.md` at 1.29 and `openapi.json` at 1.0.0-alpha40.
 
 ## [1.0.0-alpha40] - 2026-08-23
@@ -93,15 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add WebAuthn (§24), account lifecycle (§25) and PAR (§26)
 
-### Changed
-
-- Test the redacting Debug impls on the new request bodies
-- Re-vendor CONTRACT.md at 1.28
-
-## [Unreleased]
-
-### Added
-
 - **WebAuthn and passkeys — CONTRACT.md §24.** Six relying-party operations on
   `AxiamClient`: `webauthn_register_start`/`_finish`,
   `webauthn_authenticate_start`/`_finish`,
@@ -109,21 +100,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticator, so §24.6b's linked-API helper is deliberately absent —
   §24.6b rule 2 forbids emulating one in software. `axiam-sdk-wasm` is the one
   build that reaches `navigator.credentials`.
+
 - **The §24.6a JSON bridge.** `WebauthnChallenge::request_json()` produces the
   exact string a platform authenticator API takes, and
   `webauthn_response_from_json` accepts the platform's response JSON string —
   so a service driving an Android or iOS client passes both directions through
   untouched. Plus `WebauthnFailure::classify`/`message`, which give a
   server-side caller the same five outcomes a browser sees.
+
 - **Account lifecycle and MFA enrolment — CONTRACT.md §25.** Nine operations:
   `mfa_enroll`/`mfa_confirm`, `mfa_setup_enroll`/`mfa_setup_confirm`,
   `verify_email`, `resend_verification`, `request_password_reset`,
   `confirm_password_reset`, `password_reset_context`.
+
 - **Pushed authorization requests — CONTRACT.md §26 (RFC 9126).** `oidc_par`,
   plus `pushed_authorization_request_endpoint` on `OidcConfiguration`.
+
 - Examples: `webauthn_relying_party`, `account_lifecycle`, `par_login`.
 
 ### Changed
+
+- Test the redacting Debug impls on the new request bodies
+
+- Re-vendor CONTRACT.md at 1.28
 
 - Re-vendor `CONTRACT.md`. Repairs §14.1's link to the `device_login` heading,
   which dropped a hyphen the em dash leaves behind and so rendered as a link
@@ -137,6 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operations across 121 paths. Purely additive, and no SDK surface changes with
   it: nothing in this repo is generated from the spec, so the cross-repo
   artifact-drift gate was the only thing reporting `STALE`.
+
 - Re-vendor `vendor/axiam-opaque/src/lib.rs`. Doc-comment only — the crate-level
   doctest stopped using a hardcoded password literal — but the drift gate compares
   blob hashes, so a doc change drifts exactly like a behavioural one.
@@ -156,11 +156,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0-alpha37] - 2026-08-21
 
+### Added
+
+- An `axiam-sdk-wasm` README section for readers arriving from 1.0.0-alpha31
+  or earlier, mapping `loginSrp`/`srpEnrollment`/`srpAvailable` onto their
+  OPAQUE replacements and saying plainly that a verifier does not migrate into
+  a record.
+
 ### Changed
 
 - Get the OPAQUE README onto the npm package page
-
-## [Unreleased]
 
 ### Fixed
 
@@ -172,23 +177,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release workflow now publishes each prerelease to `latest` rather than to a
   channel tag nobody reads; once 1.0.0 ships, prereleases go back to their own
   channel and never displace it.
+
 - `axiam-sdk-wasm`'s quickstart called `init()`. The published package is
   wasm-pack's `bundler` target, which has no default export to call — that
   form belongs to the `web` target, and is now shown where the `web` target is
   built. Same fix in the crate doc comment, which becomes the shipped
   `.d.ts`.
+
 - `axiam-sdk-wasm`'s README listed local JWKS verification and the §12 OIDC
   relying-party helpers among what the module offers. Neither crosses the wasm
   boundary; they are in the "what is not, and why" table now, with the reason
   (session tokens are `HttpOnly` cookies, so page script holds no token to
   verify).
-
-### Added
-
-- An `axiam-sdk-wasm` README section for readers arriving from 1.0.0-alpha31
-  or earlier, mapping `loginSrp`/`srpEnrollment`/`srpAvailable` onto their
-  OPAQUE replacements and saying plainly that a verifier does not migrate into
-  a record.
 
 ## [1.0.0-alpha36] - 2026-08-21
 
