@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`axiam_sdk::supported_versions`** — `MIN_RUST_VERSION`, `EDITION` and
+  `NEWEST_TESTED`, making the supported range readable from code. This crate already
+  gated on both ends of that range (D-10, `toolchain: ["1.88", stable]`), which is why
+  it was the model the other ten AXIAM SDKs were brought in line with; this adds the
+  readable surface those SDKs now expose, so the family is consistent.
+
+- **`tests/version_policy.rs`** — binds `rust-version`, `edition`, the CI matrix and
+  the three constants together.
+
+  Two of its assertions are worth more than the parity checks. It asserts the upper
+  leg stays **`stable` rather than a pinned version**, because pinning would freeze
+  the newest end at whatever was current the day someone wrote it and quietly stop
+  testing anything after that — while still looking like a two-legged matrix. And it
+  asserts the **MSRV is high enough for the declared edition** (2024 needs 1.85+),
+  since those are set independently in the same file and lowering one without the
+  other yields a manifest promising a toolchain the edition cannot compile on.
+
+- **`examples/version_compatibility`** — reports the supported range and how to build
+  against either end. Declared with no `required-features`, so it builds in the same
+  minimal configuration a consumer might use.
+
+- **A "Supported Rust versions" section in the README**, stating why the floor needs
+  no preflight (Cargo enforces `rust-version` during resolution) and why the upper end
+  cannot be enforced at all.
+
+### Changed
+
+- Nothing in the build or the CI matrix. `rust-version`, `edition` and
+  `toolchain: ["1.88", stable]` are all unchanged — this crate was already correct,
+  and the additions above only make that state legible and hard to drift out of.
+
 ## [1.0.0-alpha41] - 2026-08-24
 
 ### Added
