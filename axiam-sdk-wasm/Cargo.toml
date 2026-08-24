@@ -13,7 +13,7 @@
 # host. `wasm-pack` is pointed at this directory instead.
 [package]
 name = "axiam-sdk-wasm"
-version = "1.0.0-alpha41"
+version = "1.0.0-alpha42"
 edition = "2024"
 rust-version = "1.88"
 description = "Browser (WebAssembly) build of the official AXIAM IAM client SDK"
