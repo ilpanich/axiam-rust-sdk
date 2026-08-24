@@ -132,6 +132,18 @@ struct LoginStartRequest {
 struct LoginStartResponse {
     opaque_session: String,
     ke2: String,
+    /// The tenant's `opaque_mode` — `"optional"` or `"required"`, never
+    /// `"disabled"` (that path answers `404`). Absent from a server older than
+    /// the field, which §23.4 rule 7 treats as `"required"`.
+    ///
+    /// This is the *only* thing an SDK does with the field, and it is
+    /// deliberately **not** downgrade protection: a hostile server that wanted
+    /// the plaintext could simply answer `404` and get the fallback whatever it
+    /// put here. What closes that is `required` server-side, which refuses
+    /// `/auth/login` for every principal in the tenant before examining any
+    /// credential.
+    #[serde(default)]
+    mode: Option<String>,
     #[serde(flatten)]
     ksf: KsfFields,
 }
@@ -208,6 +220,17 @@ impl AxiamClient {
     /// * `AuthError` for a wrong password, an account that does not exist, and
     ///   a server that does not hold the record — indistinguishable by design.
     ///   Nothing is sent to `login/finish` in that case (§23.4 rule 7).
+    ///
+    /// # When the exchange fails under `opaque_mode = optional`
+    ///
+    /// `login/start` reports the tenant's mode, and under `optional` a failed
+    /// exchange is not a failed login: every account has no OPAQUE record
+    /// until its password is next set, so mid-migration most of a tenant
+    /// cannot complete this handshake at all. This method therefore retries
+    /// over [`AxiamClient::login`] with the same credentials and returns that
+    /// call's outcome, so a caller needs no fallback of its own. Under
+    /// `required` — and against a server too old to report a mode — there is
+    /// no retry and the failure is final.
     pub async fn login_opaque(
         &self,
         username_or_email: &str,
@@ -249,10 +272,15 @@ impl AxiamClient {
 
         // The whole of the client's authentication check. A failure here covers
         // both halves of the mutual authentication, and nothing further may be
-        // sent.
-        let finished = state
-            .finish(password, &started.ke2, &ksf)
-            .map_err(|_| AxiamError::auth("invalid credentials"))?;
+        // sent: no `KE3` leaves this process on any path below (§23.4 rule 7).
+        let finished = match state.finish(password, &started.ke2, &ksf) {
+            Ok(finished) => finished,
+            Err(_) => {
+                return self
+                    .ke2_failure(username_or_email, password, started.mode)
+                    .await;
+            }
+        };
 
         let response = self
             .http()
@@ -358,6 +386,39 @@ impl AxiamClient {
     /// module it genuinely answers `false` when that artifact is absent.
     pub fn opaque_available(&self) -> bool {
         true
+    }
+
+    /// What happens after `KE2` fails to open (§23.4 rule 7).
+    ///
+    /// Wrong password, unknown identity, an account with no registration
+    /// record and a hostile endpoint are indistinguishable here by design, so
+    /// none of them is reported differently. The only thing that decides what
+    /// comes next is the tenant's `mode`:
+    ///
+    /// * `optional` — the mid-migration state, and the one that makes this
+    ///   method necessary. Every account has no OPAQUE record the moment an
+    ///   operator enables the feature, and acquires one only when its password
+    ///   is next set, so a failed exchange is the ordinary case rather than an
+    ///   error. Treating it as final would lock out every user of the tenant,
+    ///   which is precisely the state `optional` exists to avoid. Retry over
+    ///   [`AxiamClient::login`] and return whatever that says — its success on
+    ///   success, its error on failure.
+    /// * `required`, an unrecognised value, or **no `mode` at all** (a server
+    ///   older than the field) — the exchange is over and the failure is an
+    ///   `AuthError`. No retry: `required` answers `403 opaque_required` for
+    ///   every principal, so one would put a plaintext password on the wire
+    ///   for nothing.
+    async fn ke2_failure(
+        &self,
+        username_or_email: &str,
+        password: &str,
+        mode: Option<String>,
+    ) -> Result<LoginResult, AxiamError> {
+        if mode.as_deref() == Some("optional") {
+            return self.login(username_or_email, password).await;
+        }
+        // Fail closed: `required`, anything unrecognised, and absence alike.
+        Err(AxiamError::auth("invalid credentials"))
     }
 
     fn workspace_body(&self) -> WorkspaceBody {
