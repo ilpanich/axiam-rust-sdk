@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha43] - 2026-08-24
+
 ### Added
+
+- Expose the supported-version range and pin the policy in a test (#79)
 
 - **`axiam_sdk::supported_versions`** — `MIN_RUST_VERSION`, `EDITION` and
   `NEWEST_TESTED`, making the supported range readable from code. This crate already
