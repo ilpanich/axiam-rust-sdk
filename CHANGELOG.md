@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha44] - 2026-08-25
+
 ### Changed
+
+- Re-vendor openapi.json at alpha43 for tenant signing CAs (axiam#379)
+
+- Bump taiki-e/install-action from 2.85.13 to 2.86.5
+
+- Update scrypt requirement from 0.11 to 0.12
+
+- Bump github/codeql-action from 4.37.7 to 4.37.8
 
 - **Re-vendor `openapi.json` at 1.0.0-alpha43** for AXIAM server PR #379, which
   adds **tenant signing CAs**: an intermediate CA created beneath one of the
@@ -46,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The spec version moves from **1.0.0-alpha40** to **1.0.0-alpha43**; the
   intervening alpha41 and alpha42 releases changed nothing in it but that string.
+
+### Fixed
+
+- Drop the removed length argument from scrypt::Params::new
 
 ## [1.0.0-alpha43] - 2026-08-24
 
