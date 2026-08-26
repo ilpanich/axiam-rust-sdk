@@ -17,7 +17,8 @@
 //! Operations hang off **namespace handles**, not off the client:
 //!
 //! ```no_run
-//! # use axiam_sdk::{AxiamClient, management::PageRequest};
+//! # use axiam_sdk::client::AxiamClient;
+//! # use axiam_sdk::management::PageRequest;
 //! # async fn demo(client: &AxiamClient) -> Result<(), axiam_sdk::AxiamError> {
 //! let users = client.users().list(PageRequest::first(50)).await?;
 //! let role = client.roles().get(some_uuid()).await?;

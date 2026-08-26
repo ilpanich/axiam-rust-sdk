@@ -8,7 +8,7 @@
 //! time it runs.
 //!
 //! ```no_run
-//! # use axiam_sdk::AxiamClient;
+//! # use axiam_sdk::client::AxiamClient;
 //! use axiam_sdk::management::manifest::{
 //!     GrantSpec, ManagementManifest, PermissionSpec, ResourceSpec, RoleSpec, ScopeSpec,
 //! };
@@ -60,9 +60,13 @@
 //!
 //! **There is no transaction.** See [`ApplyReport`].
 
+mod builder;
+#[macro_use]
+mod macros;
 mod plan;
 mod spec;
 
+pub use builder::ManifestBuilder;
 pub use plan::{ApplyReport, Change, ManagementPlan, Outcome, PlannedAction, Target};
 pub use spec::{
     GrantSpec, GroupSpec, ManagementManifest, PermissionSpec, ResourceSpec, RoleSpec, ScopeSpec,

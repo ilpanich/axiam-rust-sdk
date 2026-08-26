@@ -307,6 +307,22 @@ required-features = ["rest"]
 name = "par_login"
 required-features = ["rest"]
 
+# CONTRACT.md §27 management surface: provisioning a device and its mTLS
+# identity end to end — the flow that motivated the section.
+[[example]]
+name = "device_mtls_provisioning"
+required-features = ["rest"]
+
+# CONTRACT.md §27 management surface: the imperative CRUD walkthrough.
+[[example]]
+name = "management_basics"
+required-features = ["rest"]
+
+# CONTRACT.md §27.6/§27.7 declarative manifests.
+[[example]]
+name = "management_manifest"
+required-features = ["rest"]
+
 [[example]]
 name = "grpc_check_access"
 required-features = ["rest", "grpc"]
