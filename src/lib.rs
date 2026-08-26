@@ -78,7 +78,7 @@ mod memo;
 /// why `std::time` cannot be used directly.
 pub mod time;
 
-pub use error::{AxiamError, IdTokenFailureReason, OAuthProtocolError};
+pub use error::{AuthzKind, AxiamError, IdTokenFailureReason, OAuthProtocolError};
 pub use sensitive::Sensitive;
 
 // Single owner of all Phase 16 module declarations (this file is final
@@ -90,6 +90,12 @@ pub mod token;
 
 #[cfg(feature = "rest")]
 pub mod rest;
+
+/// The AXIAM management API (CONTRACT.md §27) — tenants, users, groups, roles,
+/// permissions, resources, scopes, service accounts, certificates, webhooks and
+/// the rest of the administrative surface, plus the declarative manifest that
+/// reconciles a tenant to a desired shape.
+pub mod management;
 
 // CONTRACT.md §12 OIDC / SSO relying-party helpers — REST-only (built on the
 // same `reqwest`-based transport as `rest`/`client`).
