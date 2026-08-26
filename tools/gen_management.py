@@ -939,55 +939,302 @@ def emit_ops_mod(reg: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def emit_test(reg: dict[str, Any]) -> str:
-    """One wire assertion per operation, generated from the same registry.
+# ---------------------------------------------------------------------------
+# Example instances
+# ---------------------------------------------------------------------------
+# The generated test needs two things per operation: a JSON body the server can
+# plausibly answer with, and a Rust value to send. Both come from the same
+# schemas the models do, which is what makes the test worth running -- it
+# deserializes the server's *declared* shape into the generated type, so a
+# wrong `$ref`, a missed required field, a bad enum rename or a page envelope
+# classified as an object fails there rather than at a user.
 
-    This exists because of the coverage floor. 146 hand-written smoke tests is
-    exactly the chore that gets three-quarters done, and a generated surface
+EXAMPLE_UUID = "11111111-1111-4111-8111-111111111111"
+EXAMPLE_TIME = "2026-08-26T00:00:00Z"
+
+
+def example_json(schema: dict[str, Any], types: Types, depth: int = 0) -> Any:
+    """A minimal instance satisfying `schema`: required fields only."""
+    if depth > 6:
+        return None
+    if "$ref" in schema:
+        return example_json(types.resolve(schema), types, depth + 1)
+    inner = types.nullable_ref(schema)
+    if inner:
+        return example_json(types.schemas[inner], types, depth + 1)
+    if "enum" in schema:
+        return schema["enum"][0]
+    variants = schema.get("oneOf") or schema.get("anyOf")
+    if variants:
+        for v in variants:
+            if v.get("type") != "null":
+                return example_json(v, types, depth + 1)
+        return None
+    if "allOf" in schema:
+        merged: dict[str, Any] = {}
+        for part in schema["allOf"]:
+            got = example_json(part, types, depth + 1)
+            if isinstance(got, dict):
+                merged.update(got)
+        return merged
+
+    t = schema.get("type")
+    if isinstance(t, list):
+        t = next((x for x in t if x != "null"), None)
+    if t == "object" or (t is None and schema.get("properties")):
+        out: dict[str, Any] = {}
+        required = set(schema.get("required", []))
+        for name, prop in schema.get("properties", {}).items():
+            if name in required:
+                out[name] = example_json(prop, types, depth + 1)
+        return out
+    if t == "array":
+        return []
+    if t == "integer":
+        return 1
+    if t == "number":
+        return 1.0
+    if t == "boolean":
+        return True
+    if t == "string":
+        fmt = schema.get("format")
+        if fmt == "uuid":
+            return EXAMPLE_UUID
+        if fmt == "date-time":
+            return EXAMPLE_TIME
+        return "example"
+    return {}
+
+
+def example_response(op: dict[str, Any], types: Types) -> str:
+    """The JSON the mock server answers with, as a Rust raw string literal."""
+    resp = op["response"]
+    if resp["kind"] == "none":
+        return '""'
+    one = example_json(types.schemas[resp["schema"]], types)
+    if resp["kind"] == "array":
+        body: Any = [one]
+    elif resp["kind"] == "page":
+        # `total` deliberately exceeds `items.len()` nowhere here -- the
+        # auto-paging walk is asserted properly in the hand-written tests, and
+        # a generated fixture claiming more would loop.
+        body = {"items": [one], "total": 1, "offset": 0, "limit": 50}
+    else:
+        body = one
+    return 'r#"' + json.dumps(body) + '"#'
+
+
+def rust_literal(schema: dict[str, Any], types: Types, secrets: set[str],
+                 field: str | None = None, depth: int = 0) -> str:
+    """A Rust expression constructing a minimal valid value for `schema`."""
+    if depth > 6:
+        return "Default::default()"
+    if field and field in secrets:
+        return 'Sensitive::new("example".to_string())'
+    if "$ref" in schema:
+        return struct_literal(schema["$ref"].rsplit("/", 1)[-1], types, secrets, depth + 1)
+    if types.nullable_ref(schema):
+        return "None"
+    if schema.get("oneOf") or schema.get("anyOf"):
+        return "None"
+
+    t = schema.get("type")
+    if isinstance(t, list) and "null" in t:
+        return "None"
+    if t == "array":
+        return "Vec::new()"
+    if t == "integer":
+        return "1"
+    if t == "number":
+        return "1.0"
+    if t == "boolean":
+        return "true"
+    if t == "string":
+        fmt = schema.get("format")
+        if fmt == "uuid":
+            return "example_id()"
+        if fmt == "date-time":
+            return f'"{EXAMPLE_TIME}".to_string()'
+        return '"example".to_string()'
+    if t == "object" or not schema:
+        return "serde_json::json!({})"
+    return "Default::default()"
+
+
+def struct_literal(name: str, types: Types, secrets: set[str], depth: int = 0) -> str:
+    """Construct a named model, required fields only, the rest defaulted."""
+    schema = types.schemas.get(name, {})
+    if "enum" in schema:
+        return f"models::{pascal(name)}::{pascal(str(schema['enum'][0]))}"
+    if schema.get("oneOf"):
+        union = discriminated(schema, types)
+        if union:
+            _, value, payload = union[0]
+            if "$ref" in payload:
+                inner = struct_literal(
+                    payload["$ref"].rsplit("/", 1)[-1], types, secrets, depth + 1
+                )
+                return f"models::{pascal(name)}::{pascal(str(value))}({inner})"
+        return "Default::default()"
+
+    props, required, _ = types.flatten(name)
+    own = secrets if depth == 0 else set()
+    if not required and props:
+        # All-optional bodies derive `Default`, which is both shorter and the
+        # shape §27.4 rule 5 wants callers reaching for.
+        return f"models::{pascal(name)}::default()"
+    # Every field, not only the required ones: the Rust struct has a field per
+    # property, and an initializer that names a subset does not compile. The
+    # optional ones are `None`, which is also what a caller would write.
+    parts = []
+    for pname in sorted(props):
+        value = (
+            rust_literal(props[pname], types, own, pname, depth + 1)
+            if pname in required
+            else "None"
+        )
+        parts.append(f"{field_name(pname)[0]}: {value}")
+    return f"models::{pascal(name)} {{ {', '.join(parts)} }}"
+
+
+def call_arguments(
+    namespace: str, opname: str, op: dict[str, Any], types: Types, secrets: dict[str, set[str]]
+) -> tuple[list[str], str]:
+    """`(call arguments, mock path)` for one operation in the generated test."""
+    implicit = implicit_params(namespace, op)
+    args: list[str] = []
+    route = op["path"]
+    for prm in op["path_params"]:
+        name = prm["name"]
+        if name in implicit:
+            value = "{ORG_ID}" if name == "org_id" else "{TENANT_ID}"
+            route = route.replace("{" + name + "}", value)
+            continue
+        if prm["format"] == "uuid":
+            args.append("example_id()")
+            route = route.replace("{" + name + "}", "{EXAMPLE_ID}")
+        else:
+            args.append('"example"')
+            route = route.replace("{" + name + "}", "example")
+
+    extra = [q for q in op["query_params"] if q["name"] not in ("offset", "limit")]
+    required_q = [q for q in extra if q["required"]]
+    optional_q = [q for q in extra if not q["required"]]
+    for _ in required_q:
+        args.append('"example"')
+    if len(optional_q) > 2:
+        filter_ty = f"{pascal(namespace)}{pascal(opname)}Filter"
+        args.append(f"&{namespace}::{filter_ty}::default()")
+    else:
+        args.extend("None" for _ in optional_q)
+    if op["paginated"]:
+        args.append("PageRequest::first(50)")
+
+    if op["request_body"] == "schema":
+        args.append(f"&{struct_literal(op['request_schema'], types, secrets.get(op['request_schema'], set()))}")
+    elif op["request_body"] == "untyped":
+        args.append("&serde_json::json!({})")
+    return args, route
+
+
+def emit_test(reg: dict[str, Any], types: Types, secrets: dict[str, set[str]]) -> str:
+    """One test per namespace, reaching every operation in it.
+
+    This exists because of the coverage floor, and because a generated surface
     with no generated test is a surface whose first caller is its first test.
-    Each case asserts the method, the path the SDK built, and that the response
-    deserializes -- which is the part that catches a wrong `$ref` or a
-    misclassified page envelope.
+    Each case mounts the response the OpenAPI schema *declares* and asserts the
+    SDK deserializes it into the generated type -- so a wrong `$ref`, a missed
+    required field, a bad enum rename or a page envelope classified as an
+    object fails here rather than at a user.
     """
     lines = [BANNER]
-    lines.append('//! Generated §27 surface conformance: every operation is reached once.')
+    lines.append("//! Generated §27 surface conformance: every operation is reached once.")
     lines.append("//!")
-    lines.append("//! Asserts, per operation, that the SDK issues the registry's method against")
-    lines.append("//! the registry's path and can deserialize the declared response shape.")
-    lines.append("//! Semantics that are not per-operation -- sparse-update key sets, secret")
-    lines.append("//! redaction, error mapping, pagination walks, the manifest -- are tested by")
-    lines.append("//! hand in `tests/management_*_test.rs`.")
+    lines.append("//! Per operation: the SDK issues the registry's method against the registry's")
+    lines.append("//! path, and deserializes the response shape `openapi.json` declares. Semantics")
+    lines.append("//! that are not per-operation -- sparse-update key sets, secret redaction,")
+    lines.append("//! error mapping, pagination walks, the manifest -- are tested by hand in the")
+    lines.append("//! other `tests/management_*.rs` files.")
+    lines.append("")
+    lines.append('#![cfg(feature = "rest")]')
     lines.append("")
     lines.append("mod management_support;")
     lines.append("")
-    lines.append("use management_support::{OPERATIONS, expected_surface};")
+    lines.append("use axiam_sdk::Sensitive;")
+    lines.append("use axiam_sdk::management::PageRequest;")
+    lines.append("use axiam_sdk::management::models;")
+    lines.append("use axiam_sdk::management::ops::*;")
+    lines.append("use uuid::Uuid;")
+    lines.append("use wiremock::MockServer;")
     lines.append("")
-    lines.append("/// The generated surface covers every operation the registry names.")
-    lines.append("///")
-    lines.append("/// §27.9 asks for the count and the namespace set to be asserted, so that a")
-    lines.append("/// partial regeneration fails here rather than shipping 140 of 146.")
-    lines.append("#[test]")
-    lines.append("fn generated_surface_matches_the_registry() {")
-    lines.append("    let expected = expected_surface();")
-    lines.append("    assert_eq!(")
-    lines.append("        OPERATIONS.len(),")
-    lines.append("        expected.len(),")
-    lines.append('        "generated operation count drifted from management-registry.json"')
-    lines.append("    );")
-    lines.append("    for name in &expected {")
-    lines.append("        assert!(")
-    lines.append("            OPERATIONS.contains(&name.as_str()),")
-    lines.append('            "registry operation {name} has no generated method"')
-    lines.append("        );")
-    lines.append("    }")
+    lines.append("use management_support::{")
+    lines.append("    EXAMPLE_ID, ORG_ID, TENANT_ID, expected_surface, logged_in_client, mount,")
+    lines.append("};")
+    lines.append("")
+    lines.append("fn example_id() -> Uuid {")
+    lines.append("    Uuid::parse_str(EXAMPLE_ID).expect(\"fixture id parses\")")
     lines.append("}")
     lines.append("")
-    ops = [f"{ns}.{op}" for ns, nsd in reg["namespaces"].items() for op in nsd["operations"]]
-    lines.append("/// Every operation the generator emitted, in registry order.")
-    lines.append(f"pub const GENERATED_OPERATIONS: [&str; {len(ops)}] = [")
-    for name in ops:
+
+    all_ops = [f"{ns}.{op}" for ns, nsd in reg["namespaces"].items() for op in nsd["operations"]]
+    lines.append("/// Every operation this file exercises, in registry order.")
+    lines.append("///")
+    lines.append("/// §27.9: assert the count and the names, so a partial regeneration fails")
+    lines.append("/// here instead of quietly shipping 140 of 146.")
+    lines.append(f"const EXERCISED: [&str; {len(all_ops)}] = [")
+    for name in all_ops:
         lines.append(f'    "{name}",')
     lines.append("];")
+    lines.append("")
+    lines.append("#[test]")
+    lines.append("fn generated_surface_matches_the_registry() {")
+    lines.append("    let mut expected = expected_surface();")
+    lines.append("    let mut exercised: Vec<String> =")
+    lines.append("        EXERCISED.iter().map(|s| (*s).to_string()).collect();")
+    lines.append("    expected.sort();")
+    lines.append("    exercised.sort();")
+    lines.append("    assert_eq!(")
+    lines.append("        exercised, expected,")
+    lines.append('        "the generated surface and management-registry.json disagree"')
+    lines.append("    );")
+    lines.append("}")
+    lines.append("")
+
+    for namespace, nsdef in reg["namespaces"].items():
+        lines.append(f"/// Reaches every operation in the `{namespace}` namespace.")
+        lines.append("#[tokio::test]")
+        lines.append(f"async fn {namespace}_surface() {{")
+        lines.append("    let server = MockServer::start().await;")
+        lines.append("    let client = logged_in_client(&server).await;")
+        lines.append("")
+        for opname, op in nsdef["operations"].items():
+            canonical = f"{namespace}.{opname}"
+            args, route = call_arguments(namespace, opname, op, types, secrets)
+            body = example_response(op, types)
+            status = op["response"]["status"]
+            method_name = field_name(opname)[0]
+            lines.append(f"    // {canonical}")
+            # `format!` with nothing to substitute is `clippy::useless_format`.
+            route_expr = f'&format!("{route}")' if "{" in route else f'"{route}"'
+            lines.append(
+                f'    mount(&server, "{op["method"]}", {route_expr}, {status}, {body}).await;'
+            )
+            call = f"client.{namespace}().{method_name}({', '.join(args)})"
+            lines.append(f'    {call}')
+            lines.append(f'        .await')
+            lines.append(f'        .expect("{canonical}");')
+            if op["paginated"]:
+                lines.append(
+                    f'    client.{namespace}().{method_name}_all('
+                    + ", ".join(a for a in args if a != "PageRequest::first(50)")
+                    + (", " if len(args) > 1 else "")
+                    + "PageRequest::first(50))"
+                )
+                lines.append("        .await")
+                lines.append(f'        .expect("{canonical} auto-paging");')
+            lines.append("")
+        lines.append("}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -1010,7 +1257,7 @@ def main() -> int:
             body = body.replace("impl<'c>", filters + "\nimpl<'c>", 1)
         written[OPS_DIR / f"{ns}.rs"] = body
     written[OPS_DIR / "mod.rs"] = emit_ops_mod(reg)
-    written[TEST_OUT] = emit_test(reg)
+    written[TEST_OUT] = emit_test(reg, types, secrets)
 
     if args.check:
         stale = [p for p, body in written.items() if not p.exists() or p.read_text() != body]
