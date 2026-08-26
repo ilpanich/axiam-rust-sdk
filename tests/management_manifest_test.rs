@@ -559,3 +559,253 @@ async fn an_empty_manifest_applies_cleanly() {
     assert!(report.is_complete());
     assert_eq!(report.changed(), 0);
 }
+
+/// Every `Update` path runs: resource, permission, role, group and user.
+///
+/// The create paths are covered above; these are the other half of the
+/// reconciler, and the half where getting the request body wrong quietly
+/// overwrites a field nobody meant to touch.
+#[tokio::test]
+async fn apply_updates_every_drifted_kind() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    // Everything exists, and every field the manifest states has drifted.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/resources"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "name": "documents",
+                "resource_type": "folder", "parent_id": null, "metadata": {},
+                "created_at": NOW, "updated_at": NOW,
+            }],
+            "total": 1, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/resources/{EXAMPLE_ID}/scopes")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/permissions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "action": "document:read",
+                "description": "stale", "created_at": NOW, "updated_at": NOW,
+            }],
+            "total": 1, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/roles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [role_json(EXAMPLE_ID, "Editor", "stale")],
+            "total": 1, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+    for suffix in ["permissions", "users", "groups"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/roles/{EXAMPLE_ID}/{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/v1/groups"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "name": "Staff",
+                "description": "stale", "metadata": {}, "created_at": NOW, "updated_at": NOW,
+            }],
+            "total": 1, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/groups/{EXAMPLE_ID}/members")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [], "total": 0, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "username": "alice",
+                "email": "stale@example.com", "status": "Active", "mfa_enabled": false,
+                "email_verified": true, "metadata": {}, "created_at": NOW, "updated_at": NOW,
+                "failed_login_attempts": 0, "is_locked": false,
+            }],
+            "total": 1, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+
+    // Every write the reconciler will make. Each answers with the shape its
+    // route really returns — a `{}` here would fail deserialization, which is
+    // the generated surface test's job to catch, not this one's.
+    for (route, body) in [
+        (
+            format!("/api/v1/resources/{EXAMPLE_ID}"),
+            resource_json(EXAMPLE_ID, "documents", None),
+        ),
+        (
+            format!("/api/v1/permissions/{EXAMPLE_ID}"),
+            json!({
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "action": "document:read",
+                "description": "Read a document", "created_at": NOW, "updated_at": NOW,
+            }),
+        ),
+        (
+            format!("/api/v1/roles/{EXAMPLE_ID}"),
+            role_json(EXAMPLE_ID, "Editor", "Edits documents"),
+        ),
+        (
+            format!("/api/v1/groups/{EXAMPLE_ID}"),
+            json!({
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "name": "Staff",
+                "description": "All staff", "metadata": {}, "created_at": NOW, "updated_at": NOW,
+            }),
+        ),
+        (
+            format!("/api/v1/users/{EXAMPLE_ID}"),
+            json!({
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "username": "alice",
+                "email": "alice@example.com", "status": "Active", "mfa_enabled": false,
+                "email_verified": true, "metadata": {}, "created_at": NOW, "updated_at": NOW,
+                "failed_login_attempts": 0, "is_locked": false,
+            }),
+        ),
+    ] {
+        Mock::given(method("PUT"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/resources/{EXAMPLE_ID}/scopes")))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "resource_id": EXAMPLE_ID,
+            "name": "draft", "description": "Unpublished",
+            "created_at": NOW, "updated_at": NOW,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/roles/{EXAMPLE_ID}/permissions")))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/roles/{EXAMPLE_ID}/groups")))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/groups/{EXAMPLE_ID}/members")))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/roles/{EXAMPLE_ID}/users")))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let manifest = ManagementManifest::new()
+        .with_resource(
+            ResourceSpec::new("docs", "documents", "collection").with_scope(ScopeSpec::new(
+                "draft",
+                "draft",
+                "Unpublished",
+            )),
+        )
+        .with_permission(PermissionSpec::new(
+            "read",
+            "document:read",
+            "Read a document",
+        ))
+        .with_role(
+            RoleSpec::new("editor", "Editor", "Edits documents")
+                .granting(GrantSpec::allow("read").scoped_to(["draft"])),
+        )
+        .with_group(GroupSpec::new("staff", "Staff", "All staff").with_roles(["editor"]))
+        .with_user(
+            UserSpec::new("alice", "alice", "alice@example.com")
+                .with_roles(["editor"])
+                .in_groups(["staff"]),
+        );
+
+    let plan = client.manifest().plan(&manifest).await.expect("plan");
+    let updates = plan
+        .actions
+        .iter()
+        .filter(|a| a.change == Change::Update)
+        .count();
+    assert_eq!(
+        updates, 5,
+        "resource, permission, role, group and user all drifted"
+    );
+
+    let report = client.manifest().apply(&manifest).await.expect("apply");
+    assert!(report.is_complete(), "{:?}", report.failure());
+}
+
+/// A user that already exists is never given the manifest's `initial_password`.
+///
+/// A manifest is a description of shape. Silently resetting a live account's
+/// password because a config file mentions one is not a shape change, and is
+/// the kind of thing nobody notices until someone cannot log in.
+#[tokio::test]
+async fn an_existing_user_is_not_given_the_initial_password() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": EXAMPLE_ID, "tenant_id": TENANT_ID, "username": "alice",
+                "email": "alice@example.com", "status": "Active", "mfa_enabled": false,
+                "email_verified": true, "metadata": {}, "created_at": NOW, "updated_at": NOW,
+                "failed_login_attempts": 0, "is_locked": false,
+            }],
+            "total": 1, "offset": 0, "limit": 200,
+        })))
+        .mount(&server)
+        .await;
+    for route in [
+        "/api/v1/resources",
+        "/api/v1/permissions",
+        "/api/v1/roles",
+        "/api/v1/groups",
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(empty_page(), "application/json"))
+            .mount(&server)
+            .await;
+    }
+
+    let manifest = ManagementManifest::new().with_user(
+        UserSpec::new("alice", "alice", "alice@example.com")
+            .with_initial_password(Sensitive::new("never-sent".into())),
+    );
+    let report = client.manifest().apply(&manifest).await.expect("apply");
+
+    assert_eq!(report.changed(), 0, "an unchanged user needs no write");
+    let writes = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.method.as_str() != "GET" && !r.url.path().starts_with("/api/v1/auth/"))
+        .count();
+    assert_eq!(writes, 0);
+}

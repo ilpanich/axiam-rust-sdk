@@ -515,22 +515,6 @@ pub(crate) struct CreateFederationConfigRequestWire {
     pub(crate) token_exchange: Option<TokenExchangeTrustRequest>,
 }
 
-impl From<CreateFederationConfigRequestWire> for CreateFederationConfigRequest {
-    fn from(w: CreateFederationConfigRequestWire) -> Self {
-        Self {
-            allowed_algorithms: w.allowed_algorithms,
-            attribute_map: w.attribute_map,
-            client_id: w.client_id,
-            client_secret: crate::management::error::wrap_from_wire(w.client_secret),
-            idp_signing_cert_pem: w.idp_signing_cert_pem,
-            metadata_url: w.metadata_url,
-            protocol: w.protocol,
-            provider: w.provider,
-            token_exchange: w.token_exchange,
-        }
-    }
-}
-
 impl From<&CreateFederationConfigRequest> for CreateFederationConfigRequestWire {
     fn from(v: &CreateFederationConfigRequest) -> Self {
         Self {
@@ -834,24 +818,6 @@ impl From<CreateScimTokenResponseWire> for CreateScimTokenResponse {
     }
 }
 
-impl From<&CreateScimTokenResponse> for CreateScimTokenResponseWire {
-    fn from(v: &CreateScimTokenResponse) -> Self {
-        Self {
-            created_at: v.created_at.clone(),
-            created_by: v.created_by,
-            expires_at: v.expires_at.clone(),
-            id: v.id,
-            last_used_at: v.last_used_at.clone(),
-            name: v.name.clone(),
-            provisioning_token: crate::management::error::expose_for_wire(&v.provisioning_token),
-            revoked_at: v.revoked_at.clone(),
-            status: v.status,
-            tenant_id: v.tenant_id,
-            user_id: v.user_id,
-        }
-    }
-}
-
 /// `CreateScopeRequest` (generated from openapi.json).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateScopeRequest {
@@ -918,18 +884,6 @@ pub(crate) struct CreateUserRequestWire {
     pub(crate) username: String,
 }
 
-impl From<CreateUserRequestWire> for CreateUserRequest {
-    fn from(w: CreateUserRequestWire) -> Self {
-        Self {
-            email: w.email,
-            metadata: w.metadata,
-            opaque: w.opaque,
-            password: crate::management::error::wrap_from_wire(w.password),
-            username: w.username,
-        }
-    }
-}
-
 impl From<&CreateUserRequest> for CreateUserRequestWire {
     fn from(v: &CreateUserRequest) -> Self {
         Self {
@@ -970,17 +924,6 @@ pub(crate) struct CreateWebhookRequestWire {
     pub(crate) retry_policy: Option<RetryPolicy>,
     pub(crate) secret: String,
     pub(crate) url: String,
-}
-
-impl From<CreateWebhookRequestWire> for CreateWebhookRequest {
-    fn from(w: CreateWebhookRequestWire) -> Self {
-        Self {
-            events: w.events,
-            retry_policy: w.retry_policy,
-            secret: crate::management::error::wrap_from_wire(w.secret),
-            url: w.url,
-        }
-    }
 }
 
 impl From<&CreateWebhookRequest> for CreateWebhookRequestWire {
@@ -1309,33 +1252,6 @@ impl From<GeneratedCaCertificateWire> for GeneratedCaCertificate {
     }
 }
 
-impl From<&GeneratedCaCertificate> for GeneratedCaCertificateWire {
-    fn from(v: &GeneratedCaCertificate) -> Self {
-        Self {
-            chain_pem: v.chain_pem.clone(),
-            created_at: v.created_at.clone(),
-            fingerprint: v.fingerprint.clone(),
-            id: v.id,
-            key_algorithm: v.key_algorithm,
-            key_custody: v.key_custody.clone(),
-            key_locator: v.key_locator.clone(),
-            mtls_trust_anchor: v.mtls_trust_anchor,
-            not_after: v.not_after.clone(),
-            not_before: v.not_before.clone(),
-            organization_id: v.organization_id,
-            parent_ca_id: v.parent_ca_id,
-            private_key_pem: v
-                .private_key_pem
-                .as_ref()
-                .map(crate::management::error::expose_for_wire),
-            public_cert_pem: v.public_cert_pem.clone(),
-            status: v.status,
-            subject: v.subject.clone(),
-            tenant_id: v.tenant_id,
-        }
-    }
-}
-
 /// Response returned when a tenant certificate is generated.
 ///
 /// Includes the private key PEM, returned **once** and never stored.
@@ -1429,28 +1345,6 @@ impl From<GeneratedCertificateWire> for GeneratedCertificate {
     }
 }
 
-impl From<&GeneratedCertificate> for GeneratedCertificateWire {
-    fn from(v: &GeneratedCertificate) -> Self {
-        Self {
-            cert_type: v.cert_type,
-            chain_pem: v.chain_pem.clone(),
-            created_at: v.created_at.clone(),
-            fingerprint: v.fingerprint.clone(),
-            id: v.id,
-            issuer_ca_id: v.issuer_ca_id,
-            key_algorithm: v.key_algorithm,
-            metadata: v.metadata.clone(),
-            not_after: v.not_after.clone(),
-            not_before: v.not_before.clone(),
-            private_key_pem: crate::management::error::expose_for_wire(&v.private_key_pem),
-            public_cert_pem: v.public_cert_pem.clone(),
-            status: v.status,
-            subject: v.subject.clone(),
-            tenant_id: v.tenant_id,
-        }
-    }
-}
-
 /// Response returned when a PGP key is generated.
 /// This type carries secret material (§27.5), so the field is
 /// \[`Sensitive`\](crate::Sensitive) and the type derives neither `Serialize`
@@ -1515,26 +1409,6 @@ impl From<GeneratedPgpKeyWire> for GeneratedPgpKey {
             purpose: w.purpose,
             status: w.status,
             tenant_id: w.tenant_id,
-        }
-    }
-}
-
-impl From<&GeneratedPgpKey> for GeneratedPgpKeyWire {
-    fn from(v: &GeneratedPgpKey) -> Self {
-        Self {
-            algorithm: v.algorithm,
-            created_at: v.created_at.clone(),
-            fingerprint: v.fingerprint.clone(),
-            id: v.id,
-            name: v.name.clone(),
-            private_key_armored: v
-                .private_key_armored
-                .as_ref()
-                .map(crate::management::error::expose_for_wire),
-            public_key_armored: v.public_key_armored.clone(),
-            purpose: v.purpose,
-            status: v.status,
-            tenant_id: v.tenant_id,
         }
     }
 }
@@ -1630,17 +1504,6 @@ pub(crate) struct ImportCaCertificateRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) private_key_pem: Option<String>,
     pub(crate) public_cert_pem: String,
-}
-
-impl From<ImportCaCertificateRequestWire> for ImportCaCertificateRequest {
-    fn from(w: ImportCaCertificateRequestWire) -> Self {
-        Self {
-            private_key_pem: w
-                .private_key_pem
-                .map(crate::management::error::wrap_from_wire),
-            public_cert_pem: w.public_cert_pem,
-        }
-    }
 }
 
 impl From<&ImportCaCertificateRequest> for ImportCaCertificateRequestWire {
@@ -1948,23 +1811,6 @@ impl From<OAuth2ClientCreatedResponseWire> for OAuth2ClientCreatedResponse {
             scopes: w.scopes,
             tenant_id: w.tenant_id,
             updated_at: w.updated_at,
-        }
-    }
-}
-
-impl From<&OAuth2ClientCreatedResponse> for OAuth2ClientCreatedResponseWire {
-    fn from(v: &OAuth2ClientCreatedResponse) -> Self {
-        Self {
-            client_id: v.client_id.clone(),
-            client_secret: crate::management::error::expose_for_wire(&v.client_secret),
-            created_at: v.created_at.clone(),
-            grant_types: v.grant_types.clone(),
-            id: v.id,
-            name: v.name.clone(),
-            redirect_uris: v.redirect_uris.clone(),
-            scopes: v.scopes.clone(),
-            tenant_id: v.tenant_id,
-            updated_at: v.updated_at.clone(),
         }
     }
 }
@@ -2571,14 +2417,6 @@ impl From<RotateSecretResponseWire> for RotateSecretResponse {
     }
 }
 
-impl From<&RotateSecretResponse> for RotateSecretResponseWire {
-    fn from(v: &RotateSecretResponse) -> Self {
-        Self {
-            client_secret: crate::management::error::expose_for_wire(&v.client_secret),
-        }
-    }
-}
-
 /// Metadata only. The handle is never in a list response — it exists in
 /// plaintext exactly once, in \[`CreateScimTokenResponse`\].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2733,22 +2571,6 @@ impl From<ServiceAccountCreatedResponseWire> for ServiceAccountCreatedResponse {
             status: w.status,
             tenant_id: w.tenant_id,
             updated_at: w.updated_at,
-        }
-    }
-}
-
-impl From<&ServiceAccountCreatedResponse> for ServiceAccountCreatedResponseWire {
-    fn from(v: &ServiceAccountCreatedResponse) -> Self {
-        Self {
-            client_id: v.client_id.clone(),
-            client_secret: crate::management::error::expose_for_wire(&v.client_secret),
-            created_at: v.created_at.clone(),
-            description: v.description.clone(),
-            id: v.id,
-            name: v.name.clone(),
-            status: v.status,
-            tenant_id: v.tenant_id,
-            updated_at: v.updated_at.clone(),
         }
     }
 }
@@ -3179,24 +3001,6 @@ pub(crate) struct UpdateFederationConfigRequestWire {
     pub(crate) token_exchange: Option<TokenExchangeTrustRequest>,
 }
 
-impl From<UpdateFederationConfigRequestWire> for UpdateFederationConfigRequest {
-    fn from(w: UpdateFederationConfigRequestWire) -> Self {
-        Self {
-            allowed_algorithms: w.allowed_algorithms,
-            attribute_map: w.attribute_map,
-            client_id: w.client_id,
-            client_secret: w
-                .client_secret
-                .map(crate::management::error::wrap_from_wire),
-            enabled: w.enabled,
-            idp_signing_cert_pem: w.idp_signing_cert_pem,
-            metadata_url: w.metadata_url,
-            provider: w.provider,
-            token_exchange: w.token_exchange,
-        }
-    }
-}
-
 impl From<&UpdateFederationConfigRequest> for UpdateFederationConfigRequestWire {
     fn from(v: &UpdateFederationConfigRequest) -> Self {
         Self {
@@ -3544,18 +3348,6 @@ pub(crate) struct UpdateWebhookRequestWire {
     pub(crate) secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) url: Option<String>,
-}
-
-impl From<UpdateWebhookRequestWire> for UpdateWebhookRequest {
-    fn from(w: UpdateWebhookRequestWire) -> Self {
-        Self {
-            enabled: w.enabled,
-            events: w.events,
-            retry_policy: w.retry_policy,
-            secret: w.secret.map(crate::management::error::wrap_from_wire),
-            url: w.url,
-        }
-    }
 }
 
 impl From<&UpdateWebhookRequest> for UpdateWebhookRequestWire {

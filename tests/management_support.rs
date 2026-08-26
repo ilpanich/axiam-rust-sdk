@@ -118,6 +118,39 @@ pub async fn logged_in_client(server: &MockServer) -> AxiamClient {
     client
 }
 
+/// Mount `POST /api/v1/auth/refresh`, answering with rotated session cookies.
+///
+/// The §9 guard compares the access token it observed failing against the one
+/// now held, so the rotated token has to differ from the original or the guard
+/// concludes someone else already refreshed and returns without calling.
+pub async fn mount_refresh(server: &MockServer) {
+    let rotated = issue_test_access_token();
+    let mut response = ResponseTemplate::new(200).set_body_json(json!({ "expires_in": 900 }));
+    for cookie in [
+        format!("axiam_access={rotated}; Path=/; HttpOnly"),
+        "axiam_refresh=rotated-refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=rotated-csrf-token; Path=/".to_string(),
+    ] {
+        response = response.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// A client with a tenant UUID but **no organization at all**.
+pub fn client_without_org(base_url: &str) -> AxiamClient {
+    AxiamClient::builder()
+        .base_url(base_url)
+        .expect("valid base_url")
+        .tenant_id(Uuid::parse_str(TENANT_ID).unwrap())
+        .retry_enabled(false)
+        .build()
+        .expect("client builds")
+}
+
 /// A client with tenant and organization UUIDs, but no session.
 pub fn anonymous_client(base_url: &str) -> AxiamClient {
     AxiamClient::builder()

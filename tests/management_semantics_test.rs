@@ -571,3 +571,176 @@ async fn acquiring_a_handle_makes_no_request() {
     let after = server.received_requests().await.unwrap_or_default().len();
     assert_eq!(before, after, "§27.2 rule 1: handles are free");
 }
+
+// ---------------------------------------------------------------------------
+// §9 / §27.4 rule 1 — the one refresh, and the one retry
+// ---------------------------------------------------------------------------
+
+/// A 401 on a management call refreshes once and retries once.
+///
+/// §9 rule 1 makes this a MUST for every SDK that manages token state, and a
+/// management surface is where it matters most: an admin script running for an
+/// hour crosses a 15-minute access-token lifetime four times.
+#[tokio::test]
+async fn a_401_refreshes_once_and_retries_the_call() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    management_support::mount_refresh(&server).await;
+
+    // The first attempt 401s; the retry after the refresh succeeds.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/users/{EXAMPLE_ID}")))
+        .respond_with(ResponseTemplate::new(401))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/users/{EXAMPLE_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(user_body("alice@example.com")))
+        .mount(&server)
+        .await;
+
+    let user = client
+        .users()
+        .get(example_id())
+        .await
+        .expect("the retry after a successful refresh must succeed");
+    assert_eq!(user.email, "alice@example.com");
+
+    let refreshes = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/api/v1/auth/refresh")
+        .count();
+    assert_eq!(refreshes, 1, "§9 rule 2: exactly one refresh wire call");
+}
+
+/// When the refresh itself fails, the original call fails with that error.
+///
+/// §9 rule 3: a 401 on the refresh means re-authenticate. There is no second
+/// refresh and no third attempt at the management call.
+#[tokio::test]
+async fn a_failed_refresh_surfaces_and_does_not_loop() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("refresh token expired"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount(
+        &server,
+        "GET",
+        &format!("/api/v1/users/{EXAMPLE_ID}"),
+        401,
+        "",
+    )
+    .await;
+
+    let err = client.users().get(example_id()).await.expect_err("401");
+    assert!(matches!(err, AxiamError::Auth { .. }), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// §27.4 rule 3 — the other scope-resolution failures
+// ---------------------------------------------------------------------------
+
+/// A client with no organization at all fails locally on an org route.
+#[tokio::test]
+async fn a_client_with_no_org_refuses_an_org_route() {
+    let server = MockServer::start().await;
+    let client = management_support::client_without_org(&server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"keys": []})))
+        .mount(&server)
+        .await;
+
+    let err = client
+        .tenants()
+        .list(PageRequest::first(50))
+        .await
+        .expect_err("no organization configured");
+    assert!(err.to_string().contains("organization"), "{err}");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+/// `for_tenant` overrides the client's tenant on a tenant-scoped route.
+#[tokio::test]
+async fn for_tenant_overrides_the_clients_tenant() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let other = Uuid::new_v4();
+
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/tenants/{other}/email-config"),
+        204,
+        "",
+    )
+    .await;
+
+    client
+        .email_config()
+        .for_tenant(other)
+        .delete_tenant()
+        .await
+        .expect("an overridden tenant is addressable");
+}
+
+// ---------------------------------------------------------------------------
+// Filter structs — the operations with more than two optional query parameters
+// ---------------------------------------------------------------------------
+
+/// `audit.list`'s filter reaches the query string, and unset fields do not.
+#[tokio::test]
+async fn an_audit_filter_sends_only_the_fields_that_were_set() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/audit-logs"))
+        .respond_with(move |request: &Request| {
+            let query: Vec<(String, String)> = request
+                .url
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            let keys: Vec<&str> = query.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(keys.contains(&"action"), "{keys:?}");
+            assert!(
+                !keys.contains(&"actor_id"),
+                "an unset filter must not be sent: {keys:?}"
+            );
+            ResponseTemplate::new(200).set_body_raw(
+                r#"{"items": [], "total": 0, "offset": 0, "limit": 50}"#,
+                "application/json",
+            )
+        })
+        .mount(&server)
+        .await;
+
+    client
+        .audit()
+        .list(
+            &axiam_sdk::management::ops::audit::AuditListFilter {
+                action: Some("user.created".into()),
+                ..Default::default()
+            },
+            PageRequest::first(50),
+        )
+        .await
+        .expect("audit.list");
+}

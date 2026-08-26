@@ -265,6 +265,25 @@ def closure(reg: dict[str, Any], types: Types) -> list[str]:
     return sorted(seen)
 
 
+def wire_directions(reg: dict[str, Any]) -> dict[str, set[str]]:
+    """schema name -> {"request"} / {"response"} / both.
+
+    A secret-carrying type needs a wire twin, but only in the direction it
+    actually travels: a request body needs `From<&Public> for Wire`, a response
+    needs `From<Wire> for Public`. Emitting both leaves half of them dead --
+    which is fifty uncovered lines in a repo whose coverage floor is 90%, for
+    conversions nothing can ever call.
+    """
+    out: dict[str, set[str]] = {}
+    for ns in reg["namespaces"].values():
+        for op in ns["operations"].values():
+            if op["request_schema"] and op["sensitive_request_fields"]:
+                out.setdefault(op["request_schema"].lstrip("[]"), set()).add("request")
+            if op["response"]["schema"] and op["sensitive_response_fields"]:
+                out.setdefault(op["response"]["schema"].lstrip("[]"), set()).add("response")
+    return out
+
+
 def sensitive_map(reg: dict[str, Any]) -> dict[str, set[str]]:
     """schema name -> the fields §27.5 requires wrapped."""
     out: dict[str, set[str]] = {}
@@ -325,6 +344,7 @@ def discriminated(schema: dict[str, Any], types: Types) -> list[tuple[str, str, 
 def emit_models(reg: dict[str, Any], types: Types) -> str:
     names = closure(reg, types)
     secrets = sensitive_map(reg)
+    directions = wire_directions(reg)
     out: list[str] = [BANNER, """
 //! Request and response types for the CONTRACT §27 management surface.
 //!
@@ -366,7 +386,9 @@ use crate::Sensitive;
         if union:
             out.append(emit_union(rname, schema, union, types))
             continue
-        out.append(emit_struct(rname, name, types, secrets.get(name, set())))
+        out.append(
+            emit_struct(rname, name, types, secrets.get(name, set()), directions.get(name, set()))
+        )
     return "\n".join(out)
 
 
@@ -427,7 +449,9 @@ def emit_union(rname: str, schema: dict[str, Any], arms: list, types: Types) -> 
     return "\n".join(lines)
 
 
-def emit_struct(rname: str, name: str, types: Types, secrets: set[str]) -> str:
+def emit_struct(
+    rname: str, name: str, types: Types, secrets: set[str], directions: set[str]
+) -> str:
     props, required, desc = types.flatten(name)
     fields: list[tuple[str, str | None, str, bool, str | None]] = []
     for pname, pschema in sorted(props.items()):
@@ -456,7 +480,7 @@ def emit_struct(rname: str, name: str, types: Types, secrets: set[str]) -> str:
         ))
 
     if secrets:
-        return emit_sensitive_struct(rname, lines, fields, all_optional, types)
+        return emit_sensitive_struct(rname, lines, fields, all_optional, types, directions)
 
     derives = ["Debug", "Clone", "PartialEq", "Serialize", "Deserialize"]
     if all_optional:
@@ -482,6 +506,7 @@ def emit_sensitive_struct(
     fields: list[tuple[str, str | None, str, bool, str | None]],
     all_optional: bool,
     types: Types,
+    directions: set[str],
 ) -> str:
     """A public type holding `Sensitive<T>`, plus the wire twin that crosses the socket.
 
@@ -531,44 +556,46 @@ def emit_sensitive_struct(
         out.append(f"    pub(crate) {ident}: {wty},")
     out.append("}\n")
 
-    out.append(f"impl From<{wire}> for {rname} {{")
-    out.append(f"    fn from(w: {wire}) -> Self {{")
-    out.append("        Self {")
-    for ident, _, ty, is_secret, _ in fields:
-        if not is_secret:
-            out.append(f"            {ident}: w.{ident},")
-        elif ty.startswith("Option<"):
-            out.append(
-                f"            {ident}: w.{ident}.map(crate::management::error::wrap_from_wire),"
-            )
-        else:
-            out.append(
-                f"            {ident}: crate::management::error::wrap_from_wire(w.{ident}),"
-            )
-    out.append("        }")
-    out.append("    }")
-    out.append("}\n")
+    if "response" in directions:
+        out.append(f"impl From<{wire}> for {rname} {{")
+        out.append(f"    fn from(w: {wire}) -> Self {{")
+        out.append("        Self {")
+        for ident, _, ty, is_secret, _ in fields:
+            if not is_secret:
+                out.append(f"            {ident}: w.{ident},")
+            elif ty.startswith("Option<"):
+                out.append(
+                    f"            {ident}: w.{ident}.map(crate::management::error::wrap_from_wire),"
+                )
+            else:
+                out.append(
+                    f"            {ident}: crate::management::error::wrap_from_wire(w.{ident}),"
+                )
+        out.append("        }")
+        out.append("    }")
+        out.append("}\n")
 
-    out.append(f"impl From<&{rname}> for {wire} {{")
-    out.append(f"    fn from(v: &{rname}) -> Self {{")
-    out.append("        Self {")
-    for ident, _, ty, is_secret, _ in fields:
-        if not is_secret:
-            # `.clone()` on a `Copy` field is what `clone_on_copy` fires on.
-            accessor = f"v.{ident}" if types.is_copy(ty) else f"v.{ident}.clone()"
-            out.append(f"            {ident}: {accessor},")
-        elif ty.startswith("Option<"):
-            out.append(
-                f"            {ident}: v.{ident}.as_ref()"
-                ".map(crate::management::error::expose_for_wire),"
-            )
-        else:
-            out.append(
-                f"            {ident}: crate::management::error::expose_for_wire(&v.{ident}),"
-            )
-    out.append("        }")
-    out.append("    }")
-    out.append("}\n")
+    if "request" in directions:
+        out.append(f"impl From<&{rname}> for {wire} {{")
+        out.append(f"    fn from(v: &{rname}) -> Self {{")
+        out.append("        Self {")
+        for ident, _, ty, is_secret, _ in fields:
+            if not is_secret:
+                # `.clone()` on a `Copy` field is what `clone_on_copy` fires on.
+                accessor = f"v.{ident}" if types.is_copy(ty) else f"v.{ident}.clone()"
+                out.append(f"            {ident}: {accessor},")
+            elif ty.startswith("Option<"):
+                out.append(
+                    f"            {ident}: v.{ident}.as_ref()"
+                    ".map(crate::management::error::expose_for_wire),"
+                )
+            else:
+                out.append(
+                    f"            {ident}: crate::management::error::expose_for_wire(&v.{ident}),"
+                )
+        out.append("        }")
+        out.append("    }")
+        out.append("}\n")
     return "\n".join(out)
 
 
