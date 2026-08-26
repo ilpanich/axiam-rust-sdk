@@ -91,10 +91,10 @@ pub mod token;
 #[cfg(feature = "rest")]
 pub mod rest;
 
-/// The AXIAM management API (CONTRACT.md §27) — tenants, users, groups, roles,
-/// permissions, resources, scopes, service accounts, certificates, webhooks and
-/// the rest of the administrative surface, plus the declarative manifest that
-/// reconciles a tenant to a desired shape.
+// CONTRACT.md §27 — the management API. Documented by `src/management/mod.rs`'s
+// own `//!` block; a `///` here would be merged with it by rustdoc and resolved
+// in *this* scope, which breaks every intra-doc link the module makes to its own
+// children (and reports the failure with no file or line to point at).
 pub mod management;
 
 // CONTRACT.md §12 OIDC / SSO relying-party helpers — REST-only (built on the

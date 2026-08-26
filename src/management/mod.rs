@@ -62,7 +62,7 @@
 //! generated types make the difference visible: a replacement body has
 //! required fields and will not compile half-filled.
 //!
-//! [`settings().set_org()`]: ops::settings::Settings::set_org
+//! [`settings().set_org()`]: crate::management::ops::settings::Settings::set_org
 //!
 //! **Seven operations return a secret exactly once.** Creating a service
 //! account or an OAuth2 client, generating a certificate, a CA, a signing CA
@@ -74,7 +74,7 @@
 //! in another tenant on purpose: a distinguishable "exists but not yours" lets
 //! a caller enumerate another tenant's ids. Both arrive as
 //! [`AxiamError::Authz`] with [`AuthzKind::NotFound`], which is what
-//! [`AxiamError::is_not_found`] tests.
+//! [`AxiamError::is_not_found`](crate::AxiamError::is_not_found) tests.
 //!
 //! [`AxiamError::Authz`]: crate::AxiamError::Authz
 //! [`AuthzKind::NotFound`]: crate::AuthzKind::NotFound
