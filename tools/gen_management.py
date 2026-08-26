@@ -1287,10 +1287,34 @@ def main() -> int:
     written[TEST_OUT] = emit_test(reg, types, secrets)
 
     if args.check:
-        stale = [p for p, body in written.items() if not p.exists() or p.read_text() != body]
+        # The committed files have been through `cargo fmt`, so a raw text
+        # comparison would fail on every run. Format the freshly generated text
+        # the same way, in a temporary directory, and compare that -- rather
+        # than regenerating in place and diffing, which would leave a dirty
+        # tree behind on failure.
+        import tempfile
+
+        stale: list[Path] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            # The generated test declares `mod management_support;`. rustfmt
+            # resolves modules from the filesystem and, failing to find it,
+            # writes nothing at all -- leaving the scratch file unformatted and
+            # every run reporting the file as stale. A stub is enough.
+            (Path(tmp) / "management_support.rs").write_text("")
+            for path, body in written.items():
+                scratch = Path(tmp) / path.name
+                scratch.write_text(body if body.endswith("\n") else body + "\n")
+                subprocess.run(
+                    ["rustfmt", "--edition", "2024", "--emit", "files", str(scratch)],
+                    check=False,
+                    capture_output=True,
+                )
+                formatted = scratch.read_text()
+                if not path.exists() or path.read_text() != formatted:
+                    stale.append(path)
         if stale:
-            for p in stale:
-                print(f"FAIL: {p.relative_to(ROOT)} is stale", file=sys.stderr)
+            for path in stale:
+                print(f"FAIL: {path.relative_to(ROOT)} is stale", file=sys.stderr)
             print("run tools/gen_management.py", file=sys.stderr)
             return 1
         print(f"OK: {len(written)} generated files are current "
