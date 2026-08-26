@@ -78,7 +78,7 @@ mod memo;
 /// why `std::time` cannot be used directly.
 pub mod time;
 
-pub use error::{AxiamError, IdTokenFailureReason, OAuthProtocolError};
+pub use error::{AuthzKind, AxiamError, IdTokenFailureReason, OAuthProtocolError};
 pub use sensitive::Sensitive;
 
 // Single owner of all Phase 16 module declarations (this file is final
@@ -90,6 +90,12 @@ pub mod token;
 
 #[cfg(feature = "rest")]
 pub mod rest;
+
+// CONTRACT.md §27 — the management API. Documented by `src/management/mod.rs`'s
+// own `//!` block; a `///` here would be merged with it by rustdoc and resolved
+// in *this* scope, which breaks every intra-doc link the module makes to its own
+// children (and reports the failure with no file or line to point at).
+pub mod management;
 
 // CONTRACT.md §12 OIDC / SSO relying-party helpers — REST-only (built on the
 // same `reqwest`-based transport as `rest`/`client`).

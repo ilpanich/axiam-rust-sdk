@@ -21,6 +21,37 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+/// Why an [`AxiamError::Authz`] was raised (CONTRACT.md §27.4 rule 7).
+///
+/// §2 permits "language-idiomatic sub-types" of its three error types, and in
+/// a language with exceptions that is a subclass. Rust has no subtyping, so
+/// the idiomatic form is a discriminant on the variant that already carries
+/// the failure: `matches!(e, AxiamError::Authz { .. })` keeps working
+/// unchanged, and a caller who needs the distinction reads `kind`.
+///
+/// The distinction is worth having because these three mean different things
+/// to whoever is on the other end. `Denied` says *you may not*; `NotFound`
+/// says *there is no such thing — or it is not yours*, which in a multi-tenant
+/// IAM is deliberately the same answer; `Conflict` says *something already
+/// exists*, and is the one of the three a caller can usually fix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthzKind {
+    /// HTTP 403 — the caller is authenticated and lacks permission. The
+    /// default, and what every pre-§27 `Authz` error means.
+    #[default]
+    Denied,
+    /// HTTP 404 — the resource does not exist, **or** belongs to another
+    /// tenant. The server answers identically in both cases on purpose: a
+    /// distinguishable "exists but not yours" lets a caller enumerate another
+    /// tenant's ids.
+    NotFound,
+    /// HTTP 409 — a uniqueness or state conflict, such as creating a role
+    /// whose name is taken. Never retried (§27.4 rule 8): a 409 is the server
+    /// telling the truth, not a transient fault.
+    Conflict,
+}
+
 /// The unified error type returned by all fallible operations in this SDK.
 ///
 /// # Stability of the variant *fields*
@@ -78,6 +109,9 @@ pub enum AxiamError {
     #[error("authorization denied: {message}")]
     #[non_exhaustive]
     Authz {
+        /// Which refusal this is (CONTRACT.md §27.4 rule 7). `Denied` for
+        /// every failure that predates §27.
+        kind: AuthzKind,
         /// Human-readable description of the failure. MUST NOT contain a
         /// raw token value.
         message: String,
@@ -129,7 +163,21 @@ impl AxiamError {
         action: Option<String>,
         resource_id: Option<String>,
     ) -> AxiamError {
+        AxiamError::authz_kind(AuthzKind::Denied, message, action, resource_id)
+    }
+
+    /// Build an [`AxiamError::Authz`] with an explicit [`AuthzKind`].
+    ///
+    /// [`AxiamError::authz`] is this with `Denied`, which is what every
+    /// refusal outside the §27 management surface is.
+    pub fn authz_kind(
+        kind: AuthzKind,
+        message: impl Into<String>,
+        action: Option<String>,
+        resource_id: Option<String>,
+    ) -> AxiamError {
         AxiamError::Authz {
+            kind,
             message: message.into(),
             action,
             resource_id,
@@ -191,6 +239,13 @@ impl AxiamError {
             403 | 409 => {
                 let (action, resource_id) = parse_authz_body_fields(&message);
                 AxiamError::Authz {
+                    // §2 maps 403 and 409 to the same type; §27.4 rule 7
+                    // keeps that mapping and splits only the discriminant.
+                    kind: if status == 409 {
+                        AuthzKind::Conflict
+                    } else {
+                        AuthzKind::Denied
+                    },
                     message,
                     action,
                     resource_id,
@@ -231,6 +286,7 @@ impl AxiamError {
             // `{"action":...,"resource_id":...}`) — `action`/`resource_id`
             // stay `None` here.
             7 => AxiamError::Authz {
+                kind: AuthzKind::Denied,
                 message,
                 action: None,
                 resource_id: None,
@@ -375,10 +431,12 @@ impl AxiamError {
                 reason: *reason,
             },
             AxiamError::Authz {
+                kind,
                 message,
                 action,
                 resource_id,
             } => AxiamError::Authz {
+                kind: *kind,
                 message: message.clone(),
                 action: action.clone(),
                 resource_id: resource_id.clone(),

@@ -162,6 +162,15 @@ jobs:
       # release, so running it under the pinned MSRV compiler would turn each
       # new lint into a spurious MSRV-job failure. The MSRV job's job is to
       # prove the crate still COMPILES on 1.88, not to re-police style.
+      # CONTRACT §27.8: the management surface is generated from the vendored
+      # management-registry.json and committed. This fails when the two have
+      # drifted -- which happens whenever the registry is re-vendored and
+      # nobody re-ran the generator, and which would otherwise ship 146
+      # methods pointing at last release's routes.
+      - name: §27 management surface is regenerated
+        if: matrix.toolchain == 'stable'
+        run: python3 tools/gen_management.py --check
+
       - name: Format check
         if: matrix.toolchain == 'stable'
         run: cargo fmt --all --check

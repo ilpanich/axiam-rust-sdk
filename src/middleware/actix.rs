@@ -184,6 +184,7 @@ impl AxiamExtractorError {
     /// verification is never reached in this case.
     fn csrf_validation_failed() -> Self {
         Self(AxiamError::Authz {
+            kind: crate::error::AuthzKind::Denied,
             message: "CSRF validation failed: missing or mismatched X-CSRF-Token header".into(),
             action: None,
             resource_id: None,

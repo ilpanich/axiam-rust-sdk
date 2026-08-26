@@ -57,15 +57,19 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 ## Contract conformance
 
 This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22, §23,
-§24, §25, §26 (including §6.1 mTLS, the §10.1 minimum local-verification set — **including
-rule 9, sender-constrained tokens** — and §13 webhook signature verification).
+§24, §25, §26, §27 (including §6.1 mTLS, the §10.1 minimum local-verification set —
+**including rule 9, sender-constrained tokens** — and §13 webhook signature verification).
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§12.7, §14, §15, §17, §19, §20, §22, §24, §25 and §26 are named rather than folded into the
-range because they landed after this SDK already claimed §1–§13: widening the range silently
-would turn a statement that was true when written into a different claim without anyone
-editing it.
+§27 is implemented **in full**, both halves: the 146-operation imperative surface *and*
+the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
+that ships only one half to say which; this one ships both.
+
+§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26 and §27 are named rather than folded
+into the range because they landed after this SDK already claimed §1–§13: widening the
+range silently would turn a statement that was true when written into a different claim
+without anyone editing it.
 
 ### Retry policy (§16)
 
@@ -1213,6 +1217,152 @@ crate obeys: the protocol comes from `axiam-opaque`, the same implementation
 the AXIAM server links and the other ten SDKs bind through a C ABI or
 WebAssembly. That is why the `opaque` feature no longer pulls `num-bigint`, and
 why the ~870 lines of group arithmetic the SRP implementation needed are gone.
+
+## Management API (§27)
+
+Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
+about a resource, `verify_webhook` checks a delivery signature — and none of them can
+create the user, declare the resource or register the webhook. `client.management` is the
+part that can: **146 operations across 24 namespaces**, generated from
+`management-registry.json`, which is the whole server API minus what other contract
+sections own and minus organization creation and deletion (§27.0 keeps those out of reach
+of a client library on purpose).
+
+```rust
+use axiam_sdk::management::PageRequest;
+
+let page  = client.users().list(PageRequest::first(50)).await?;
+let every = client.users().list_all(PageRequest::first(200)).await?;
+let role  = client.roles().get(role_id).await?;
+client.roles().assign_to_user(role_id, &AssignRoleToUserRequest { user_id, resource_id: None }).await?;
+```
+
+Operations hang off **namespace handles** rather than the client. Twenty namespaces have a
+`list` and fourteen a `get`, so flattening them would need a disambiguating prefix invented
+once per operation — and would bury the eight §1 methods most callers want under five times
+as many they do not. Acquiring a handle performs no I/O.
+
+Every management call goes through the same request path as §1's, so it inherits CSRF
+forwarding (§3), the cookie jar (§4), the `X-Tenant-ID` header (§5), the TLS policy (§6),
+single-flight refresh (§9), the retry policy (§16) and telemetry (§19). None of it is
+reimplemented, and none of it can be forgotten per-operation.
+
+### Five things that bite
+
+**Reads retry; writes never do.** Not even the idempotent-looking ones.
+`certificates().generate()` twice mints two certificates; `service_accounts()
+.rotate_secret()` twice invalidates the secret the first call returned and you already
+stored.
+
+**Seventeen `PUT`s patch, four replace.** A sparse update sends only the fields you set —
+an unset field is *absent* from the wire body, not `null`, so it is left unchanged.
+But `settings().set_org()`, `email_config().set_org()`, `webauthn_policy().set()` and
+`ca_certificates().set_mtls_trust_anchor()` **replace**: what you omit is not preserved.
+Their request types have required fields, so a half-filled one does not compile — which is
+the point, since sending a subset of `SetOrgSettings` resets the other eighteen.
+
+**Seven calls return a secret exactly once.** Creating a service account or an OAuth2
+client, minting a SCIM token, generating a certificate, a CA, a signing CA or a PGP key.
+The field is `Sensitive<String>` — redacted in every debug rendering, readable with
+`.expose()`. No later `get` returns it again, and the `get` projection has no field where
+it was, so nothing tells you it is missing.
+
+**404 means "absent, or not yours."** The server answers 404 for a resource in another
+tenant deliberately: a distinguishable "exists but not yours" lets a caller enumerate
+another tenant's ids. Both arrive as `AxiamError::Authz { kind: AuthzKind::NotFound, .. }`.
+
+```rust
+match client.users().get(id).await {
+    Err(e) if e.is_not_found() => /* absent, or another tenant's */,
+    Err(e) if e.is_conflict()  => /* 409 — the name is taken */,
+    Err(e) => if let Some(v) = e.validation() { for f in &v.fields { /* 400, per field */ } },
+    Ok(user) => { /* … */ }
+}
+```
+
+`NotFoundError`, `ConflictError` and `ValidationError` are §2 sub-types. Rust has no
+subtyping, so they are a discriminant on the variant (404/409) and a typed error source
+(400/422) — `matches!(e, AxiamError::Authz { .. })` keeps compiling and keeps being true.
+
+**`{org_id}` and `{tenant_id}` default from the client**, and are overridable per handle
+with `.in_org(id)` / `.for_tenant(id)`. A client built with a *slug* fails locally, with no
+request, on any route that needs the UUID — the SDK will not resolve a slug behind your
+back.
+
+### Declarative manifests (§27.6, §27.7)
+
+Calling 146 operations one at a time is rarely what an application wants. What it does at
+start-up, in a migration, or in a test fixture is assert a shape:
+
+```rust
+use axiam_sdk::{manifest, Sensitive};
+
+let desired = manifest! {
+    resource workspace = "workspace", "collection";
+    resource documents = "documents", "collection", under workspace;
+    scope    drafts    = "draft", "Unpublished documents", in documents;
+
+    permission read  = "document:read",  "Read a document";
+    permission write = "document:write", "Write a document";
+
+    role editor = "Editor", "Edits drafts";
+    grant editor, allow read;
+    grant editor, allow write, in [drafts];
+
+    group staff = "Staff", "Everyone on the team";
+    assign role editor, to group staff;
+
+    user alice = "alice", "alice@example.com", password Sensitive::new(pw);
+    member alice, in staff;
+};
+
+let plan = client.manifest().plan(&desired).await?;   // reads only — no writes
+for action in plan.changes() {
+    println!("{:?} {}", action.change, action.summary);
+}
+let report = client.manifest().apply(&desired).await?;
+```
+
+`plan()` issues `GET`s and nothing else, so it is safe to point at production. It matches
+each spec by its natural key — a user's `username`, a role's `name`, a scope's `name`
+within its resource — and returns the ordered actions that would reconcile the tenant.
+
+- **Nothing is ever deleted.** A manifest is usually a *subset* of a tenant's truth, and a
+  prune would turn "make sure these three roles exist" into "delete the other forty". There
+  is no prune option, deliberately.
+- **A field the manifest does not state is never a difference**, so `apply` is safe against
+  a tenant that also holds hand-made state.
+- **Applying twice converges**: the second plan is all `NoChange`. That is what makes
+  re-running after a failure safe.
+- **There is no transaction** across 146 independent HTTP endpoints, and `ApplyReport` does
+  not pretend there is. If step 12 of 30 fails, steps 1–11 have happened; the report says
+  which, execution stops rather than continuing blindly, and there is no `rollback` —
+  because this SDK could not honour one.
+
+Broken manifests are refused before the first request: dangling keys, duplicate keys, a
+cycle in the resource parent graph, and a user that would have to be created with no
+`initial_password` all fail while nothing has been changed.
+
+### Examples
+
+- [`examples/management_basics.rs`](examples/management_basics.rs) — the imperative surface
+  and the rules above, one at a time.
+- [`examples/management_manifest.rs`](examples/management_manifest.rs) — the declarative
+  form end to end.
+- [`examples/device_mtls_provisioning.rs`](examples/device_mtls_provisioning.rs) —
+  provisioning an IoT device and its mTLS identity: anchor the CA, create the service
+  account, generate the certificate, bind it, then authenticate with it. This is the flow
+  §27 exists for; before it, every step but the last had to happen out of band.
+
+### Regenerating
+
+`src/management/models.rs` and `src/management/ops/` are generated and committed. After
+re-vendoring `management-registry.json` or `openapi.json`:
+
+```bash
+tools/gen_management.py            # regenerate
+tools/gen_management.py --check    # what CI runs
+```
 
 ## Browser builds (`axiam-sdk-wasm`)
 
