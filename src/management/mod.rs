@@ -86,6 +86,7 @@
 //! else here is written by hand. CI regenerates and diffs.
 
 pub mod error;
+pub mod manifest;
 pub mod models;
 pub mod ops;
 pub mod page;
