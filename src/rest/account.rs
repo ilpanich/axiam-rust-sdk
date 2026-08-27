@@ -24,6 +24,7 @@ const MFA_SETUP_ENROLL_PATH: &str = "/api/v1/auth/mfa/setup/enroll";
 const MFA_SETUP_CONFIRM_PATH: &str = "/api/v1/auth/mfa/setup/confirm";
 const VERIFY_EMAIL_PATH: &str = "/api/v1/auth/verify-email";
 const RESEND_VERIFICATION_PATH: &str = "/api/v1/auth/resend-verification";
+const RESEND_OWN_VERIFICATION_PATH: &str = "/api/v1/users/me/resend-verification";
 const RESET_PATH: &str = "/api/v1/auth/reset";
 const RESET_CONFIRM_PATH: &str = "/api/v1/auth/reset/confirm";
 const RESET_CONTEXT_PATH: &str = "/api/v1/auth/reset/context";
@@ -215,7 +216,7 @@ impl std::fmt::Debug for ResetConfirmBody {
 }
 
 // ---------------------------------------------------------------------------
-// The nine operations
+// The ten operations
 // ---------------------------------------------------------------------------
 
 impl AxiamClient {
@@ -318,7 +319,19 @@ impl AxiamClient {
         Self::expect_success(response).await
     }
 
-    /// `POST /api/v1/auth/resend-verification` (CONTRACT.md §25.1).
+    /// `POST /api/v1/auth/resend-verification` (CONTRACT.md §25.1) — the
+    /// **unauthenticated** resend, for a caller with no session.
+    ///
+    /// **Returns `Ok(())` whatever the outcome.** The address may not exist,
+    /// may already be verified, or may be over the daily limit, and this
+    /// operation answers identically in all four cases because it takes an
+    /// address from an anonymous caller: anything else is an oracle for which
+    /// addresses have accounts (§25.7).
+    ///
+    /// A caller that *is* signed in wants
+    /// [`resend_own_verification`](Self::resend_own_verification), which says
+    /// which of those happened. Do not reach for this one because it is the
+    /// name you already knew.
     pub async fn resend_verification(
         &self,
         email: &str,
@@ -330,6 +343,40 @@ impl AxiamClient {
             tenant_id,
         };
         let response = self.account_post(RESEND_VERIFICATION_PATH, &body).await?;
+        Self::expect_success(response).await
+    }
+
+    /// `POST /api/v1/users/me/resend-verification` (CONTRACT.md §25.1, §25.7)
+    /// — resend the **signed-in caller's own** verification mail, and say what
+    /// happened.
+    ///
+    /// Takes no address. The server reads it off the caller's own record, and
+    /// this signature deliberately offers no way to name a different one: a
+    /// parameter here would let an authenticated session mail an arbitrary
+    /// address.
+    ///
+    /// Unlike [`resend_verification`](Self::resend_verification) this reports
+    /// the outcome, because the caller is signed in to the account it is asking
+    /// about and none of the outcomes tells it anything it did not already
+    /// know:
+    ///
+    /// * `Ok(())` — a token was minted and the mail **enqueued**. Delivery is
+    ///   asynchronous and can still fail at the provider; a queue that accepts
+    ///   everything in front of a provider that rejects it looks exactly like
+    ///   this succeeding.
+    /// * [`AxiamError::Authz`] (from `409`) — already verified, or the account
+    ///   is in a state that must not be sent a live token.
+    /// * [`AxiamError::Network`] (from `429`) — the daily resend limit.
+    ///
+    /// §25.7 rule 2 forbids falling back to the unauthenticated endpoint on
+    /// either of those, and this SDK does not: that fallback would turn both
+    /// failures back into a green `Ok(())` and restore the bug this operation
+    /// exists to fix, with an extra round-trip.
+    pub async fn resend_own_verification(&self) -> Result<(), AxiamError> {
+        self.ensure_open()?;
+        let response = self
+            .account_post(RESEND_OWN_VERIFICATION_PATH, &serde_json::json!({}))
+            .await?;
         Self::expect_success(response).await
     }
 

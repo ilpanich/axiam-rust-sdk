@@ -380,6 +380,132 @@ async fn resend_verification() {
 }
 
 // ---------------------------------------------------------------------------
+// §25.7 — the two resends are two operations
+// ---------------------------------------------------------------------------
+
+/// The authenticated resend carries **no address**, and hits its own path.
+///
+/// The body assertion is the one that matters: a signature with no address
+/// parameter proves nothing about what the SDK serializes, and an address on
+/// this endpoint would let an authenticated session mail an arbitrary one.
+#[tokio::test]
+async fn resend_own_verification_sends_no_address() {
+    let server = MockServer::start().await;
+    let bodies = mount_capturing(
+        &server,
+        "/api/v1/users/me/resend-verification",
+        ResponseTemplate::new(200).set_body_json(json!({ "sent": true })),
+    )
+    .await;
+
+    build_client(&server.uri())
+        .resend_own_verification()
+        .await
+        .expect("resend own");
+
+    let sent = &bodies.lock().expect("lock")[0];
+    let keys: Vec<&String> = sent.as_object().expect("an object").keys().collect();
+    assert!(keys.is_empty(), "caller-supplied data went out: {keys:?}");
+}
+
+/// The two resends are distinct operations against distinct paths.
+///
+/// An SDK that aliased one to the other would reintroduce the exact defect
+/// §25.7 exists to describe, and every other test here would still pass — so
+/// this asserts on the path each one actually reached.
+#[tokio::test]
+async fn the_two_resends_reach_different_endpoints() {
+    let server = MockServer::start().await;
+    mount_capturing(
+        &server,
+        "/api/v1/auth/resend-verification",
+        ResponseTemplate::new(200),
+    )
+    .await;
+    mount_capturing(
+        &server,
+        "/api/v1/users/me/resend-verification",
+        ResponseTemplate::new(200).set_body_json(json!({ "sent": true })),
+    )
+    .await;
+
+    let client = build_client(&server.uri());
+    client
+        .resend_verification("alice@example.com", Uuid::new_v4())
+        .await
+        .expect("public resend");
+    client
+        .resend_own_verification()
+        .await
+        .expect("authenticated resend");
+
+    let paths: Vec<String> = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .filter(|p| p.contains("resend"))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "/api/v1/auth/resend-verification".to_string(),
+            "/api/v1/users/me/resend-verification".to_string(),
+        ]
+    );
+}
+
+/// `409` raises, and is **not** retried through the public endpoint.
+///
+/// The bug this operation exists to fix was a success return on a request that
+/// achieved nothing, so "does not resolve" is the assertion, and "issued
+/// exactly one request" is what rules out the §25.7 rule 2 fallback.
+#[tokio::test]
+async fn resend_own_verification_surfaces_a_409_rather_than_falling_back() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/users/me/resend-verification"))
+        .respond_with(ResponseTemplate::new(409))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Mounted and expected zero times: if the SDK "helpfully" retried through
+    // the enumeration-safe endpoint, both failures would turn back into a
+    // green result and only this expectation would notice.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/resend-verification"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let err = build_client(&server.uri())
+        .resend_own_verification()
+        .await
+        .expect_err("409 must not resolve");
+    assert!(matches!(err, AxiamError::Authz { .. }), "{err:?}");
+}
+
+/// `429` raises too, as the §2 mapping of a rate limit.
+#[tokio::test]
+async fn resend_own_verification_surfaces_the_daily_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/users/me/resend-verification"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = build_client(&server.uri())
+        .resend_own_verification()
+        .await
+        .expect_err("429 must not resolve");
+    assert!(matches!(err, AxiamError::Network { .. }), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
 // §25.4 — password reset
 // ---------------------------------------------------------------------------
 

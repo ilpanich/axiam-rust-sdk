@@ -82,6 +82,50 @@ async fn sign_in(
     } else {
         println!("signed in");
     }
+
+    // §5.2: whether this principal lives in the organization's reserved
+    // tenant. Check it before offering a tenant switch — an ordinary tenant
+    // principal is a principal of exactly one tenant, and changing
+    // `X-Tenant-ID` for one of those is a 403 the user discovers.
+    if result.organization_level {
+        println!("organization-level: can act on any tenant of its organization");
+    }
+    Ok(())
+}
+
+/// Resend the verification mail — and pick the right one of the two.
+///
+/// This is the operation the §25.7 pair exists to separate, and getting it
+/// wrong is silent: `resend_verification` answers `200` whatever happens, so a
+/// profile-page button wired to it reports success while doing nothing. That is
+/// not a bug in that endpoint — it takes an address from an *anonymous* caller,
+/// and a truthful answer there would be an oracle for which addresses have
+/// accounts.
+///
+/// Here the caller is signed in to the account it is asking about, so the
+/// authenticated operation is both available and truthful. It takes no address:
+/// the server reads it off the caller's own record, and a parameter would let a
+/// session mail an arbitrary one.
+#[allow(dead_code)]
+async fn resend_my_verification_mail(
+    client: &AxiamClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match client.resend_own_verification().await {
+        // "Sent" means ENQUEUED. Delivery is asynchronous and can still fail
+        // at the provider — a queue that accepts everything in front of one
+        // that rejects it looks exactly like this succeeding.
+        Ok(()) => println!("verification mail enqueued"),
+        Err(e) if e.is_conflict() => {
+            println!("already verified, or this account may not be sent one");
+        }
+        Err(axiam_sdk::AxiamError::Network { .. }) => {
+            println!("daily resend limit reached — try again tomorrow");
+        }
+        Err(e) => return Err(e.into()),
+    }
+    // Note what is NOT here: a fallback to `resend_verification` on either of
+    // those two. It would turn both back into a green result and rebuild the
+    // bug, with an extra round-trip (§25.7 rule 2).
     Ok(())
 }
 

@@ -58,6 +58,58 @@ async fn main() -> Result<(), AxiamError> {
     println!("  The SDK never truncates silently — if it returns one page, `total` says so.");
     let _ = PageRequest::new(200, 200);
 
+    section("Search rides on the page request, and the SERVER filters");
+    let filtered = PageRequest::first(50).search("ada");
+    println!("  client.users().list(PageRequest::first(50).search(\"ada\")).await?");
+    println!("  search = {:?}", filtered.search);
+    println!();
+    println!("  It goes on the page request rather than as a third argument on each of");
+    println!("  the twenty `list` methods, and that is what makes `list_all` carry it");
+    println!("  across the whole walk — a walk that filtered page one and not page two");
+    println!("  would hand you the matches followed by the unfiltered tail.");
+    println!();
+    println!("  The server applies it BEFORE offset/limit, so `total` counts matches.");
+    println!("  Filtering a page yourself after the fetch gives you neither: the page");
+    println!("  count would belong to a different result set than the page it labels.");
+    println!();
+    for term in ["", "   "] {
+        let cleared = PageRequest::first(50).search(term);
+        println!(
+            "  .search({term:?}) -> search = {:?}  (no `search` key on the wire)",
+            cleared.search
+        );
+    }
+    println!("  A box that fires on every keystroke sends one of those the moment it is");
+    println!("  cleared, and \"rows containing the empty string\" is a different question.");
+    println!();
+    println!("  The server caps the term's length. This SDK does not copy that cap: a");
+    println!("  truncation the server would not have made is a silently different query.");
+
+    section("Enums decode open, so one new value cannot fail a whole page");
+    let known: models::TenantKind =
+        serde_json::from_str("\"organization\"").expect("a value this SDK knows");
+    let novel: models::TenantKind =
+        serde_json::from_str("\"some-kind-from-a-newer-server\"").expect("and one it does not");
+    println!("  \"organization\"                    -> {known:?}");
+    println!("  \"some-kind-from-a-newer-server\"   -> {novel:?}");
+    println!();
+    println!("  The second one is the point. A closed enum would fail the whole `list`");
+    println!("  response over one field of one record — including the tenants you were");
+    println!("  actually after. Re-serializing round-trips the string, so reading a");
+    println!("  record and writing it back does not rewrite what this SDK did not know.");
+
+    section("Three fields that mean something specific when they are None");
+    println!("  Tenant::kind                — None on a row written before organization");
+    println!("                                scope existed. Read it as `standard`.");
+    println!("  MtlsTrustAnchorResponse::trusted_anchors");
+    println!("                              — None means NOTHING WAS RELOADED, not that");
+    println!("                                the listener trusts zero CAs. Only one of");
+    println!("                                those two states is a problem.");
+    println!("  Certificate::bound_service_account_id");
+    println!("                              — resolved by `certificates().list()` only,");
+    println!("                                and None on `get`. The SDK will not spend a");
+    println!("                                second request filling it in behind you.");
+
     section("Sparse update: what you leave None is left alone");
     let patch = models::UpdateUserRequest {
         email: Some("new@example.com".into()),

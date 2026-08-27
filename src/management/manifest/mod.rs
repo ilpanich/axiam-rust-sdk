@@ -149,12 +149,16 @@ impl<'c> Manifest<'c> {
 
     async fn read(&self, manifest: &ManagementManifest) -> Result<Snapshot, AxiamError> {
         let c = self.client;
-        let start = PageRequest::first(PLAN_PAGE);
-        let resources = c.resources().list_all(start).await?;
-        let permissions = c.permissions().list_all(start).await?;
-        let roles = c.roles().list_all(start).await?;
-        let groups = c.groups().list_all(start).await?;
-        let users = c.users().list_all(start).await?;
+        // A fresh request per read rather than one reused value: `PageRequest`
+        // carries an owned search term since §27.4 rule 4 grew one, so it is
+        // `Clone` and no longer `Copy`. The plan is a snapshot of everything,
+        // so none of these five is filtered.
+        let start = || PageRequest::first(PLAN_PAGE);
+        let resources = c.resources().list_all(start()).await?;
+        let permissions = c.permissions().list_all(start()).await?;
+        let roles = c.roles().list_all(start()).await?;
+        let groups = c.groups().list_all(start()).await?;
+        let users = c.users().list_all(start()).await?;
 
         let mut scopes = HashMap::new();
         // Only resources the manifest could match: a tenant with a thousand
@@ -211,7 +215,7 @@ impl<'c> Manifest<'c> {
             group_members.insert(
                 group.id,
                 c.groups()
-                    .list_members_all(group.id, start)
+                    .list_members_all(group.id, start())
                     .await?
                     .into_iter()
                     .map(|u| u.id)
@@ -560,7 +564,7 @@ impl<'c> Manifest<'c> {
                         Step::GrantPermission {
                             role: spec.key.clone(),
                             permission: grant.permission.clone(),
-                            effect: grant.effect,
+                            effect: grant.effect.clone(),
                             scopes: grant.scopes.clone(),
                         }
                     },

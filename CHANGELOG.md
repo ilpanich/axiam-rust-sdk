@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CONTRACT 1.31 — the AXIAM server PR #383 surface.** `CONTRACT.md`,
+  `openapi.json` and `management-registry.json` re-vendored, and the six things
+  they describe implemented.
+
+  - **`search` on all twenty paginated management operations** (§27.4 rule 4).
+    It is a third field on `PageRequest`, not a third argument on twenty
+    generated `list` methods:
+
+    ```rust
+    client.users().list(PageRequest::first(50).search("ada")).await?;
+    client.users().list_all(PageRequest::first(200).search("ada")).await?;
+    ```
+
+    Putting it on the page request is what makes `list_all` carry the term
+    across the whole walk. A walk that filtered its first request and not the
+    rest returns the matches followed by the unfiltered tail, which from the
+    caller's side looks like a server bug.
+
+    The server applies it **before** `offset`/`limit`, so `Page::total` counts
+    matches rather than rows — which is what lets a pager built on it show a
+    page count belonging to the result set it is paging. A blank or
+    whitespace-only term sends no `search` key at all, so a search box that
+    fires on every keystroke does not ask a different question once it is
+    cleared. The server's length cap is deliberately **not** copied here: a
+    client-side truncation the server would not have made is a silently
+    different query.
+
+  - **`resend_own_verification()`** (§25.1, §25.7) —
+    `POST /api/v1/users/me/resend-verification`, for a caller that is signed in
+    to the account it is asking about. It takes no address, and reports what
+    happened: `Ok(())` for enqueued, a conflict for already-verified-or-
+    ineligible, a network error for the daily limit.
+
+    `resend_verification` still exists and still answers `Ok(())` whatever
+    happens, because it takes an address from an anonymous caller and a truthful
+    answer there is an enumeration oracle. Use the new one whenever there is a
+    session — a profile page wired to the old one reports success while doing
+    nothing, which is the defect the pair exists to separate. This SDK does not
+    fall back from one to the other in either direction (§25.7 rule 2).
+
+  - **`LoginResult::organization_level`** (§5.2) — whether the account that just
+    signed in is an organization-level principal, whose global grants apply in
+    every tenant of its organization. Check it before offering a tenant switch:
+    an ordinary tenant principal changing `X-Tenant-ID` gets a `403`. `false`
+    against a server older than contract 1.31, which is the safe reading of
+    absent.
+
+  - **`Tenant::kind` and `models::TenantKind`** (§27.11) — ordinary tenant or
+    the organization's own scope. `None` on a row written before that scope
+    existed. Read-only: it is not on `CreateTenantRequest` or
+    `UpdateTenantRequest`, and a client that could set it could ask for a second
+    organization scope and be refused at the database rather than at the type.
+
+  - **`MtlsTrustAnchorResponse::trusted_anchors`** (§27.11) — how many CAs the
+    live listener now trusts, when it was reloaded. `None` is **not** zero: it
+    means there was no listener to ask (plaintext, or `client_auth` off), which
+    is the case `restart_required: true` already reports.
+
+  - **`Certificate::bound_service_account_id`** (§27.11) — the service account a
+    certificate authenticates, resolved for a whole page in one query by
+    `certificates().list()` and `None` on `certificates().get()`. The SDK does
+    not spend a second request filling it in there.
+
+### Changed
+
+- **Generated management enums are now open.** A value this SDK's copy of the
+  spec does not list decodes to `Unknown(String)` carrying it verbatim, instead
+  of failing the response it arrived in (§27.11 rule 1). A closed enum turns the
+  next `kind` or `status` the server adds into a parse error on the whole
+  `list` — taking down every record on the page over one field of one of them,
+  including the records the caller was after. Re-serializing round-trips the
+  original string, so read-modify-write does not silently rewrite a field this
+  SDK did not understand.
+
+  Consequence: these enums are `Clone` and no longer `Copy`.
+
+- **`PageRequest` is `Clone` and no longer `Copy`**, because it now holds an
+  owned search term. Call sites that relied on the implicit copy — reusing one
+  value across several `list` calls — need an explicit `.clone()`, or a fresh
+  `PageRequest::first(n)` per call.
+
+### Fixed
+
+- **`tools/gen_management.py` no longer drops a projected list element.** The
+  server answers `GET /api/v1/certificates` with `Certificate` plus one resolved
+  graph edge, expressed as an `allOf` of the `$ref` and an anonymous object.
+  Read as a whole, that composition has no name, so regenerating against the new
+  registry crashed on `certificates.list` — a page with no element type. The
+  generator now takes the base name through the `allOf` and folds the
+  projection's added fields onto the base model as optional. (The registry-side
+  half of this is AXIAM PR #386.)
+
 ## [1.0.0-alpha44] - 2026-08-25
 
 ### Changed

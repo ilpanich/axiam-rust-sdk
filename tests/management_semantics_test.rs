@@ -262,6 +262,353 @@ async fn list_all_stops_on_an_empty_page_despite_a_lying_total() {
 }
 
 // ---------------------------------------------------------------------------
+// §27.4 rule 4 — `search`
+// ---------------------------------------------------------------------------
+
+/// A term on the page request reaches the **query string**.
+///
+/// Asserted on the request URI rather than on the arguments: a term the SDK
+/// accepts, stores and never sends is the failure this test exists for, and it
+/// is invisible from the call site.
+#[tokio::test]
+async fn a_search_term_reaches_the_query_string() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users"))
+        .and(query_param("search", "ada"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                r#"{{"items": [{}], "total": 1, "offset": 0, "limit": 50}}"#,
+                user_body("ada@b.c")
+            ),
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = client
+        .users()
+        .list(PageRequest::first(50).search("ada"))
+        .await
+        .expect("users.list");
+    assert_eq!(page.total, 1);
+}
+
+/// No term sends **no** `search` key, and a blank one is the same request.
+///
+/// Asserted on the exact query key set. A UI that fires on every keystroke
+/// sends `?search=` the moment the box is cleared, and "rows whose name
+/// contains the empty string" is a different question from "all rows" —
+/// different enough that the server normalizes it away too.
+#[tokio::test]
+async fn an_absent_or_blank_term_sends_no_search_key() {
+    for term in [None, Some(""), Some("   ")] {
+        let server = MockServer::start().await;
+        let client = logged_in_client(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users"))
+            .respond_with(move |req: &Request| {
+                let keys: Vec<String> =
+                    req.url.query_pairs().map(|(k, _)| k.into_owned()).collect();
+                assert!(
+                    !keys.iter().any(|k| k == "search"),
+                    "sent a search key for {term:?}: {keys:?}"
+                );
+                ResponseTemplate::new(200).set_body_raw(
+                    r#"{"items": [], "total": 0, "offset": 0, "limit": 50}"#,
+                    "application/json",
+                )
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut request = PageRequest::first(50);
+        if let Some(term) = term {
+            request = request.search(term);
+        }
+        client.users().list(request).await.expect("users.list");
+    }
+}
+
+/// The walk carries the term on **every** request, not only the first.
+///
+/// A `list_all` that filtered page one and not page two would concatenate the
+/// matches with the unfiltered remainder — which reads as a server bug from the
+/// caller's side, and which a test counting requests rather than inspecting
+/// them would pass.
+#[tokio::test]
+async fn list_all_carries_the_search_term_across_the_whole_walk() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    for (offset, email) in [(0u64, "ada@b.c"), (1, "adam@e.f")] {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users"))
+            .and(query_param("offset", offset.to_string()))
+            // Every page of the walk must carry it, so this matcher is on each
+            // mock rather than on the first.
+            .and(query_param("search", "ad"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"items": [{}], "total": 2, "offset": {offset}, "limit": 1}}"#,
+                    user_body(email)
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let all = client
+        .users()
+        .list_all(PageRequest::first(1).search("ad"))
+        .await
+        .expect("users.list_all");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].email, "adam@e.f");
+}
+
+/// `search` is trimmed, and the trimmed term is what goes on the wire.
+#[tokio::test]
+async fn a_padded_term_is_trimmed_before_it_is_sent() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users"))
+        .and(query_param("search", "ada"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"items": [], "total": 0, "offset": 0, "limit": 50}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .users()
+        .list(PageRequest::first(50).search("  ada  "))
+        .await
+        .expect("users.list");
+}
+
+/// The server's length cap is the **server's**, and this SDK does not copy it.
+///
+/// A client-side truncation the server would not have made is a silently
+/// different query — the caller asked one question and the wire carried
+/// another, with nothing to indicate it. §27.4 rule 4.
+#[tokio::test]
+async fn a_long_term_is_sent_whole_rather_than_truncated_locally() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let long = "x".repeat(400);
+    let expected = long.clone();
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users"))
+        .respond_with(move |req: &Request| {
+            let sent = req
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "search")
+                .map(|(_, v)| v.into_owned())
+                .expect("a search key");
+            assert_eq!(sent.len(), expected.len(), "term was truncated client-side");
+            ResponseTemplate::new(200).set_body_raw(
+                r#"{"items": [], "total": 0, "offset": 0, "limit": 50}"#,
+                "application/json",
+            )
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .users()
+        .list(PageRequest::first(50).search(long))
+        .await
+        .expect("users.list");
+}
+
+// ---------------------------------------------------------------------------
+// §27.11 — model additions
+// ---------------------------------------------------------------------------
+
+/// An unrecognised enum value decodes rather than failing the whole page.
+///
+/// §27.11 rule 1. A closed enum turns the next `kind` the server adds into a
+/// parse error on `tenants.list`, taking down every tenant on the page over one
+/// field of one of them — including the ones the caller was actually after.
+#[tokio::test]
+async fn an_unknown_tenant_kind_decodes_instead_of_failing_the_page() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let org = management_support::ORG_ID;
+
+    let tenant = |slug: &str, kind: &str| {
+        format!(
+            r#"{{"id": "{}", "organization_id": "{org}", "name": "{slug}", "slug": "{slug}",
+                 "kind": "{kind}", "status": "active", "metadata": {{}},
+                 "created_at": "2026-08-27T00:00:00Z", "updated_at": "2026-08-27T00:00:00Z"}}"#,
+            Uuid::new_v4()
+        )
+    };
+
+    mount(
+        &server,
+        "GET",
+        &format!("/api/v1/organizations/{org}/tenants"),
+        200,
+        &format!(
+            r#"{{"items": [{}, {}], "total": 2, "offset": 0, "limit": 50}}"#,
+            tenant("prod", "standard"),
+            tenant("future", "some-kind-from-a-newer-server")
+        ),
+    )
+    .await;
+
+    let page = client
+        .tenants()
+        .list(PageRequest::first(50))
+        .await
+        .expect("tenants.list decodes an unknown kind");
+
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].kind, Some(models::TenantKind::Standard));
+    assert_eq!(
+        page.items[1].kind,
+        Some(models::TenantKind::Unknown(
+            "some-kind-from-a-newer-server".into()
+        )),
+        "the unknown value must be kept verbatim, not collapsed into a default"
+    );
+}
+
+/// A tenant row written before organization scope existed has no `kind`.
+#[tokio::test]
+async fn a_tenant_without_a_kind_decodes_as_absent() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let org = management_support::ORG_ID;
+    let id = Uuid::new_v4();
+
+    mount(
+        &server,
+        "GET",
+        &format!("/api/v1/organizations/{org}/tenants/{id}"),
+        200,
+        &format!(
+            r#"{{"id": "{id}", "organization_id": "{org}", "name": "prod", "slug": "prod",
+                 "status": "active", "metadata": {{}},
+                 "created_at": "2026-08-27T00:00:00Z", "updated_at": "2026-08-27T00:00:00Z"}}"#
+        ),
+    )
+    .await;
+
+    let tenant = client.tenants().get(id).await.expect("tenants.get");
+    assert_eq!(tenant.kind, None);
+}
+
+/// `trusted_anchors` is nullable, and `null` is not `0`.
+///
+/// §27.11 rule 3: "the listener trusts no CAs" and "there was no listener to
+/// ask" are different operational states, and only one of them is a problem.
+#[tokio::test]
+async fn a_trust_anchor_response_without_a_reload_carries_no_count() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let org = management_support::ORG_ID;
+    let ca = Uuid::new_v4();
+
+    mount(
+        &server,
+        "PUT",
+        &format!("/api/v1/organizations/{org}/ca-certificates/{ca}/mtls-trust-anchor"),
+        200,
+        &format!(
+            r#"{{"ca_certificate_id": "{ca}", "mtls_trust_anchor": true,
+                 "restart_required": true, "message": "stored; applies at next start"}}"#
+        ),
+    )
+    .await;
+
+    let out = client
+        .ca_certificates()
+        .set_mtls_trust_anchor(ca, &models::SetMtlsTrustAnchor { enabled: true })
+        .await
+        .expect("set_mtls_trust_anchor");
+    assert!(out.restart_required);
+    assert_eq!(out.trusted_anchors, None);
+}
+
+/// `bound_service_account_id` is populated by the list and absent from the get.
+///
+/// §27.11 rule 4. The `get` assertion is the load-bearing one: an SDK that
+/// filled it in there would be issuing a second request nobody asked for.
+#[tokio::test]
+async fn a_bound_certificate_carries_its_service_account_on_the_list_only() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let cert = Uuid::new_v4();
+    let sa = Uuid::new_v4();
+    let body = |extra: &str| {
+        format!(
+            r#"{{"id": "{cert}", "tenant_id": "{}", "issuer_ca_id": "{}",
+                 "subject": "CN=device-1", "public_cert_pem": "-----BEGIN CERTIFICATE-----",
+                 "fingerprint": "ab:cd", "cert_type": "device", "key_algorithm": "ed25519",
+                 "not_before": "2026-08-27T00:00:00Z", "not_after": "2027-08-27T00:00:00Z",
+                 "status": "active", "metadata": {{}},
+                 "created_at": "2026-08-27T00:00:00Z"{extra}}}"#,
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        )
+    };
+
+    mount(
+        &server,
+        "GET",
+        "/api/v1/certificates",
+        200,
+        &format!(
+            r#"{{"items": [{}], "total": 1, "offset": 0, "limit": 50}}"#,
+            body(&format!(r#", "bound_service_account_id": "{sa}""#))
+        ),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        &format!("/api/v1/certificates/{cert}"),
+        200,
+        &body(""),
+    )
+    .await;
+
+    let page = client
+        .certificates()
+        .list(PageRequest::first(50))
+        .await
+        .expect("certificates.list");
+    assert_eq!(page.items[0].bound_service_account_id, Some(sa));
+
+    let one = client
+        .certificates()
+        .get(cert)
+        .await
+        .expect("certificates.get");
+    assert_eq!(
+        one.bound_service_account_id, None,
+        "the get must not synthesize the projection with a second request"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // §27.4 rule 5 — sparse updates
 // ---------------------------------------------------------------------------
 
