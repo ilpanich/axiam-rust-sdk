@@ -103,13 +103,17 @@ struct LoginUserInfoWire {
     username: String,
     #[allow(dead_code)]
     email: String,
+    /// CONTRACT.md §5.2. Absent on a server older than contract 1.31, and
+    /// `false` is the safe reading of absent: the client then offers no
+    /// cross-tenant action rather than offering one that would 403.
+    #[serde(default)]
+    organization_level: bool,
 }
 
 /// `200 OK` body from `/api/v1/auth/login`, `/api/v1/auth/mfa/verify`, and
 /// (fields overlap) `/api/v1/auth/refresh`.
 #[derive(Debug, Deserialize)]
 struct LoginSuccessResponseWire {
-    #[allow(dead_code)]
     user: LoginUserInfoWire,
     session_id: Uuid,
     expires_in: u64,
@@ -175,6 +179,24 @@ pub struct LoginResult {
     /// Authorizes the `mfa_setup_enroll`/`mfa_setup_confirm` pair; populated
     /// only when `mfa_setup_required` is `true`.
     pub setup_token: Option<Sensitive<String>>,
+    /// Whether the account that just signed in is an **organization-level**
+    /// principal — CONTRACT.md §5.2.
+    ///
+    /// Such a principal's record lives in its organization's reserved tenant,
+    /// so its global grants apply in every tenant of that organization, and it
+    /// can act on a different one by sending a different `X-Tenant-ID` on the
+    /// next request — no re-login, because it already is a principal of every
+    /// tenant there.
+    ///
+    /// An ordinary tenant principal is a principal of exactly one tenant.
+    /// Changing the header for one of those produces a `403`, so this flag is
+    /// what an application checks *before* offering a tenant switch, rather
+    /// than discovering the answer from a failed request.
+    ///
+    /// `false` on a completed login against a server older than contract 1.31,
+    /// and `false` on the two pending outcomes, where no principal has been
+    /// established yet.
+    pub organization_level: bool,
 }
 
 impl LoginResult {
@@ -187,6 +209,9 @@ impl LoginResult {
             expires_in: None,
             mfa_setup_required: false,
             setup_token: None,
+            // No principal is established until the login completes, so there
+            // is nothing yet for this to be true of.
+            organization_level: false,
         }
     }
 
@@ -201,10 +226,25 @@ impl LoginResult {
             expires_in: None,
             mfa_setup_required: true,
             setup_token: Some(Sensitive::new(setup_token)),
+            organization_level: false,
         }
     }
 
+    /// A completed login for an ordinary tenant principal.
+    ///
+    /// Kept alongside [`Self::success_with_scope`] so the three call sites that
+    /// complete a login without reading a user object — OPAQUE and the forced
+    /// MFA setup path — do not have to assert a scope they were not told.
     pub(crate) fn success(session_id: Uuid, expires_in: u64) -> Self {
+        Self::success_with_scope(session_id, expires_in, false)
+    }
+
+    /// A completed login, carrying the §5.2 scope the server reported.
+    pub(crate) fn success_with_scope(
+        session_id: Uuid,
+        expires_in: u64,
+        organization_level: bool,
+    ) -> Self {
         Self {
             mfa_required: false,
             challenge_token: None,
@@ -213,6 +253,7 @@ impl LoginResult {
             expires_in: Some(expires_in),
             mfa_setup_required: false,
             setup_token: None,
+            organization_level,
         }
     }
 }
@@ -314,7 +355,11 @@ impl AxiamClient {
             200 => {
                 let wire: LoginSuccessResponseWire = response.json().await.map_err(deser_err)?;
                 absorb_session_cookies(self).await?;
-                Ok(LoginResult::success(wire.session_id, wire.expires_in))
+                Ok(LoginResult::success_with_scope(
+                    wire.session_id,
+                    wire.expires_in,
+                    wire.user.organization_level,
+                ))
             }
             202 => {
                 let wire: MfaRequiredResponseWire = response.json().await.map_err(deser_err)?;
@@ -387,7 +432,11 @@ impl AxiamClient {
             200 => {
                 let wire: LoginSuccessResponseWire = response.json().await.map_err(deser_err)?;
                 absorb_session_cookies(self).await?;
-                Ok(LoginResult::success(wire.session_id, wire.expires_in))
+                Ok(LoginResult::success_with_scope(
+                    wire.session_id,
+                    wire.expires_in,
+                    wire.user.organization_level,
+                ))
             }
             status => Err(map_error_response(status, response).await),
         }

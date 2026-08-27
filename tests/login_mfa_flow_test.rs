@@ -160,6 +160,62 @@ async fn login_without_mfa_yields_completed_session() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// §5.2 — organization-level principals
+// ---------------------------------------------------------------------------
+
+/// `organization_level` is carried through from the login response.
+///
+/// It is what an application checks *before* offering a tenant switch: such a
+/// principal changes the tenant it acts on with a header on the next request,
+/// and an ordinary one cannot, so offering the switch to both turns a
+/// distinction the server made into a 403 the user discovers.
+#[tokio::test]
+async fn login_reports_an_organization_level_principal() {
+    for (flag, expected) in [(Some(true), true), (Some(false), false), (None, false)] {
+        let mock_server = MockServer::start().await;
+        mount_jwks(&mock_server).await;
+
+        let tenant_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let access_token = issue_test_access_token(tenant_id, org_id, user_id, session_id);
+
+        let mut user = json!({ "id": user_id, "username": "alice", "email": "a@example.com" });
+        if let Some(flag) = flag {
+            user["organization_level"] = json!(flag);
+        }
+        let mut response = ResponseTemplate::new(200).set_body_json(json!({
+            "user": user,
+            "session_id": session_id,
+            "expires_in": 900,
+        }));
+        for cookie in session_cookies_header(&access_token) {
+            response = response.append_header("Set-Cookie", cookie.as_str());
+        }
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/login"))
+            .respond_with(response)
+            .mount(&mock_server)
+            .await;
+
+        let result = build_client(&mock_server.uri())
+            .login("a@example.com", "correct horse battery staple")
+            .await
+            .expect("login");
+
+        // The `None` row is the one that matters: a server older than contract
+        // 1.31 omits the field, and `false` is the safe reading of absent --
+        // the client then offers no cross-tenant action rather than one that
+        // would fail.
+        assert_eq!(
+            result.organization_level, expected,
+            "organization_level for a wire value of {flag:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn login_with_mfa_required_then_verify_mfa_completes_two_phase_flow() {
     let mock_server = MockServer::start().await;

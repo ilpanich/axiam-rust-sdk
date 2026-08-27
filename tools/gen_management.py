@@ -341,10 +341,31 @@ def discriminated(schema: dict[str, Any], types: Types) -> list[tuple[str, str, 
     return [(tag_field, value, payload) for value, payload in arms]  # type: ignore[misc]
 
 
+def projection_map(reg: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Schema name -> the fields a list projection adds on top of it.
+
+    `certificates.list` answers `Certificate` plus `bound_service_account_id`,
+    a graph edge the server resolves for the whole page in one query. CONTRACT
+    §27.11 rule 4 lets an SDK carry that as an optional field on the base type,
+    which is what this does: the field is `None` on `get`, and the SDK never
+    synthesizes it there with a second request.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    for nsdef in reg["namespaces"].values():
+        for op in nsdef["operations"].values():
+            resp = op["response"]
+            adds = resp.get("projected_fields")
+            if not adds or not resp.get("schema"):
+                continue
+            out.setdefault(resp["schema"], []).extend(adds)
+    return out
+
+
 def emit_models(reg: dict[str, Any], types: Types) -> str:
     names = closure(reg, types)
     secrets = sensitive_map(reg)
     directions = wire_directions(reg)
+    projections = projection_map(reg)
     out: list[str] = [BANNER, """
 //! Request and response types for the CONTRACT §27 management surface.
 //!
@@ -387,14 +408,31 @@ use crate::Sensitive;
             out.append(emit_union(rname, schema, union, types))
             continue
         out.append(
-            emit_struct(rname, name, types, secrets.get(name, set()), directions.get(name, set()))
+            emit_struct(
+                rname,
+                name,
+                types,
+                secrets.get(name, set()),
+                directions.get(name, set()),
+                projections.get(name, []),
+            )
         )
     return "\n".join(out)
 
 
 def emit_enum(rname: str, schema: dict[str, Any]) -> str:
     lines = doc_lines(schema.get("description") or f"`{rname}` (generated from openapi.json).")
-    lines.append("#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]")
+    lines.extend(doc_lines(
+        "\nAn **open** enum. A value this SDK does not know decodes to "
+        f"[`{rname}::Unknown`] carrying the string, rather than failing the "
+        "response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here "
+        "turns the next value the server adds into a parse error on the whole "
+        "`list`, taking down every record on the page over one field of one of "
+        "them. `#[non_exhaustive]` is what makes adding a known variant later "
+        "non-breaking for callers; this is what makes *not* knowing it "
+        "survivable at runtime."
+    ))
+    lines.append("#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]")
     lines.append("#[non_exhaustive]")
     lines.append(f"pub enum {rname} {{")
     for value in schema["enum"]:
@@ -403,6 +441,14 @@ def emit_enum(rname: str, schema: dict[str, Any]) -> str:
         if variant != value:
             lines.append(f'    #[serde(rename = "{value}")]')
         lines.append(f"    {variant},")
+    lines.extend(doc_lines(
+        "A value not in this SDK's copy of the spec, kept verbatim.\n\n"
+        "Reachable only by decoding; nothing in this SDK constructs it. "
+        "Re-serializing round-trips the original string, so reading a record "
+        "and writing it back does not silently rewrite a field this SDK did "
+        "not understand.", "    "))
+    lines.append("    #[serde(untagged)]")
+    lines.append("    Unknown(String),")
     lines.append("}\n")
     return "\n".join(lines)
 
@@ -450,9 +496,32 @@ def emit_union(rname: str, schema: dict[str, Any], arms: list, types: Types) -> 
 
 
 def emit_struct(
-    rname: str, name: str, types: Types, secrets: set[str], directions: set[str]
+    rname: str,
+    name: str,
+    types: Types,
+    secrets: set[str],
+    directions: set[str],
+    projected: list[dict[str, Any]] | None = None,
 ) -> str:
     props, required, desc = types.flatten(name)
+    props = dict(props)
+    projected_names: set[str] = set()
+    for add in projected or []:
+        if add["name"] in props:
+            continue
+        projected_names.add(add["name"])
+        props[add["name"]] = {
+            "type": add.get("type"),
+            "format": add.get("format"),
+            "description": (
+                "Resolved by the list projection only.\n\n"
+                "The server resolves this for a whole page in one query, so it is "
+                "populated by the `list` operation and is `None` on `get` "
+                "(CONTRACT §27.11 rule 4). `None` there means \"this read does not "
+                "carry it\", not \"there is nothing bound\" -- the SDK does not issue "
+                "a second request to fill it in."
+            ),
+        }
     fields: list[tuple[str, str | None, str, bool, str | None]] = []
     for pname, pschema in sorted(props.items()):
         ident, rename = field_name(pname)
@@ -465,7 +534,9 @@ def emit_struct(
                 ty = f"Option<{ty}>"
         else:
             ty = types.rust(pschema)
-            if pname not in required and not ty.startswith("Option<"):
+            if (pname not in required or pname in projected_names) and not ty.startswith(
+                "Option<"
+            ):
                 ty = f"Option<{ty}>"
         fields.append((ident, rename, ty, pname in secrets, pschema.get("description")))
 
@@ -758,7 +829,7 @@ def emit_operation(
         else:
             args.append(f'{p["name"]}: {param_rust_type(p["format"])}')
 
-    query_extra = [q for q in op["query_params"] if q["name"] not in ("offset", "limit")]
+    query_extra = extra_query_params(op)
     required_q = [q for q in query_extra if q["required"]]
     optional_q = [q for q in query_extra if not q["required"]]
     filter_ty = None
@@ -883,6 +954,24 @@ def emit_operation(
     return "\n".join(lines), canonical
 
 
+def extra_query_params(op: dict[str, Any]) -> list[dict[str, Any]]:
+    """Query parameters that become method arguments, rather than `PageRequest`.
+
+    `offset` and `limit` have always come from `PageRequest`. `search` joins
+    them on paginated operations (CONTRACT §27.4 rule 4): the term is part of
+    which page this is, and putting it on the page request rather than on each
+    of the twenty generated `list` methods is what makes `collect_pages` carry
+    it across the whole walk instead of filtering only the first request.
+
+    The `paginated` guard matters. A *non*-paginated operation that grew a
+    `search` parameter would have no `PageRequest` to carry it, so it keeps its
+    own argument -- none exists in the registry today, and this is what keeps
+    that from silently dropping the parameter if one ever does.
+    """
+    owned = ("offset", "limit", "search") if op["paginated"] else ("offset", "limit")
+    return [q for q in op["query_params"] if q["name"] not in owned]
+
+
 def emit_list_all(method: str, args: list[str], canonical: str, public_ty: str) -> list[str]:
     """The §27.4 rule 4 auto-paging companion for a paginated read."""
     inner = public_ty[len("Page<"):-1]
@@ -914,9 +1003,7 @@ def emit_filters(namespace: str, nsdef: dict[str, Any]) -> str:
     """
     out: list[str] = []
     for opname, op in nsdef["operations"].items():
-        optional = [
-            q for q in op["query_params"] if q["name"] not in ("offset", "limit") and not q["required"]
-        ]
+        optional = [q for q in extra_query_params(op) if not q["required"]]
         if len(optional) <= 2:
             continue
         rname = f"{pascal(namespace)}{pascal(opname)}Filter"
@@ -1144,7 +1231,7 @@ def call_arguments(
             args.append('"example"')
             route = route.replace("{" + name + "}", "example")
 
-    extra = [q for q in op["query_params"] if q["name"] not in ("offset", "limit")]
+    extra = extra_query_params(op)
     required_q = [q for q in extra if q["required"]]
     optional_q = [q for q in extra if not q["required"]]
     for _ in required_q:

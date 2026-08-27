@@ -1046,13 +1046,61 @@ struct with flags rather than a discriminated enum — so nothing that reads
 `AxiamError::Authz`: the branch is matched on the body's discriminant, not the
 `403` alone.
 
+### Organization-level principals (§5.2)
+
+A completed login also reports whether the account is an **organization-level** principal
+— one whose record lives in its organization's reserved tenant, so its global grants apply
+in every tenant of that organization:
+
+```rust
+if result.organization_level {
+    // Acts on any tenant of its organization by sending a different
+    // `X-Tenant-ID` on the next request. No re-login: it already is a
+    // principal of every tenant there.
+}
+```
+
+Check it *before* offering a tenant switch. An ordinary tenant principal is a principal of
+exactly one tenant, and changing the header for one of those produces a `403` — so a UI
+that offers the switch to everyone has turned a distinction the server made into a failure
+the user discovers. `false` on a server older than contract 1.31, which is the safe
+reading of absent: no cross-tenant action offered.
+
 ### Email verification and password reset
 
 ```rust
 client.verify_email(&token, tenant_id).await?;
-client.resend_verification(email, tenant_id).await?;
+client.resend_verification(email, tenant_id).await?;          // anonymous caller
+client.resend_own_verification().await?;                      // signed-in caller
 client.request_password_reset(&PasswordResetRequest { email, ..Default::default() }).await?;
 ```
+
+**There are two resends, and picking the wrong one is silent.** Use the second one
+whenever you have a session.
+
+`resend_verification` takes an address from an *unauthenticated* caller, so it answers
+identically whatever happens — unknown address, already verified, over the daily limit —
+and returns `Ok(())` in all of them. That constancy is the point: anything else is an
+oracle for which addresses have accounts.
+
+`resend_own_verification` is for a caller signed in to the account it is asking about. It
+takes **no address at all** (the server reads it off your own record, and a parameter here
+would let a session mail an arbitrary one) and it says what happened:
+
+```rust
+match client.resend_own_verification().await {
+    Ok(())                                => /* minted and enqueued */,
+    Err(e) if e.is_conflict()             => /* already verified, or not eligible */,
+    Err(AxiamError::Network { .. })       => /* 429 — daily limit */,
+    Err(e)                                => return Err(e),
+}
+```
+
+A profile page that called the *first* one reports success while doing nothing, which is
+the bug this pair exists to separate. This SDK does not fall back from the second to the
+first on either failure — that would turn both back into a green `Ok(())` with an extra
+round-trip. And `Ok(())` means *enqueued*: delivery is asynchronous and can still fail at
+the provider.
 
 `request_password_reset` returns `Ok(())` **whether or not the address exists**,
 and this SDK exposes no way to tell them apart. Any signal distinguishing them —
@@ -1233,6 +1281,7 @@ use axiam_sdk::management::PageRequest;
 
 let page  = client.users().list(PageRequest::first(50)).await?;
 let every = client.users().list_all(PageRequest::first(200)).await?;
+let found = client.users().list(PageRequest::first(50).search("ada")).await?;
 let role  = client.roles().get(role_id).await?;
 client.roles().assign_to_user(role_id, &AssignRoleToUserRequest { user_id, resource_id: None }).await?;
 ```
@@ -1288,6 +1337,45 @@ subtyping, so they are a discriminant on the variant (404/409) and a typed error
 with `.in_org(id)` / `.for_tenant(id)`. A client built with a *slug* fails locally, with no
 request, on any route that needs the UUID — the SDK will not resolve a slug behind your
 back.
+
+**`search` is on the page request, and the server does the filtering.** All twenty
+paginated operations take it:
+
+```rust
+let page = client.users().list(PageRequest::first(50).search("ada")).await?;
+let all  = client.users().list_all(PageRequest::first(200).search("ada")).await?;
+```
+
+It is matched case-insensitively against the identifying fields of whatever is being
+listed — a name or username, plus the record id, so a UUID out of a log line pastes in
+as-is. Three consequences worth knowing:
+
+- **`total` counts matches, not rows**, because the filter is applied before
+  `offset`/`limit`. That is what makes a pager built on it show a page count belonging to
+  the result set it is paging. Filtering a page client-side instead gives you neither.
+- **`list_all` carries the term across the whole walk**, so it returns the matches and not
+  the matches followed by the unfiltered tail.
+- **A blank term is no term.** `.search("")` and `.search("   ")` send no `search`
+  parameter at all, so a box that fires on every keystroke does not ask a different
+  question once it has been cleared. The server also caps the term's length; this SDK does
+  not copy that cap, because a client-side truncation the server would not have made is a
+  silently different query.
+
+`PageRequest` is `Clone` and no longer `Copy` — an owned term cannot be copied
+bit-for-bit — so a value reused across several calls needs an explicit `.clone()`.
+
+**Three model fields arrived with contract 1.31 (§27.11).** `Tenant::kind` says whether a
+tenant is ordinary or its organization's own scope, and is `None` on a row written before
+that scope existed. `MtlsTrustAnchorResponse::trusted_anchors` is `None` when nothing was
+reloaded — which is *not* zero: "the listener trusts no CAs" and "there was no listener to
+ask" are different states, and only one is a problem. `Certificate::bound_service_account_id`
+is resolved by `certificates().list()` and is `None` on `get`; the SDK does not issue a
+second request to fill it in.
+
+**Generated enums are open.** A value this SDK's copy of the spec does not list decodes to
+`Unknown(String)` carrying it verbatim, rather than failing the response it arrived in. A
+closed enum would turn the next `kind` or `status` the server adds into a parse error on
+the whole `list` — taking down every record on the page over one field of one of them.
 
 ### Declarative manifests (§27.6, §27.7)
 

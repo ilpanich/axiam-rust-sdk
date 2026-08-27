@@ -32,7 +32,15 @@ use uuid::Uuid;
 use crate::Sensitive;
 
 /// `ActorType` (generated from openapi.json).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`ActorType::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ActorType {
     /// `User`
@@ -41,6 +49,14 @@ pub enum ActorType {
     ServiceAccount,
     /// `System`
     System,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// `AddMemberRequest` (generated from openapi.json).
@@ -91,7 +107,15 @@ pub struct AssignRoleToUserRequest {
 /// `None` is the default and reproduces today's behavior byte-for-byte:
 /// `evaluate` allows every registration unconditionally, with no MDS lookup
 /// (D8 step 1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`AttestationMode::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AttestationMode {
     /// `none`
@@ -103,6 +127,14 @@ pub enum AttestationMode {
     /// `direct_required`
     #[serde(rename = "direct_required")]
     DirectRequired,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// `AuditLogEntry` (generated from openapi.json).
@@ -133,7 +165,15 @@ pub struct AuditLogEntry {
 }
 
 /// `AuditOutcome` (generated from openapi.json).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`AuditOutcome::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AuditOutcome {
     /// `Success`
@@ -142,6 +182,14 @@ pub enum AuditOutcome {
     Failure,
     /// `Denied`
     Denied,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Request to bind a certificate to a service account.
@@ -255,6 +303,14 @@ pub struct CaCertificate {
 /// returned once on generation and never stored by AXIAM.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Certificate {
+    /// Resolved by the list projection only.
+    ///
+    /// The server resolves this for a whole page in one query, so it is populated
+    /// by the `list` operation and is `None` on `get` (CONTRACT §27.11 rule 4).
+    /// `None` there means "this read does not carry it", not "there is nothing
+    /// bound" -- the SDK does not issue a second request to fill it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_service_account_id: Option<Uuid>,
     /// `cert_type`.
     pub cert_type: CertificateType,
     /// `created_at`.
@@ -293,7 +349,15 @@ pub struct CertificatePolicy {
 }
 
 /// Status of a certificate in its lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`CertificateStatus::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CertificateStatus {
     /// `Active`
@@ -302,10 +366,26 @@ pub enum CertificateStatus {
     Revoked,
     /// `Expired`
     Expired,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// The purpose for which a certificate was issued.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`CertificateType::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CertificateType {
     /// `User`
@@ -314,6 +394,14 @@ pub enum CertificateType {
     Service,
     /// `Device`
     Device,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// FIDO certification level, as recorded in an MDS `statusReports` entry's
@@ -323,7 +411,15 @@ pub enum CertificateType {
 /// < L2 < L2Plus < L3 < L3Plus`, which `WebauthnAttestationPolicy::evaluate`
 /// (D8 step 9) relies on directly for the `min_certification` boundary check
 /// (`entry_level >= policy_min`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`CertificationLevel::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CertificationLevel {
     /// `L1`
@@ -338,6 +434,14 @@ pub enum CertificationLevel {
     L3,
     /// `L3Plus`
     L3Plus,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// How a client proves its identity at the token endpoint (RFC 8705 §2, OIDC
@@ -348,7 +452,15 @@ pub enum CertificationLevel {
 /// (see `handle_authorization_code`), and adding a public-client value here
 /// before the rest of the server understands one would let an operator
 /// register a client whose authentication is silently skipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`ClientAuthMethod::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ClientAuthMethod {
     /// `client_secret_post`
@@ -363,6 +475,14 @@ pub enum ClientAuthMethod {
     /// `private_key_jwt`
     #[serde(rename = "private_key_jwt")]
     PrivateKeyJwt,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Which security posture a client is registered under (X5.1).
@@ -378,7 +498,15 @@ pub enum ClientAuthMethod {
 /// The same philosophy as the rate-limit postures: ordinary clients see no
 /// behaviour change at all, because \[`Standard`\](Self::Standard) is the serde
 /// default and every row written before schema v38 decodes to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`ClientProfile::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ClientProfile {
     /// `standard`
@@ -387,6 +515,14 @@ pub enum ClientProfile {
     /// `fapi2`
     #[serde(rename = "fapi2")]
     Fapi2,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// One credential's compliance outcome (D9).
@@ -1028,7 +1164,15 @@ pub struct EncryptedExport {
 /// What the server does when an interceptor does not produce a usable reply —
 /// timeout, transport failure, bad signature, stale nonce, or a patch the
 /// allow-list rejects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`FailurePolicy::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum FailurePolicy {
     /// `fail_closed`
@@ -1037,6 +1181,14 @@ pub enum FailurePolicy {
     /// `fail_open`
     #[serde(rename = "fail_open")]
     FailOpen,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Federation config response -- omits client_secret.
@@ -1519,13 +1671,29 @@ impl From<&ImportCaCertificateRequest> for ImportCaCertificateRequestWire {
 }
 
 /// The type of key algorithm used for a certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`KeyAlgorithm::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum KeyAlgorithm {
     /// `Rsa4096`
     Rsa4096,
     /// `Ed25519`
     Ed25519,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Account lockout rules.
@@ -1616,7 +1784,15 @@ pub struct MfaMethodResponse {
 }
 
 /// Type of MFA method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`MfaMethodType::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MfaMethodType {
     /// `Totp`
@@ -1625,6 +1801,14 @@ pub enum MfaMethodType {
     Passkey,
     /// `SecurityKey`
     SecurityKey,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Multi-factor authentication policy.
@@ -1659,13 +1843,29 @@ pub struct MtlsTrustAnchorResponse {
     pub message: String,
     /// The flag as now stored.
     pub mtls_trust_anchor: bool,
-    /// Always `true`: rustls builds its client trust store once, when the
-    /// listener is constructed, so this takes effect at the next start.
+    /// Whether the change still needs a restart to take effect.
+    ///
+    /// `false` when the live listener accepted the new anchor set — the ordinary
+    /// case on a TLS deployment. `true` only when there was no listener to reload
+    /// into (plaintext, or `client_auth = off`), where the flag is stored and
+    /// applies at the next start.
     pub restart_required: bool,
+    /// How many CAs the listener now trusts for client authentication, when it
+    /// was reloaded. `None` when nothing was reloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_anchors: Option<i64>,
 }
 
 /// Events that can trigger an admin notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`NotificationEventType::Unknown`\] carrying the string, rather than
+/// failing the response it arrived in -- CONTRACT §27.11 rule 1. A closed
+/// enum here turns the next value the server adds into a parse error on the
+/// whole `list`, taking down every record on the page over one field of one
+/// of them. `#\[non_exhaustive\]` is what makes adding a known variant later
+/// non-breaking for callers; this is what makes *not* knowing it survivable
+/// at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NotificationEventType {
     /// `login_failure`
@@ -1719,6 +1919,14 @@ pub enum NotificationEventType {
     /// `service_account_deleted`
     #[serde(rename = "service_account_deleted")]
     ServiceAccountDeleted,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Admin notification preferences.
@@ -2039,7 +2247,15 @@ pub struct Permission {
 /// \[`PermissionEffect::Allow`\] is the default, so data written before this
 /// existed, and clients that send no `effect`, both mean "allow". No
 /// migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`PermissionEffect::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PermissionEffect {
     /// `allow`
@@ -2048,6 +2264,14 @@ pub enum PermissionEffect {
     /// `deny`
     #[serde(rename = "deny")]
     Deny,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// An OpenPGP key stored by AXIAM.
@@ -2074,33 +2298,81 @@ pub struct PgpKey {
 }
 
 /// Key algorithm for OpenPGP keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`PgpKeyAlgorithm::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PgpKeyAlgorithm {
     /// `Rsa4096`
     Rsa4096,
     /// `Ed25519`
     Ed25519,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// The purpose of an OpenPGP key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`PgpKeyPurpose::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PgpKeyPurpose {
     /// `AuditSigning`
     AuditSigning,
     /// `Export`
     Export,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Status of an OpenPGP key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`PgpKeyStatus::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PgpKeyStatus {
     /// `Active`
     Active,
     /// `Revoked`
     Revoked,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// `GET` response: the stored policy plus the unknown-AAGUID action it
@@ -2209,7 +2481,15 @@ pub struct ReactorEventDescriptor {
 }
 
 /// How a reactor participates in an event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`ReactorMode::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ReactorMode {
     /// `intercept`
@@ -2218,6 +2498,14 @@ pub enum ReactorMode {
     /// `listen`
     #[serde(rename = "listen")]
     Listen,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// `ReactorResponse` (generated from openapi.json).
@@ -2447,7 +2735,15 @@ pub struct ScimTokenResponse {
 
 /// Why a token is or is not currently usable — for display only. The
 /// authentication path never surfaces this distinction on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`ScimTokenStatus::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ScimTokenStatus {
     /// `active`
@@ -2459,6 +2755,14 @@ pub enum ScimTokenStatus {
     /// `revoked`
     #[serde(rename = "revoked")]
     Revoked,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// `Scope` (generated from openapi.json).
@@ -2678,13 +2982,29 @@ pub struct SetOrgSettings {
 }
 
 /// Whether a settings row belongs to an organization or a tenant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SettingsScope::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum SettingsScope {
     /// `Org`
     Org,
     /// `Tenant`
     Tenant,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Request body for signing an audit batch.
@@ -2757,6 +3077,12 @@ pub struct Tenant {
     pub created_at: String,
     /// `id`.
     pub id: Uuid,
+    /// Whether this is an ordinary tenant or the organization's own scope.
+    ///
+    /// `#\[serde(default)\]` so every row written before organization scope existed
+    /// reads back as \[`TenantKind::Standard`\], which is what it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TenantKind>,
     /// Arbitrary key-value metadata.
     pub metadata: serde_json::Value,
     /// Human-readable name.
@@ -2769,6 +3095,40 @@ pub struct Tenant {
     pub status: TenantStatus,
     /// `updated_at`.
     pub updated_at: String,
+}
+
+/// What a tenant *is*, as distinct from what state it is in.
+///
+/// Reserved rather than inferred: an organization has exactly one tenant of
+/// kind \[`Self::Organization`\], enforced by a unique index rather than by
+/// convention. Deriving it from a magic slug or from "the oldest tenant"
+/// would make the organization scope something an operator could rename or
+/// delete by accident, and it is the scope the super-admin lives in.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`TenantKind::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum TenantKind {
+    /// `standard`
+    #[serde(rename = "standard")]
+    Standard,
+    /// `organization`
+    #[serde(rename = "organization")]
+    Organization,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Partial tenant overrides. `None` = inherit from org baseline.
@@ -2856,13 +3216,29 @@ pub struct TenantSettingsOverride {
 ///
 /// A `Suspended` tenant remains stored and its data isolated, but is treated
 /// as administratively disabled. New tenants are `Active` by default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`TenantStatus::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum TenantStatus {
     /// `Active`
     Active,
     /// `Suspended`
     Suspended,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// X4 trust for exchanging this provider's tokens (RFC 8693, external
@@ -2932,7 +3308,15 @@ pub struct TokenPolicy {
 /// What to do with an AAGUID that has no MDS entry (i.e. FIDO Alliance has no
 /// metadata for it — not necessarily malicious, MDS coverage is incomplete
 /// for some legitimate authenticators).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`UnknownAaguidAction::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum UnknownAaguidAction {
     /// `allow`
@@ -2941,6 +3325,14 @@ pub enum UnknownAaguidAction {
     /// `deny`
     #[serde(rename = "deny")]
     Deny,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// `UpdateFederationConfigRequest` (generated from openapi.json).
@@ -3399,7 +3791,15 @@ pub struct UserResponse {
 }
 
 /// `UserStatus` (generated from openapi.json).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`UserStatus::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum UserStatus {
     /// `Active`
@@ -3414,6 +3814,14 @@ pub enum UserStatus {
     Anonymized,
     /// `Deleted`
     Deleted,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Per-tenant WebAuthn attestation policy (D5). One row per tenant; an absent
