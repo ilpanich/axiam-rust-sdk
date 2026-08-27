@@ -364,8 +364,8 @@ impl AxiamClient {
     ///   asynchronous and can still fail at the provider; a queue that accepts
     ///   everything in front of a provider that rejects it looks exactly like
     ///   this succeeding.
-    /// * [`AxiamError::Authorization`] (from `409`) — already verified, or the
-    ///   account is in a state that must not be sent a live token.
+    /// * [`AxiamError::Authz`] (from `409`) — already verified, or the account
+    ///   is in a state that must not be sent a live token.
     /// * [`AxiamError::Network`] (from `429`) — the daily resend limit.
     ///
     /// §25.7 rule 2 forbids falling back to the unauthenticated endpoint on

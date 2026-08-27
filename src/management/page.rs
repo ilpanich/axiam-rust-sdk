@@ -23,7 +23,7 @@ use crate::AxiamError;
 /// [`search`](Self::search) lives here rather than as a third argument on each
 /// of the twenty generated `list` methods, which is what §27.4 rule 4 requires:
 /// the term is part of *which page this is*, not an unrelated filter. That is
-/// also what makes [`collect_pages`] carry it across the whole walk for free —
+/// also what makes the auto-paging walk carry it across every request for free —
 /// a walk that filtered the first request and not the rest would return the
 /// unfiltered tail.
 ///
