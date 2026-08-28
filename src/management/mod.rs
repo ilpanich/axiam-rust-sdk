@@ -3,7 +3,7 @@
 //! Every other part of this SDK assumes a populated tenant. [`login`] signs a
 //! user in; [`check_access`] asks about a resource; [`webhook`] verifies a
 //! delivery signature. None of them can create the user, declare the resource
-//! or register the webhook. This module is the part that can: **146 operations
+//! or register the webhook. This module is the part that can: **147 operations
 //! across 24 namespaces**, which is the whole server API minus what other
 //! contract sections already own and minus organization creation and deletion,
 //! which §27.0 keeps deliberately out of reach of a client library.
@@ -30,7 +30,7 @@
 //!
 //! §27.2 makes that normative rather than stylistic: twenty namespaces have a
 //! `list` and fourteen a `get`, so a flat surface would need a disambiguating
-//! prefix invented once per operation — and 146 more methods on `AxiamClient`
+//! prefix invented once per operation — and 147 more methods on `AxiamClient`
 //! would bury the eight most callers actually want.
 //!
 //! Acquiring a handle performs no I/O. It borrows the client, so it cannot
@@ -83,7 +83,7 @@
 //!
 //! `models.rs` and `ops/` are **generated** by `tools/gen_management.py` from
 //! the vendored `management-registry.json` — §27.8 requires that, because a
-//! hand-maintained table of 146 names is wrong by the next release. Everything
+//! hand-maintained table of 147 names is wrong by the next release. Everything
 //! else here is written by hand. CI regenerates and diffs.
 
 pub mod error;

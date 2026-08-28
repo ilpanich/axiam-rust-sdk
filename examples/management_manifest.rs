@@ -3,7 +3,7 @@
 //! The same tenant `management_basics.rs` builds call by call, declared
 //! instead. This is what most applications actually want at start-up, in a
 //! migration, or in a test fixture: assert a shape and let the SDK work out
-//! which of the 146 operations that takes.
+//! which of the 147 operations that takes.
 //!
 //! ```text
 //! cargo run --example management_manifest --features rest
@@ -91,7 +91,7 @@ async fn main() -> Result<(), AxiamError> {
     println!(" 3. Applying twice converges: the second plan is all NoChange. That is the");
     println!("    property that makes re-running after a failure safe.");
     println!();
-    println!(" 4. There is no transaction across 146 independent HTTP endpoints, and");
+    println!(" 4. There is no transaction across 147 independent HTTP endpoints, and");
     println!("    ApplyReport does not pretend there is. If step 12 of 30 fails, steps");
     println!("    1-11 have happened; the report says which, execution stops rather than");
     println!("    continuing blindly, and there is no rollback — because the SDK could");

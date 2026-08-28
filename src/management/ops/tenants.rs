@@ -158,4 +158,22 @@ impl<'c> Tenants<'c> {
             .management_send_no_content(call, None::<&()>)
             .await
     }
+
+    /// `POST /api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn export_audit(&self, tenant_id: Uuid) -> Result<(), AxiamError> {
+        let org_id = self.scope.org(self.client, "tenants.export_audit")?;
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "tenants.export_audit",
+            verb: Verb::Post,
+            path_template: "/api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export",
+            path: format!("/api/v1/organizations/{org_id}/tenants/{tenant_id}/audit-export"),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, None::<&()>)
+            .await
+    }
 }

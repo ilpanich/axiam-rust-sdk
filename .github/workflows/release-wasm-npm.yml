@@ -256,6 +256,12 @@ jobs:
       # Trusted Publishing, so `--provenance` is not passed — npm rejects it as
       # redundant on this path in some versions and attaches the attestation
       # either way.
+      #
+      # T-148 / H-1: that implied attestation is why this job has no separate
+      # `attest-build-provenance` step, unlike the crates.io publish in
+      # sdk-ci-rust.yml. npm records a Sigstore attestation over the published
+      # tarball where consumers already look (`npm audit signatures`);
+      # crates.io records nothing, which is why the crate needs one of its own.
       - name: Publish to npm
         working-directory: axiam-sdk-wasm/pkg
         run: npm publish --access public --tag "${NPM_DIST_TAG}"

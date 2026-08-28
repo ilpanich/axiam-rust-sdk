@@ -30,7 +30,7 @@ async fn main() -> Result<(), AxiamError> {
     // locally, with no request, until it does.
     let _ = &client;
 
-    section("Namespaces, not 146 methods on the client");
+    section("Namespaces, not 147 methods on the client");
     println!("  client.users().list(..)          client.roles().assign_to_user(..)");
     println!("  client.tenants().create(..)      client.certificates().generate(..)");
     println!();

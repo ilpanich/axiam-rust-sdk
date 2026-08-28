@@ -62,7 +62,7 @@ This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, 
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§27 is implemented **in full**, both halves: the 146-operation imperative surface *and*
+§27 is implemented **in full**, both halves: the 147-operation imperative surface *and*
 the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
 that ships only one half to say which; this one ships both.
 
@@ -1301,7 +1301,7 @@ why the ~870 lines of group arithmetic the SRP implementation needed are gone.
 Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
 about a resource, `verify_webhook` checks a delivery signature — and none of them can
 create the user, declare the resource or register the webhook. `client.management` is the
-part that can: **146 operations across 24 namespaces**, generated from
+part that can: **147 operations across 24 namespaces**, generated from
 `management-registry.json`, which is the whole server API minus what other contract
 sections own and minus organization creation and deletion (§27.0 keeps those out of reach
 of a client library on purpose).
@@ -1409,7 +1409,7 @@ the whole `list` — taking down every record on the page over one field of one 
 
 ### Declarative manifests (§27.6, §27.7)
 
-Calling 146 operations one at a time is rarely what an application wants. What it does at
+Calling 147 operations one at a time is rarely what an application wants. What it does at
 start-up, in a migration, or in a test fixture is assert a shape:
 
 ```rust
@@ -1452,7 +1452,7 @@ within its resource — and returns the ordered actions that would reconcile the
   a tenant that also holds hand-made state.
 - **Applying twice converges**: the second plan is all `NoChange`. That is what makes
   re-running after a failure safe.
-- **There is no transaction** across 146 independent HTTP endpoints, and `ApplyReport` does
+- **There is no transaction** across 147 independent HTTP endpoints, and `ApplyReport` does
   not pretend there is. If step 12 of 30 fails, steps 1–11 have happened; the report says
   which, execution stops rather than continuing blindly, and there is no `rollback` —
   because this SDK could not honour one.

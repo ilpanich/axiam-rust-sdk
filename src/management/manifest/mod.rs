@@ -1,6 +1,6 @@
 //! Declarative management — CONTRACT.md §27.6.
 //!
-//! The 146 operations of §27 are the floor, not the ceiling. What an
+//! The 147 operations of §27 are the floor, not the ceiling. What an
 //! application actually does at start-up, in a migration, or in a test fixture
 //! is **assert a shape**: this tenant has these resources, with these scopes,
 //! these permissions, these roles, and these bindings. Written imperatively
@@ -781,7 +781,7 @@ impl<'c> Manifest<'c> {
 
     /// Run the plan, stopping at the first failure.
     ///
-    /// §27.6 rule 7: there is no transaction across 146 independent HTTP
+    /// §27.6 rule 7: there is no transaction across 147 independent HTTP
     /// endpoints, so this reports what each step did, stops rather than
     /// continuing blindly past a failure, and offers no rollback.
     async fn execute(
