@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta02] - 2026-08-28
+
 ### Added
+
+- Contract 1.31 — list search, the truthful resend, organization scope
+
+- The manifest! declarative form, plus §27 examples
+
+- Declarative manifests — plan and apply (§27.6)
+
+- Generate the §27 surface — 146 operations, 24 namespaces
 
 - **CONTRACT 1.31 — the AXIAM server PR #383 surface.** `CONTRACT.md`,
   `openapi.json` and `management-registry.json` re-vendored, and the six things
@@ -74,6 +84,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-vendor openapi.json and management-registry.json from axiam main (#87)
+
+- Re-vendor the contract artifacts: spec digest + §27.10 posture (#85)
+
+- Gate the generated §27 surface against the registry
+
+- Raise coverage on the paths the first pass missed
+
+- Document the §27 management surface
+
+- The §27.9 semantics a generator cannot write
+
+- Generate a conformance test that reaches all 146 operations
+
+- Re-vendor CONTRACT.md, openapi.json and the §27 registry
+
 - **Generated management enums are now open.** A value this SDK's copy of the
   spec does not list decodes to `Unknown(String)` carrying it verbatim, instead
   of failing the response it arrived in (§27.11 rule 1). A closed enum turns the
@@ -91,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PageRequest::first(n)` per call.
 
 ### Fixed
+
+- Two rustdoc links in the contract 1.31 doc comments
+
+- Resolve broken intra-doc links in the §27 management module
 
 - **`tools/gen_management.py` no longer drops a projected list element.** The
   server answers `GET /api/v1/certificates` with `Certificate` plus one resolved
