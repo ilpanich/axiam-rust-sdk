@@ -14,10 +14,10 @@ and writes:
 generated, everything ergonomic is not. Nothing here opens a connection or
 maps an error -- every generated call funnels into
 ``AxiamClient::management_send``, so §3, §4, §5, §6, §9, §16 and §19 are
-inherited rather than reimplemented 146 times.
+inherited rather than reimplemented 147 times.
 
 The generated test matters as much as the generated code. The SDK's coverage
-floor is 90% of lines, and 146 hand-written smoke tests is the kind of chore
+floor is 90% of lines, and 147 hand-written smoke tests is the kind of chore
 that gets half-done; generating them from the same registry means a new
 operation arrives with its own coverage or not at all.
 
@@ -1028,7 +1028,7 @@ def emit_ops_mod(reg: dict[str, Any]) -> str:
     lines.append("//! One handle per §27 namespace, and the accessors that reach them.")
     lines.append("//!")
     lines.append("//! §27.2 makes this namespacing normative rather than stylistic: twenty")
-    lines.append("//! namespaces have a `list` and fourteen a `get`, so flattening 146")
+    lines.append("//! namespaces have a `list` and fourteen a `get`, so flattening 147")
     lines.append("//! operations onto the client would need a disambiguating prefix invented")
     lines.append("//! once per operation -- and would bury the eight §1 methods most callers")
     lines.append("//! actually want under five times as many they do not.")
@@ -1294,7 +1294,7 @@ def emit_test(reg: dict[str, Any], types: Types, secrets: dict[str, set[str]]) -
     lines.append("/// Every operation this file exercises, in registry order.")
     lines.append("///")
     lines.append("/// §27.9: assert the count and the names, so a partial regeneration fails")
-    lines.append("/// here instead of quietly shipping 140 of 146.")
+    lines.append("/// here instead of quietly shipping 140 of 147.")
     lines.append(f"const EXERCISED: [&str; {len(all_ops)}] = [")
     for name in all_ops:
         lines.append(f'    "{name}",')

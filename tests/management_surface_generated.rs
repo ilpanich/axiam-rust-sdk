@@ -32,8 +32,8 @@ fn example_id() -> Uuid {
 /// Every operation this file exercises, in registry order.
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
-/// here instead of quietly shipping 140 of 146.
-const EXERCISED: [&str; 146] = [
+/// here instead of quietly shipping 140 of 147.
+const EXERCISED: [&str; 147] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -42,6 +42,7 @@ const EXERCISED: [&str; 146] = [
     "tenants.get",
     "tenants.update",
     "tenants.delete",
+    "tenants.export_audit",
     "users.list",
     "users.create",
     "users.get",
@@ -291,6 +292,21 @@ async fn tenants_surface() {
         .delete(example_id())
         .await
         .expect("tenants.delete");
+
+    // tenants.export_audit
+    mount(
+        &server,
+        "POST",
+        &format!("/api/v1/organizations/{ORG_ID}/tenants/{EXAMPLE_ID}/audit-export"),
+        200,
+        "",
+    )
+    .await;
+    client
+        .tenants()
+        .export_audit(example_id())
+        .await
+        .expect("tenants.export_audit");
 }
 
 /// Reaches every operation in the `users` namespace.
