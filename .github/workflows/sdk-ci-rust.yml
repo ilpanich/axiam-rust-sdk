@@ -350,11 +350,40 @@ jobs:
       - name: Regenerate gRPC stubs for the published artifact (D-09)
         run: cargo build --features grpc
 
+      # `cargo package`, not `cargo publish --dry-run`, and that difference is
+      # the whole fix for the beta04 release failure.
+      #
+      # Both commands run the same verification build, so this is still the
+      # pre-publish gate SC#5 asks for. What only `cargo package` does is
+      # *retain* the packaged tarball at `target/package/<name>-<version>.crate`.
+      # `cargo publish` assembles its tarball under `target/package/tmp-crate/`
+      # and removes it once the upload returns, leaving only the unpacked
+      # verification directory behind — so the attestation step at the end of
+      # this job globbed `target/package/*.crate`, matched nothing, and failed
+      # the release *after* both crates were already live on crates.io
+      # (run 33200842250). Packaging first is what puts the file there, and
+      # `cargo publish` does not remove a `.crate` it did not create.
+      #
       # See the test job's Dry-run publish gate comment: --allow-dirty is
       # required solely because the gitignored, build.rs-generated src/gen/ is
       # present-but-uncommitted by design (D-09).
-      - name: Verify axiam-sdk-macros before publish (SC#5)
-        run: cd axiam-sdk-macros && cargo publish --dry-run --all-features --allow-dirty
+      - name: Package axiam-sdk-macros — verifies, and retains the tarball (SC#5)
+        run: cd axiam-sdk-macros && cargo package --all-features --allow-dirty
+
+      # Fail here, before anything is uploaded, rather than at the attestation
+      # step after both crates are irrevocably live. A missing subject is the
+      # exact shape of the beta04 failure, and the only recoverable moment to
+      # notice it is while crates.io still knows nothing about this version.
+      - name: Assert the axiam-sdk-macros tarball is retained
+        run: |
+          set -euo pipefail
+          crate="target/package/axiam-sdk-macros-${GITHUB_REF_NAME#v}.crate"
+          if [ ! -f "${crate}" ]; then
+            echo "::error::${crate} is missing — cargo package did not retain the tarball, so there would be nothing to attest."
+            ls -la target/package/ || true
+            exit 1
+          fi
+          sha256sum "${crate}"
 
       # Publish both members in dependency order on stable cargo (`cargo publish
       # --workspace` is nightly-only, #10948): the companion proc-macro crate first,
@@ -374,15 +403,40 @@ jobs:
         id: crates-auth
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
 
+      # `--no-verify` here is not a weakening: the `cargo package` step above
+      # just ran the verification build over these exact bytes, and packaging
+      # is deterministic (the tarball `cargo publish` assembles is byte-for-byte
+      # the one already sitting in target/package — verified by sha256 in the
+      # guard step below). Skipping the *second* identical build keeps the
+      # release job from compiling the whole dependency graph twice.
       - name: Publish axiam-sdk-macros to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: cd axiam-sdk-macros && cargo publish --all-features --allow-dirty
+        run: cd axiam-sdk-macros && cargo publish --no-verify --all-features --allow-dirty
+
+      # Packaged only now, and deliberately not alongside the macros crate
+      # above: axiam-sdk depends on axiam-sdk-macros with `=<version>`, and the
+      # packaged manifest resolves that against the REGISTRY rather than the
+      # workspace path. Verifying it before the macros crate is on crates.io
+      # would fail to resolve for every genuinely new version.
+      - name: Package axiam-sdk — verifies, and retains the tarball
+        run: cargo package --all-features --allow-dirty
+
+      - name: Assert the axiam-sdk tarball is retained
+        run: |
+          set -euo pipefail
+          crate="target/package/axiam-sdk-${GITHUB_REF_NAME#v}.crate"
+          if [ ! -f "${crate}" ]; then
+            echo "::error::${crate} is missing — cargo package did not retain the tarball, so there would be nothing to attest."
+            ls -la target/package/ || true
+            exit 1
+          fi
+          sha256sum "${crate}"
 
       - name: Publish axiam-sdk to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: cargo publish --all-features --allow-dirty
+        run: cargo publish --no-verify --all-features --allow-dirty
 
       # T-148 / H-1: crates.io has no provenance mechanism, so this is the only
       # way an integrator can tie a downloaded .crate back to the workflow that
@@ -390,10 +444,16 @@ jobs:
       #
       #   gh attestation verify axiam-sdk-<version>.crate --repo ilpanich/axiam-rust-sdk
       #
-      # `cargo publish` leaves the packaged tarball it uploaded in
-      # target/package/, so these are the exact bytes crates.io serves — not a
-      # re-packaged lookalike. Attested after the publish because that is when
-      # the file exists; a failure here is a red release job.
+      # The subjects are the tarballs the `cargo package` steps retained. They
+      # are the exact bytes crates.io serves — not a re-packaged lookalike:
+      # cargo assembles the upload from the same deterministic packaging pass,
+      # and the two are byte-identical (the retained file and the one cargo
+      # uploads hash the same). `cargo publish` does NOT leave its own copy
+      # behind, which is why this used to find nothing at all.
+      #
+      # Still attested after the publish, so the attestation only exists for
+      # versions that actually reached the registry. The guard steps above are
+      # what make a missing subject a pre-upload failure rather than this one.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release job no longer fails after publishing.** `cargo publish`
+  assembles its tarball under `target/package/tmp-crate/` and deletes it once
+  the upload returns, leaving only the unpacked verification directory behind.
+  The `actions/attest-build-provenance` step therefore globbed
+  `target/package/*.crate`, matched nothing, and failed the beta04 release with
+  `Could not find subject at path target/package/*.crate` — *after* both crates
+  were already live on crates.io and could never be republished.
+
+  Both members are now packaged with `cargo package` (which runs the same
+  verification build *and* retains the tarball) before being published with
+  `--no-verify`, and a guard step asserts the attestation subject exists before
+  anything is uploaded. The retained tarball is byte-identical to the one cargo
+  uploads, so the attestation still covers exactly the bytes crates.io serves.
+
 ## [1.0.0-beta04] - 2026-08-28
 
 ### Changed
