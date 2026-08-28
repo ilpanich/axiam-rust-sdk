@@ -7,22 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **`build()` now refuses a blank `tenant_slug` or `org_slug`** (CONTRACT.md §5,
-  §5.2.1 rule 2). `.tenant_slug("")` used to build a client that put
-  `tenant_slug: ""` on the wire on every login. Nothing can carry an empty
-  slug, so the server resolved nothing; on `/auth/opaque/login/start` it failed
-  on the workspace *before* the tenant's OPAQUE mode was read, so the `404` of
-  §23.4 rule 10 never arrived, this crate had no fallback to take, and sign-in
-  failed even against a tenant with OPAQUE **disabled** — reported as `invalid
-  credentials`, which sends a user off to reset a password that works.
-
-  Checked at `build()` rather than in `tenant_slug()`, which returns `Self` and
-  has nowhere to put an error. `""` is exactly as much of a tenant as none at
-  all, so it earns §5's existing refusal.
+## [1.0.0-beta04] - 2026-08-28
 
 ### Changed
+
+- Attest the published crates, pin actions by digest, re-vendor contract 1.33
 
 - **CONTRACT 1.32 — signing in an organization-level principal (§5.2.1).**
   `CONTRACT.md`, `openapi.json` and `management-registry.json` re-vendored from
@@ -45,6 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Prefer that over omitting the tenant: §5 rule 2 still requires one on the
   `X-Tenant-ID` header of every request after the login.
+
+### Fixed
+
+- Refuse a blank tenant_slug instead of sending it as ""
+
+- **`build()` now refuses a blank `tenant_slug` or `org_slug`** (CONTRACT.md §5,
+  §5.2.1 rule 2). `.tenant_slug("")` used to build a client that put
+  `tenant_slug: ""` on the wire on every login. Nothing can carry an empty
+  slug, so the server resolved nothing; on `/auth/opaque/login/start` it failed
+  on the workspace *before* the tenant's OPAQUE mode was read, so the `404` of
+  §23.4 rule 10 never arrived, this crate had no fallback to take, and sign-in
+  failed even against a tenant with OPAQUE **disabled** — reported as `invalid
+  credentials`, which sends a user off to reset a password that works.
+
+  Checked at `build()` rather than in `tenant_slug()`, which returns `Self` and
+  has nowhere to put an error. `""` is exactly as much of a tenant as none at
+  all, so it earns §5's existing refusal.
 
 ## [1.0.0-beta02] - 2026-08-28
 
