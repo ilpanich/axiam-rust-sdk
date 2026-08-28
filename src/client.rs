@@ -140,6 +140,11 @@ impl AxiamClientBuilder {
 
     /// Human-readable tenant slug form (§5). Mutually exclusive with
     /// [`Self::tenant_id`] — the last one called wins.
+    ///
+    /// A blank slug is refused by [`Self::build`], not here: `""` is exactly as
+    /// much of a tenant as none at all (§5.2.1 rule 2). To sign in an
+    /// organization-level principal, name the organization's reserved tenant,
+    /// whose slug is `"organization"` in every deployment (§5.2.1).
     pub fn tenant_slug(mut self, slug: impl Into<String>) -> Self {
         self.tenant = Some(TenantIdentifier::Slug(slug.into()));
         self
@@ -154,6 +159,9 @@ impl AxiamClientBuilder {
 
     /// Organization slug — optional; see `OrgIdentifier` doc comment.
     /// Mutually exclusive with [`Self::org_id`] — the last one called wins.
+    ///
+    /// As with [`Self::tenant_slug`], a blank slug is refused by
+    /// [`Self::build`] rather than sent as `""`.
     pub fn org_slug(mut self, slug: impl Into<String>) -> Self {
         self.org = Some(OrgIdentifier::Slug(slug.into()));
         self
@@ -393,6 +401,44 @@ impl AxiamClientBuilder {
                 oauth: None,
 reason: None,
 })?;
+
+        // A blank slug is not an identifier, and §5.2.1 rule 2 makes refusing
+        // it here a MUST rather than a nicety. Nothing can carry an empty slug,
+        // so `tenant_slug: ""` on the wire resolves nothing — and on
+        // `/auth/opaque/login/start` it fails on the workspace *before* the
+        // tenant's OPAQUE mode is read, so the `404` that means "OPAQUE is not
+        // offered here" never arrives and the caller has no fallback to take.
+        // Sign-in then fails even against a tenant with OPAQUE disabled, and
+        // the server's answer says "invalid credentials", which sends the user
+        // off to reset a password that works.
+        //
+        // Checked at build rather than in `tenant_slug()`, which returns `Self`
+        // and has nowhere to put an error. `""` is exactly as much of a tenant
+        // as no tenant at all, so it earns the same refusal.
+        if let TenantIdentifier::Slug(slug) = &tenant
+            && slug.trim().is_empty()
+        {
+            return Err(AxiamError::Auth {
+                message: "tenant_slug must not be blank — AXIAM is multi-tenant and there is no \
+                          default tenant; to sign in an organization-level principal, name the \
+                          organization's reserved tenant, whose slug is \"organization\" \
+                          (CONTRACT.md §5, §5.2.1)"
+                    .into(),
+                oauth: None,
+                reason: None,
+            });
+        }
+        if let Some(OrgIdentifier::Slug(slug)) = &self.org
+            && slug.trim().is_empty()
+        {
+            return Err(AxiamError::Auth {
+                message: "org_slug must not be blank — omit it entirely, or name the organization \
+                          (CONTRACT.md §5.1, §5.2.1)"
+                    .into(),
+                oauth: None,
+                reason: None,
+            });
+        }
 
         let jar = crate::cookies::CookieJar::new();
 
@@ -1028,6 +1074,74 @@ mod tests {
             }
             Err(other) => panic!("expected Auth error, got {other}"),
         }
+    }
+
+    // §5.2.1 rule 2: an SDK MUST NOT send an empty-string slug. The builder is
+    // the only place this crate can enforce it — `tenant_slug()` returns `Self`
+    // and has nowhere to put an error — and enforcing it there is what makes
+    // the rule structural rather than a convention every call site has to
+    // remember.
+    //
+    // The rule is not cosmetic. `tenant_slug: ""` matches no row, so the server
+    // resolves nothing; on `/auth/opaque/login/start` it fails on the workspace
+    // before the tenant's OPAQUE mode is read, so the `404` of §23.4 rule 10
+    // never arrives, this crate has no fallback to take, and sign-in fails even
+    // against a tenant with OPAQUE disabled — reported as "invalid
+    // credentials", which sends a user off to reset a password that works.
+    #[test]
+    fn build_with_a_blank_tenant_slug_fails() {
+        for blank in ["", "   "] {
+            match AxiamClient::builder()
+                .base_url("https://iam.example.com")
+                .expect("valid base_url")
+                .tenant_slug(blank)
+                .org_slug("globex")
+                .build()
+            {
+                Ok(_) => panic!("a blank tenant_slug must be refused (§5, §5.2.1)"),
+                Err(AxiamError::Auth { message, .. }) => {
+                    assert!(message.contains("tenant_slug"), "message: {message}");
+                    assert!(
+                        message.contains("organization"),
+                        "the refusal must point at the reserved tenant, which is what an \
+                         organization-level principal names instead: {message}"
+                    );
+                }
+                Err(other) => panic!("expected Auth error, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_with_a_blank_org_slug_fails() {
+        match AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .tenant_slug("acme")
+            .org_slug("")
+            .build()
+        {
+            Ok(_) => panic!("a blank org_slug must be refused (§5.1, §5.2.1)"),
+            Err(AxiamError::Auth { message, .. }) => {
+                assert!(message.contains("org_slug"), "message: {message}");
+            }
+            Err(other) => panic!("expected Auth error, got {other}"),
+        }
+    }
+
+    /// §5.2.1: an organization-level principal signs in by naming the
+    /// organization's reserved tenant, whose slug is fixed in every deployment.
+    /// No new surface — the ordinary builder reaches it.
+    #[test]
+    fn build_with_the_reserved_organization_tenant_succeeds() {
+        let client = AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .tenant_slug("organization")
+            .org_slug("globex")
+            .build()
+            .expect("the reserved tenant is named like any other");
+        assert_eq!(client.base_url().as_str(), "https://iam.example.com/");
     }
 
     #[test]

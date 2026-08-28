@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`build()` now refuses a blank `tenant_slug` or `org_slug`** (CONTRACT.md §5,
+  §5.2.1 rule 2). `.tenant_slug("")` used to build a client that put
+  `tenant_slug: ""` on the wire on every login. Nothing can carry an empty
+  slug, so the server resolved nothing; on `/auth/opaque/login/start` it failed
+  on the workspace *before* the tenant's OPAQUE mode was read, so the `404` of
+  §23.4 rule 10 never arrived, this crate had no fallback to take, and sign-in
+  failed even against a tenant with OPAQUE **disabled** — reported as `invalid
+  credentials`, which sends a user off to reset a password that works.
+
+  Checked at `build()` rather than in `tenant_slug()`, which returns `Self` and
+  has nowhere to put an error. `""` is exactly as much of a tenant as none at
+  all, so it earns §5's existing refusal.
+
+### Changed
+
+- **CONTRACT 1.32 — signing in an organization-level principal (§5.2.1).**
+  `CONTRACT.md`, `openapi.json` and `management-registry.json` re-vendored from
+  the AXIAM server, where the same bug class had made an organization-level
+  administrator unable to sign in at all (ilpanich/axiam#388).
+
+  Naming no tenant now resolves the organization's own reserved scope on
+  `/auth/login`, `/auth/opaque/login/start`, `/auth/opaque/register/start` and
+  `/auth/webauthn/authenticate/discoverable/start`. That reserved tenant's slug
+  is `organization`, so this crate reaches it through the ordinary builder and
+  needs no new surface:
+
+  ```rust
+  AxiamClient::builder()
+      .base_url("https://iam.example.com")?
+      .tenant_slug("organization")
+      .org_slug("globex")
+      .build()?
+  ```
+
+  Prefer that over omitting the tenant: §5 rule 2 still requires one on the
+  `X-Tenant-ID` header of every request after the login.
+
 ## [1.0.0-beta02] - 2026-08-28
 
 ### Added
