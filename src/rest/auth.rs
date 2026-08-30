@@ -242,7 +242,7 @@ pub struct LoginResult {
     /// is exactly right there: a server older than contract 1.34 cannot switch
     /// the acting tenant, so the two cannot differ.
     ///
-    /// [`AxiamClient::opaque_enrollment_for_self`]: crate::AxiamClient::opaque_enrollment_for_self
+    /// [`AxiamClient::opaque_enrollment_for_self`]: crate::client::AxiamClient::opaque_enrollment_for_self
     pub principal_tenant_id: Option<Uuid>,
     /// Slug of [`Self::principal_tenant_id`] — `"organization"` for an
     /// organization-level principal. `None` when the server omits it.
