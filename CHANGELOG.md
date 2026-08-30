@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta05] - 2026-08-30
+
 ### Added
+
+- Contract 1.35, carrying 1.34 — service-account RBAC, principal tenant, tenant scope
 
 - **Contract 1.35, which carries contract 1.34 with it.** Nothing had been
   fanned out since 1.33, so this re-vendors `CONTRACT.md`, `openapi.json` and
@@ -41,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assignment written before the field existed already meant.
 
 ### Fixed
+
+- Point the intra-doc link at where AxiamClient actually lives
+
+- Format the new test file, and stop spelling credentials out in it
+
+- Retain the packaged tarball so build-provenance has a subject (#90)
 
 - **A registration record for your own password was sealed against the wrong
   tenant.** CONTRACT.md §5.2.2 rule 2: the caller's credentials live in the
