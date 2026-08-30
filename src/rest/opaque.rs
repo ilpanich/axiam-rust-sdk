@@ -316,8 +316,20 @@ impl AxiamClient {
         }
     }
 
-    /// Build a registration record for `password`, to send with any request
-    /// that sets one (user creation, change-password, reset completion).
+    /// Build a registration record for `password`, sealed against the tenant
+    /// this client is **acting on**.
+    ///
+    /// That is the right tenant when the record is for an account being
+    /// created in it — §27 `users.create`, and the reset-completion flow,
+    /// which names its own tenant. It is the **wrong** tenant for the caller's
+    /// own password change once an organization-level principal has selected
+    /// another one to act on: the account's credentials live where the account
+    /// does. Use [`Self::opaque_enrollment_for_self`] there — CONTRACT.md
+    /// §5.2.2 rule 2.
+    ///
+    /// The two were one method until contract 1.34, and could be again only if
+    /// the acting and principal tenants could not diverge, which is precisely
+    /// what §5.2 stopped being true.
     ///
     /// This performs a `register/start` round trip, which the SRP equivalent
     /// did not need: OPAQUE's envelope is sealed under the server's oblivious
@@ -334,6 +346,57 @@ impl AxiamClient {
     /// `NetworkError` when the tenant has OPAQUE disabled or the SDK cannot
     /// perform the KSF the server named.
     pub async fn opaque_enrollment(&self, password: &str) -> Result<OpaqueEnrollment, AxiamError> {
+        self.enroll(password, self.workspace_body()).await
+    }
+
+    /// Build a registration record for the **caller's own** new password,
+    /// sealed against the tenant the caller's account lives in.
+    ///
+    /// CONTRACT.md §5.2.2 rule 2. `POST /auth/password/change` and the record
+    /// that accompanies it are about the account, not about whatever tenant
+    /// the client is currently pointed at, and a record sealed against the
+    /// acting tenant is refused with *"the OPAQUE session was issued for a
+    /// different tenant"*.
+    ///
+    /// The distinction only bites for an organization-level principal that has
+    /// selected another tenant to act on; for everyone else the two tenants are
+    /// the same value and this behaves identically to
+    /// [`Self::opaque_enrollment`]. It is still the method to call for a
+    /// self-service password change, because which principal is signed in is
+    /// not something the call site usually knows.
+    ///
+    /// # Errors
+    ///
+    /// `NetworkError` when no login has completed on this client yet — the
+    /// principal tenant is reported by the login response, so there is nothing
+    /// to seal against before then — and on the same terms as
+    /// [`Self::opaque_enrollment`] otherwise.
+    pub async fn opaque_enrollment_for_self(
+        &self,
+        password: &str,
+    ) -> Result<OpaqueEnrollment, AxiamError> {
+        let Some(principal_tenant) = self.resolved_principal_tenant_id() else {
+            return Err(AxiamError::network(
+                "OPAQUE: no principal tenant is known yet -- sign in before \
+                 building a registration record for your own password",
+            ));
+        };
+        let mut workspace = self.workspace_body();
+        // Name the principal tenant by id and drop the slug: a slug that named
+        // the acting tenant would otherwise out-vote the id server-side, which
+        // is the exact confusion this method exists to avoid.
+        workspace.tenant_id = Some(principal_tenant);
+        workspace.tenant_slug = None;
+        self.enroll(password, workspace).await
+    }
+
+    /// The shared body of the two enrollment methods; they differ only in the
+    /// workspace the record is sealed against.
+    async fn enroll(
+        &self,
+        password: &str,
+        workspace: WorkspaceBody,
+    ) -> Result<OpaqueEnrollment, AxiamError> {
         let (state, request) = ClientRegistrationState::start(password)
             .map_err(|e| AxiamError::network(format!("OPAQUE: {e}")))?;
 
@@ -341,7 +404,7 @@ impl AxiamClient {
             .http()
             .post(self.url(REGISTER_START_PATH))
             .json(&RegisterStartRequest {
-                workspace: self.workspace_body(),
+                workspace,
                 registration_request: request,
             })
             .send()

@@ -996,6 +996,13 @@ impl<'c> Manifest<'c> {
                         &models::AssignRoleToGroupRequest {
                             group_id,
                             resource_id: None,
+                            // CONTRACT.md §5.2.3. A manifest has no syntax for
+                            // naming tenants on an assignment, so every one it
+                            // applies is unrestricted -- which is exactly what
+                            // the manifests written before the field existed
+                            // already meant, and keeps `apply` idempotent
+                            // against them.
+                            tenant_scope: None,
                         },
                     )
                     .await?;
@@ -1039,6 +1046,8 @@ impl<'c> Manifest<'c> {
                         &models::AssignRoleToUserRequest {
                             user_id,
                             resource_id: None,
+                            // CONTRACT.md §5.2.3 -- see `AssignRoleToGroup`.
+                            tenant_scope: None,
                         },
                     )
                     .await?;

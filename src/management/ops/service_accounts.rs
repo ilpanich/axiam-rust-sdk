@@ -196,4 +196,40 @@ impl<'c> ServiceAccounts<'c> {
             .management_send_no_content(call, Some(body))
             .await
     }
+
+    /// `GET /api/v1/service-accounts/{service_account_id}/roles`
+    pub async fn list_roles(
+        &self,
+        service_account_id: Uuid,
+    ) -> Result<Vec<models::RoleAssignment>, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "service_accounts.list_roles",
+            verb: Verb::Get,
+            path_template: "/api/v1/service-accounts/{service_account_id}/roles",
+            path: format!("/api/v1/service-accounts/{service_account_id}/roles"),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Vec<models::RoleAssignment>>(call, None::<&()>)
+            .await
+    }
+
+    /// `GET /api/v1/service-accounts/{service_account_id}/groups`
+    pub async fn list_groups(
+        &self,
+        service_account_id: Uuid,
+    ) -> Result<Vec<models::Group>, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "service_accounts.list_groups",
+            verb: Verb::Get,
+            path_template: "/api/v1/service-accounts/{service_account_id}/groups",
+            path: format!("/api/v1/service-accounts/{service_account_id}/groups"),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Vec<models::Group>>(call, None::<&()>)
+            .await
+    }
 }

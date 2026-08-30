@@ -327,4 +327,68 @@ impl<'c> Roles<'c> {
             .management_send_no_content(call, None::<&()>)
             .await
     }
+
+    /// `GET /api/v1/roles/{role_id}/service-accounts`
+    pub async fn list_service_accounts(
+        &self,
+        role_id: Uuid,
+    ) -> Result<Vec<models::RoleServiceAccountAssignment>, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "roles.list_service_accounts",
+            verb: Verb::Get,
+            path_template: "/api/v1/roles/{role_id}/service-accounts",
+            path: format!("/api/v1/roles/{role_id}/service-accounts"),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Vec<models::RoleServiceAccountAssignment>>(call, None::<&()>)
+            .await
+    }
+
+    /// `POST /api/v1/roles/{role_id}/service-accounts`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn assign_to_service_account(
+        &self,
+        role_id: Uuid,
+        body: &models::AssignRoleToServiceAccountRequest,
+    ) -> Result<(), AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "roles.assign_to_service_account",
+            verb: Verb::Post,
+            path_template: "/api/v1/roles/{role_id}/service-accounts",
+            path: format!("/api/v1/roles/{role_id}/service-accounts"),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, Some(body))
+            .await
+    }
+
+    /// `DELETE /api/v1/roles/{role_id}/service-accounts/{service_account_id}`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn unassign_from_service_account(
+        &self,
+        role_id: Uuid,
+        service_account_id: Uuid,
+        resource_id: Option<&str>,
+    ) -> Result<(), AxiamError> {
+        let mut query: Vec<(&'static str, String)> = Vec::new();
+        if let Some(v) = resource_id {
+            query.push(("resource_id", v.to_string()));
+        }
+        let call = Call {
+            operation: "roles.unassign_from_service_account",
+            verb: Verb::Delete,
+            path_template: "/api/v1/roles/{role_id}/service-accounts/{service_account_id}",
+            path: format!("/api/v1/roles/{role_id}/service-accounts/{service_account_id}"),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, None::<&()>)
+            .await
+    }
 }

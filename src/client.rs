@@ -565,6 +565,7 @@ reason: None,
                 jwks_verifier,
                 csrf_token: std::sync::RwLock::new(None),
                 resolved_org_id: std::sync::RwLock::new(None),
+                resolved_principal_tenant_id: std::sync::RwLock::new(None),
                 pending_mfa_challenge: std::sync::RwLock::new(None),
                 custom_ca_pem: self.custom_ca_pem,
                 client_cert_pem: self.client_cert_pem,
@@ -674,6 +675,15 @@ pub(crate) struct AxiamClientInner {
     /// access token after the first successful login/verify_mfa. See
     /// `OrgIdentifier` doc comment.
     pub(crate) resolved_org_id: std::sync::RwLock<Option<Uuid>>,
+    /// CONTRACT.md §5.2.2 — the tenant the signed-in principal's record
+    /// *lives* in, reported by the login response and cached here because the
+    /// acting tenant (`self.tenant`) is a different thing and the two diverge
+    /// for an organization-level principal.
+    ///
+    /// Read by [`AxiamClient::opaque_enrollment_for_self`], which must seal a
+    /// §23 record against the account's own tenant rather than whichever one
+    /// the client is currently pointed at. `None` until a login completes.
+    pub(crate) resolved_principal_tenant_id: std::sync::RwLock<Option<Uuid>>,
     /// The challenge token from the most recent `login()` call that
     /// returned `mfa_required: true`, so `verify_mfa(code)` can complete
     /// the two-phase flow with only a `code` argument, matching
@@ -951,6 +961,23 @@ impl AxiamClient {
     pub(crate) fn set_resolved_org_id(&self, org_id: Uuid) {
         if let Ok(mut guard) = self.inner.resolved_org_id.write() {
             *guard = Some(org_id);
+        }
+    }
+
+    /// The tenant the signed-in principal's record lives in — CONTRACT.md
+    /// §5.2.2. `None` until a login has reported one.
+    pub(crate) fn resolved_principal_tenant_id(&self) -> Option<Uuid> {
+        self.inner
+            .resolved_principal_tenant_id
+            .read()
+            .ok()
+            .and_then(|g| *g)
+    }
+
+    /// Cache the principal tenant reported by a completed login.
+    pub(crate) fn set_resolved_principal_tenant_id(&self, tenant_id: Uuid) {
+        if let Ok(mut guard) = self.inner.resolved_principal_tenant_id.write() {
+            *guard = Some(tenant_id);
         }
     }
 

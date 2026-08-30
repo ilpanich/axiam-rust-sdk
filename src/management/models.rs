@@ -31,6 +31,20 @@ use uuid::Uuid;
 
 use crate::Sensitive;
 
+/// Skips an optional list when it is absent **or empty**.
+///
+/// CONTRACT.md §5.2.3 rule 1: `tenant_scope: []` is refused with `400`. An
+/// assignment that reaches no tenant contributes nothing anywhere, so it is a
+/// grant that does not exist rather than a restriction, and the server declines
+/// to guess which was meant. `Option::is_none` alone is not enough here: the
+/// natural way to build one of these bodies is to collect into a `Vec` and wrap
+/// it, which yields `Some([])` for "no tenants named" and would put the refused
+/// shape on the wire. Both spellings of absent therefore serialize the same
+/// way -- by not appearing.
+pub(crate) fn skip_empty_list<T>(value: &Option<Vec<T>>) -> bool {
+    value.as_ref().is_none_or(|list| list.is_empty())
+}
+
 /// `ActorType` (generated from openapi.json).
 /// An **open** enum. A value this SDK does not know decodes to
 /// \[`ActorType::Unknown`\] carrying the string, rather than failing the
@@ -66,6 +80,13 @@ pub struct AddMemberRequest {
     pub user_id: Uuid,
 }
 
+/// `AddServiceAccountMemberRequest` (generated from openapi.json).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddServiceAccountMemberRequest {
+    /// `service_account_id`.
+    pub service_account_id: Uuid,
+}
+
 /// API-based provider configuration (SendGrid, Postmark, Resend, Brevo).
 ///
 /// `api_key` follows the same write-only + omit-preserving contract as
@@ -89,6 +110,42 @@ pub struct AssignRoleToGroupRequest {
     /// `resource_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches.
+    ///
+    /// Only meaningful for an assignment made in an organization's scope, whose
+    /// global roles otherwise reach every tenant of the organization; naming
+    /// tenants here confines the assignment to those and to nothing else, the
+    /// organization's own scope included. Omitted — the default — reaches
+    /// wherever the role does.
+    ///
+    /// Refused with 400 outside an organization scope, when empty, and when it
+    /// names a tenant of another organization or the organization's own scope
+    /// tenant.
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
+}
+
+/// `AssignRoleToServiceAccountRequest` (generated from openapi.json).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssignRoleToServiceAccountRequest {
+    /// `resource_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<Uuid>,
+    /// `service_account_id`.
+    pub service_account_id: Uuid,
+    /// The tenants this assignment reaches.
+    ///
+    /// Only meaningful for an assignment made in an organization's scope, whose
+    /// global roles otherwise reach every tenant of the organization; naming
+    /// tenants here confines the assignment to those and to nothing else, the
+    /// organization's own scope included. Omitted — the default — reaches
+    /// wherever the role does.
+    ///
+    /// Refused with 400 outside an organization scope, when empty, and when it
+    /// names a tenant of another organization or the organization's own scope
+    /// tenant.
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 /// `AssignRoleToUserRequest` (generated from openapi.json).
@@ -97,6 +154,19 @@ pub struct AssignRoleToUserRequest {
     /// `resource_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches.
+    ///
+    /// Only meaningful for an assignment made in an organization's scope, whose
+    /// global roles otherwise reach every tenant of the organization; naming
+    /// tenants here confines the assignment to those and to nothing else, the
+    /// organization's own scope included. Omitted — the default — reaches
+    /// wherever the role does.
+    ///
+    /// Refused with 400 outside an organization scope, when empty, and when it
+    /// names a tenant of another organization or the organization's own scope
+    /// tenant.
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
     /// `user_id`.
     pub user_id: Uuid,
 }
@@ -2655,6 +2725,9 @@ pub struct RoleAssignment {
     pub resource_id: Option<Uuid>,
     /// `role`.
     pub role: Role,
+    /// The tenants this assignment reaches. See \[`TenantScope`\].
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 /// A group together with the resource scope of its assignment of this role.
@@ -2665,6 +2738,27 @@ pub struct RoleGroupAssignment {
     /// `None` means the role was assigned globally (no resource scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches, or omitted for "wherever the role
+    /// does". Shown next to the assignment so an operator can tell a deliberately
+    /// narrowed grant from an organization-wide one.
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
+}
+
+/// A service account together with the resource scope of its assignment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleServiceAccountAssignment {
+    /// `None` means the role was assigned globally (no resource scope).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<Uuid>,
+    /// The assigned service account. Carries no secret — the client secret is
+    /// returned once, at creation, and never again.
+    pub service_account: ServiceAccountResponse,
+    /// The tenants this assignment reaches, or omitted for "wherever the role
+    /// does". Shown next to the assignment so an operator can tell a deliberately
+    /// narrowed grant from an organization-wide one.
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
 }
 
 /// A user together with the resource scope of their assignment of this role.
@@ -2673,6 +2767,11 @@ pub struct RoleUserAssignment {
     /// `None` means the role was assigned globally (no resource scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
+    /// The tenants this assignment reaches, or omitted for "wherever the role
+    /// does". Shown next to the assignment so an operator can tell a deliberately
+    /// narrowed grant from an organization-wide one.
+    #[serde(default, skip_serializing_if = "skip_empty_list")]
+    pub tenant_scope: Option<Vec<Uuid>>,
     /// The assigned user.
     pub user: UserResponse,
 }
