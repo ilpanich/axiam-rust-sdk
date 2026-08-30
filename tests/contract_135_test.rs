@@ -97,6 +97,18 @@ fn session_cookies_header(access_token: &str) -> Vec<String> {
     ]
 }
 
+/// A throwaway credential built at run time.
+///
+/// Deliberately not a literal. A password spelled out in source is a finding
+/// for CodeQL and for secret scanners alike, and it stays one wherever the
+/// file gets copied. Nothing in these tests depends on the value: the login
+/// mock answers `200` regardless, and `register/start` is captured and
+/// refused, so what is under test is which tenant the body names, never
+/// whether a credential matched.
+fn fixture_password() -> String {
+    format!("Fixture-{}-aA1!", Uuid::new_v4())
+}
+
 fn build_client(base_url: &str) -> AxiamClient {
     AxiamClient::builder()
         .base_url(base_url)
@@ -161,7 +173,7 @@ async fn absent_principal_tenant_reads_as_the_acting_tenant() {
     .await;
 
     let result = build_client(&mock_server.uri())
-        .login("alice@example.com", "pw")
+        .login("alice@example.com", &fixture_password())
         .await
         .expect("login succeeds");
 
@@ -197,13 +209,16 @@ async fn a_divergent_principal_tenant_is_reported_separately() {
     .await;
 
     let result = build_client(&mock_server.uri())
-        .login("alice@example.com", "pw")
+        .login("alice@example.com", &fixture_password())
         .await
         .expect("login succeeds");
 
     assert_eq!(result.tenant_id, Some(acting));
     assert_eq!(result.principal_tenant_id, Some(principal));
-    assert_eq!(result.principal_tenant_slug.as_deref(), Some("organization"));
+    assert_eq!(
+        result.principal_tenant_slug.as_deref(),
+        Some("organization")
+    );
     // Rule 3: read the organization from the session rather than resolving a
     // slug through the `super-admin`-only `GET /api/v1/organizations`.
     assert_eq!(result.org_id, Some(org_id));
@@ -232,7 +247,7 @@ async fn reachable_tenant_ids_narrows_an_organization_level_principal() {
     .await;
 
     let result = build_client(&mock_server.uri())
-        .login("alice@example.com", "pw")
+        .login("alice@example.com", &fixture_password())
         .await
         .expect("login succeeds");
 
@@ -286,14 +301,14 @@ async fn capture_enrollment_body(
 
     let client = build_client(&mock_server.uri());
     client
-        .login("alice@example.com", "pw")
+        .login("alice@example.com", &fixture_password())
         .await
         .expect("login succeeds");
 
     let _ = if for_self {
-        client.opaque_enrollment_for_self("new password").await
+        client.opaque_enrollment_for_self(&fixture_password()).await
     } else {
-        client.opaque_enrollment("new password").await
+        client.opaque_enrollment(&fixture_password()).await
     };
 
     let body = seen.lock().expect("lock").clone().expect("body captured");
@@ -358,7 +373,7 @@ async fn opaque_enrollment_for_self_refuses_before_a_login() {
     let client = build_client(&mock_server.uri());
 
     let err = client
-        .opaque_enrollment_for_self("new password")
+        .opaque_enrollment_for_self(&fixture_password())
         .await
         .expect_err("no principal tenant is known yet");
     assert!(
