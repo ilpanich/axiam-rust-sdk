@@ -231,4 +231,79 @@ impl<'c> Groups<'c> {
             .management_send::<_, Vec<models::RoleAssignment>>(call, None::<&()>)
             .await
     }
+
+    /// `GET /api/v1/groups/{group_id}/service-accounts`
+    pub async fn list_service_accounts(
+        &self,
+        group_id: Uuid,
+        page: PageRequest,
+    ) -> Result<Page<models::ServiceAccountResponse>, AxiamError> {
+        let query = page.query();
+        let call = Call {
+            operation: "groups.list_service_accounts",
+            verb: Verb::Get,
+            path_template: "/api/v1/groups/{group_id}/service-accounts",
+            path: format!("/api/v1/groups/{group_id}/service-accounts"),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Page<models::ServiceAccountResponse>>(call, None::<&()>)
+            .await
+    }
+
+    /// Walk `groups.list_service_accounts` to exhaustion, concatenating every
+    /// page.
+    ///
+    /// The auto-paging form §27.4 rule 4 requires. It stops on an empty page even
+    /// if `total` disagrees, so a misreporting server costs one wasted request
+    /// rather than an unbounded loop.
+    pub async fn list_service_accounts_all(
+        &self,
+        group_id: Uuid,
+        start: PageRequest,
+    ) -> Result<Vec<models::ServiceAccountResponse>, AxiamError> {
+        collect_pages(start, |p| self.list_service_accounts(group_id, p)).await
+    }
+
+    /// `POST /api/v1/groups/{group_id}/service-accounts`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn add_service_account(
+        &self,
+        group_id: Uuid,
+        body: &models::AddServiceAccountMemberRequest,
+    ) -> Result<(), AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "groups.add_service_account",
+            verb: Verb::Post,
+            path_template: "/api/v1/groups/{group_id}/service-accounts",
+            path: format!("/api/v1/groups/{group_id}/service-accounts"),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, Some(body))
+            .await
+    }
+
+    /// `DELETE /api/v1/groups/{group_id}/service-accounts/{service_account_id}`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn remove_service_account(
+        &self,
+        group_id: Uuid,
+        service_account_id: Uuid,
+    ) -> Result<(), AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "groups.remove_service_account",
+            verb: Verb::Delete,
+            path_template: "/api/v1/groups/{group_id}/service-accounts/{service_account_id}",
+            path: format!("/api/v1/groups/{group_id}/service-accounts/{service_account_id}"),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, None::<&()>)
+            .await
+    }
 }

@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 147] = [
+const EXERCISED: [&str; 155] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -62,6 +62,9 @@ const EXERCISED: [&str; 147] = [
     "groups.add_member",
     "groups.remove_member",
     "groups.list_roles",
+    "groups.list_service_accounts",
+    "groups.add_service_account",
+    "groups.remove_service_account",
     "roles.list",
     "roles.create",
     "roles.get",
@@ -76,6 +79,9 @@ const EXERCISED: [&str; 147] = [
     "roles.list_permissions",
     "roles.grant_permission",
     "roles.revoke_permission",
+    "roles.list_service_accounts",
+    "roles.assign_to_service_account",
+    "roles.unassign_from_service_account",
     "permissions.list",
     "permissions.create",
     "permissions.get",
@@ -100,6 +106,8 @@ const EXERCISED: [&str; 147] = [
     "service_accounts.delete",
     "service_accounts.rotate_secret",
     "service_accounts.bind_certificate",
+    "service_accounts.list_roles",
+    "service_accounts.list_groups",
     "certificates.list",
     "certificates.generate",
     "certificates.get",
@@ -537,6 +545,54 @@ async fn groups_surface() {
         .list_roles(example_id())
         .await
         .expect("groups.list_roles");
+
+    // groups.list_service_accounts
+    mount(&server, "GET", &format!("/api/v1/groups/{EXAMPLE_ID}/service-accounts"), 200, r#"{"items": [{"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "id": "11111111-1111-4111-8111-111111111111", "name": "example", "status": "Active", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    client
+        .groups()
+        .list_service_accounts(example_id(), PageRequest::first(50))
+        .await
+        .expect("groups.list_service_accounts");
+    client
+        .groups()
+        .list_service_accounts_all(example_id(), PageRequest::first(50))
+        .await
+        .expect("groups.list_service_accounts auto-paging");
+
+    // groups.add_service_account
+    mount(
+        &server,
+        "POST",
+        &format!("/api/v1/groups/{EXAMPLE_ID}/service-accounts"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .groups()
+        .add_service_account(
+            example_id(),
+            &models::AddServiceAccountMemberRequest {
+                service_account_id: example_id(),
+            },
+        )
+        .await
+        .expect("groups.add_service_account");
+
+    // groups.remove_service_account
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/groups/{EXAMPLE_ID}/service-accounts/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .groups()
+        .remove_service_account(example_id(), example_id())
+        .await
+        .expect("groups.remove_service_account");
 }
 
 /// Reaches every operation in the `roles` namespace.
@@ -620,6 +676,7 @@ async fn roles_surface() {
             example_id(),
             &models::AssignRoleToUserRequest {
                 resource_id: None,
+                tenant_scope: None,
                 user_id: example_id(),
             },
         )
@@ -665,6 +722,7 @@ async fn roles_surface() {
             &models::AssignRoleToGroupRequest {
                 group_id: example_id(),
                 resource_id: None,
+                tenant_scope: None,
             },
         )
         .await
@@ -729,6 +787,51 @@ async fn roles_surface() {
         .revoke_permission(example_id(), example_id())
         .await
         .expect("roles.revoke_permission");
+
+    // roles.list_service_accounts
+    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/service-accounts"), 200, r#"[{"service_account": {"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "id": "11111111-1111-4111-8111-111111111111", "name": "example", "status": "Active", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}}]"#).await;
+    client
+        .roles()
+        .list_service_accounts(example_id())
+        .await
+        .expect("roles.list_service_accounts");
+
+    // roles.assign_to_service_account
+    mount(
+        &server,
+        "POST",
+        &format!("/api/v1/roles/{EXAMPLE_ID}/service-accounts"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .roles()
+        .assign_to_service_account(
+            example_id(),
+            &models::AssignRoleToServiceAccountRequest {
+                resource_id: None,
+                service_account_id: example_id(),
+                tenant_scope: None,
+            },
+        )
+        .await
+        .expect("roles.assign_to_service_account");
+
+    // roles.unassign_from_service_account
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/roles/{EXAMPLE_ID}/service-accounts/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .roles()
+        .unassign_from_service_account(example_id(), example_id(), None)
+        .await
+        .expect("roles.unassign_from_service_account");
 }
 
 /// Reaches every operation in the `permissions` namespace.
@@ -1032,6 +1135,22 @@ async fn service_accounts_surface() {
         )
         .await
         .expect("service_accounts.bind_certificate");
+
+    // service_accounts.list_roles
+    mount(&server, "GET", &format!("/api/v1/service-accounts/{EXAMPLE_ID}/roles"), 200, r#"[{"role": {"created_at": "2026-08-26T00:00:00Z", "description": "example", "id": "11111111-1111-4111-8111-111111111111", "is_global": true, "name": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}}]"#).await;
+    client
+        .service_accounts()
+        .list_roles(example_id())
+        .await
+        .expect("service_accounts.list_roles");
+
+    // service_accounts.list_groups
+    mount(&server, "GET", &format!("/api/v1/service-accounts/{EXAMPLE_ID}/groups"), 200, r#"[{"created_at": "2026-08-26T00:00:00Z", "description": "example", "id": "11111111-1111-4111-8111-111111111111", "metadata": {}, "name": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}]"#).await;
+    client
+        .service_accounts()
+        .list_groups(example_id())
+        .await
+        .expect("service_accounts.list_groups");
 }
 
 /// Reaches every operation in the `certificates` namespace.
