@@ -346,7 +346,7 @@ pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> Axi
     AxiamError::from_http_status(status, text)
 }
 
-fn network_err(context: &str, e: reqwest::Error) -> AxiamError {
+pub(crate) fn network_err(context: &str, e: reqwest::Error) -> AxiamError {
     AxiamError::Network {
         message: format!("{context}: {e}"),
         source: Some(Box::new(e)),
