@@ -1568,7 +1568,7 @@ async fn federation_surface() {
     let client = logged_in_client(&server).await;
 
     // federation.list_configs
-    mount(&server, "GET", "/api/v1/federation-configs", 200, r#"{"items": [{"attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "protocol": "example", "provider": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    mount(&server, "GET", "/api/v1/federation-configs", 200, r#"{"items": [{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
     client
         .federation()
         .list_configs(PageRequest::first(50))
@@ -1581,25 +1581,37 @@ async fn federation_surface() {
         .expect("federation.list_configs auto-paging");
 
     // federation.create_config
-    mount(&server, "POST", "/api/v1/federation-configs", 201, r#"{"attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "protocol": "example", "provider": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "POST", "/api/v1/federation-configs", 201, r#"{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .create_config(&models::CreateFederationConfigRequest {
+            allow_tenant_inheritance: None,
             allowed_algorithms: None,
+            allowed_issuer_tenants: None,
+            apple_key_id: None,
+            apple_team_id: None,
             attribute_map: None,
+            authorization_endpoint: None,
+            button_icon: None,
             client_id: "example".to_string(),
             client_secret: Sensitive::new("example".to_string()),
             idp_signing_cert_pem: None,
             metadata_url: None,
             protocol: "example".to_string(),
             provider: "example".to_string(),
+            provider_kind: None,
+            provider_slug: None,
+            require_pkce: None,
+            scopes: None,
+            token_endpoint: None,
             token_exchange: None,
+            userinfo_endpoint: None,
         })
         .await
         .expect("federation.create_config");
 
     // federation.get_config
-    mount(&server, "GET", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "protocol": "example", "provider": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "GET", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .get_config(example_id())
@@ -1607,7 +1619,7 @@ async fn federation_surface() {
         .expect("federation.get_config");
 
     // federation.update_config
-    mount(&server, "PUT", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "protocol": "example", "provider": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .update_config(

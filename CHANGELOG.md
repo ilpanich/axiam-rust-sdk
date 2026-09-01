@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Contract 1.38: the four public "Sign in with X" operations.** `sso_providers`,
+  `sso_start_oauth2`, `sso_complete_oauth2` and `sso_complete_handoff`, under the
+  exact CONTRACT.md §12.2 Rust names, as methods on `AxiamClient` beside the nine
+  §12 operations that came before — §12.2's host rule is unchanged by their
+  arrival, and this SDK has no packaging constraint that would justify a second
+  host. New module `src/oidc/federation.rs`; new public types
+  `oidc::FederationProvider` and `oidc::FederationProviderList`, matching the
+  §12.1 SDK-type table. Upstream: ilpanich/axiam#398.
+
+  Four things worth naming, because each is a rule an implementation can satisfy
+  by accident and break by accident:
+
+  - **An empty provider list is a success** (§12.1 note 9). An unknown
+    organization, a known one with nothing configured, and a request naming no
+    workspace at all all answer `200 []`. `sso_providers` returns `Ok` with an
+    empty list for every one of them and synthesises no not-found: the endpoint
+    is shaped so it cannot enumerate organization or tenant slugs, and an SDK
+    that told the three apart would rebuild that oracle in the client.
+  - **`protocol` selects the start operation** (§12.1 note 10), never
+    `provider_kind`: `OidcConnect` → `sso_start`, `OAuth2` → `sso_start_oauth2`,
+    `Saml` → the SAML login endpoint, which is not a §12 vocabulary operation.
+    `FederationProvider::protocol` is therefore surfaced as the wire string,
+    alongside `PROTOCOL_OIDC_CONNECT` / `PROTOCOL_OAUTH2` / `PROTOCOL_SAML` to
+    compare against; narrowing it to an SDK enum would turn a value added
+    server-side into a deserialization failure for the whole list.
+  - **PKCE on the OAuth2 variant is server-side** (§12.1 note 11). This SDK
+    computes no verifier and sends no challenge on that path, and a test asserts
+    the absence rather than leaving it to be noticed.
+  - **A `400` from a start call is a configuration refusal** (§12.1 rule 12a,
+    new at 1.38). On the SAML and Apple flows the identity provider never
+    validates the SPA `redirect_uri`, so the server confines it to its own issuer
+    origin plus `AXIAM__AUTH__SSO_SPA_ORIGINS`. It surfaces as
+    `AxiamError::Network` — §2's `400` row, the taxonomy's
+    configuration/programming-error member, distinct from the `AxiamError::Auth`
+    a `401` gets — and is not retried, because the deployment will refuse the
+    same origin every time.
+
+  `oidc::HANDOFF_QUERY_PARAM` (`axiam_handoff`) and `oidc::HANDOFF_CODE_TTL_SECS`
+  (60) are exported for callers driving the browser hop, in the same style as the
+  module's existing protocol constants. A handoff `401` is terminal: the
+  redemption makes exactly one wire call, so it cannot become a retry by
+  accident.
+
+- `tests/oidc_login_providers_test.rs` — 17 tests. The wire-shape half reads the
+  vendored `openapi.json` and asserts method, path, media type, the success
+  schema names, that the `sso_providers` identifiers are declared `in: query`,
+  and that neither OAuth2 start schema carries PKCE material; the SDK half
+  asserts that what actually reaches the wire matches. The rule half covers note
+  9 (all three empty-list cases), note 10 (all three dispatch branches, with a
+  `Saml` provider whose `provider_kind` is `google` so that a kind-based dispatch
+  fails), note 12 (a handoff `401` is terminal and exactly one request is sent)
+  and rule 12a (a `400` from either start operation is `Network`, not retried,
+  and does not collapse into the `401` case).
+
+### Changed
+
+- Re-vendored `CONTRACT.md` (1.29 → 1.38), `openapi.json` and
+  `management-registry.json` byte-for-byte from `ilpanich/axiam@1c457f6`.
+  `proto/axiam/v1/`, `opaque-test-vectors.json` and `vendor/axiam-opaque/src`
+  did not change upstream and were re-verified as already identical rather than
+  re-copied. `management-registry.json` moves only its `spec_digest`:
+  `operation_count` stays at 155, so the §27 surface is untouched.
+
+- The README's contract-conformance statement now names **contract 1.38** and
+  §12's thirteen operations; the §12 section documents the four new ones and the
+  rules above.
+
 ## [1.0.0-beta07] - 2026-08-30
 
 ### Changed

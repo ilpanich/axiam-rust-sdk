@@ -56,9 +56,12 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20, §21, §22, §23,
-§24, §25, §26, §27 (including §6.1 mTLS, the §10.1 minimum local-verification set —
-**including rule 9, sender-constrained tokens** — and §13 webhook signature verification).
+This SDK conforms to **contract 1.38**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+§21, §22, §23, §24, §25, §26, §27 (including §6.1 mTLS, the §10.1 minimum local-verification
+set — **including rule 9, sender-constrained tokens** — and §13 webhook signature
+verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
+including the four public "Sign in with X" entry points, on the same host object
+([`AxiamClient`]) as the nine that preceded them.
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
@@ -217,7 +220,7 @@ dependencies for the transports/integrations it actually uses:
 
 | Feature | Default | Enables |
 |---------|---------|---------|
-| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
+| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`, `sso_providers`, `sso_start_oauth2`, `sso_complete_oauth2`, `sso_complete_handoff`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
 | `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1) — both over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
 | `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8), and `reactor_serve(config, handler)` — the CONTRACT.md §22 reactor runtime (hook events, signed in **both** directions) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
@@ -301,11 +304,13 @@ See [`examples/grpc_check_access.rs`](examples/grpc_check_access.rs) for the ful
 
 ### OIDC / SSO relying-party helpers (`rest`)
 
-CONTRACT.md §12 adds nine operations for "Login with AXIAM" (authorization-code + PKCE against
-AXIAM's own OIDC provider), service-account `client_credentials` login, token
-introspection/revocation, and the upstream-IdP federation pair — all as methods directly on
-[`AxiamClient`], configured with an OIDC `client_id`/`client_secret` on the same builder used for
-everything else:
+CONTRACT.md §12 adds thirteen operations for "Login with AXIAM" (authorization-code + PKCE
+against AXIAM's own OIDC provider), service-account `client_credentials` login, token
+introspection/revocation, the upstream-IdP federation pair, and — as of **contract 1.38** — the
+four public "Sign in with X" entry points. All are methods directly on [`AxiamClient`]
+(§12.2's host rule: this SDK has no packaging constraint that would justify a second host),
+configured with an OIDC `client_id`/`client_secret` on the same builder used for everything
+else:
 
 ```rust,no_run
 use axiam_sdk::client::AxiamClient;
@@ -330,7 +335,7 @@ let request = client.oidc_begin(&configuration, OidcBeginParams::new("https://ap
 # }
 ```
 
-**The nine operations** (CONTRACT.md §12.2 Rust naming):
+**The thirteen operations** (CONTRACT.md §12.2 Rust naming):
 
 | Operation | What it does |
 |-----------|--------------|
@@ -343,6 +348,26 @@ let request = client.oidc_begin(&configuration, OidcBeginParams::new("https://ap
 | `revoke` | `POST /oauth2/revoke` (RFC 7009) — idempotent; requires a confidential client |
 | `sso_start` | `POST /api/v1/auth/federation/oidc/start` — step 1 of upstream-IdP SSO |
 | `sso_complete` | `POST /api/v1/auth/federation/oidc/callback` — step 2; the session arrives via `Set-Cookie` through the same §4 cookie jar every other REST call uses, and the same post-login sync `login()` runs seeds the token manager and resolves `tenant_id`/`org_id`, so `refresh()`/`logout()` work straight afterwards |
+| `sso_providers` | `GET /api/v1/auth/federation/providers` — which "Sign in with X" buttons to render. The identifiers travel as **query** parameters, not a body. An **empty list is a success**, for an unknown organization, a known one with nothing configured, and a request naming no workspace at all alike (§12.1 note 9): the endpoint is shaped so it cannot enumerate organization slugs, and an SDK that told the three apart would rebuild that oracle |
+| `sso_start_oauth2` | `POST /api/v1/auth/federation/oauth2/start` — step 1 through a **plain-OAuth2** upstream (GitHub, Facebook, `generic_oauth2`). PKCE is mandatory here and is generated and held **server-side** (§12.1 note 11), so this SDK computes no verifier and sends no challenge |
+| `sso_complete_oauth2` | `POST /api/v1/auth/federation/oauth2/callback` — step 2 of the OAuth2 variant; same `Set-Cookie` session and same post-login sync as `sso_complete` |
+| `sso_complete_handoff` | `POST /api/v1/auth/federation/handoff` — redeems the single-use `axiam_handoff` code the SAML and Apple flows deliver on the SPA's callback URL. Valid 60 s, redeemable **once**; a `401` is terminal and is **never retried** (§12.1 note 12) — unknown, expired and already-redeemed all answer the same `401`, deliberately |
+
+**Which start operation to call is decided by `protocol`, not by `provider_kind`** (§12.1 note
+10): `OidcConnect` → `sso_start`, `OAuth2` → `sso_start_oauth2`, `Saml` → the SAML login
+endpoint, which is not a §12 vocabulary operation. The server refuses a mismatch with `400`.
+
+[`oidc::FederationProvider`] is modelled faithfully, `button_icon` (a `data:` URL, `None` for
+most providers), `has_bundled_mark` and `inherited` included. Inheritance from the organization
+is resolved **server-side** (§12.1 note 13): pass back the workspace and the config `id`
+`sso_providers` handed you and compute nothing locally.
+
+**A `400` from a start call is a configuration refusal** (§12.1 rule 12a). On the SAML and Apple
+flows the identity provider never validates the SPA `redirect_uri`, so the server confines it to
+its own issuer origin plus `AXIAM__AUTH__SSO_SPA_ORIGINS`. That refusal surfaces as
+`AxiamError::Network` — §2's `400` row, the taxonomy's configuration/programming-error member,
+as distinct from the `AxiamError::Auth` a `401` gets — and is not retried. Never build a
+`redirect_uri` out of anything the identity provider supplied.
 
 **The caller owns the login state (§12.3 rule 1).** `oidc_begin` returns `state`, `nonce` and
 `code_verifier`; this SDK stores none of them. Persist all three yourself (your own HTTP session,

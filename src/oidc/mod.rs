@@ -1,13 +1,15 @@
-//! OIDC / SSO relying-party helpers — CONTRACT.md §12 (contract 1.4).
+//! OIDC / SSO relying-party helpers — CONTRACT.md §12 (contract 1.38).
 //!
-//! The nine canonical §12 operations, under the exact §12.2 Rust names, as
-//! methods on the existing [`crate::client::AxiamClient`] (this SDK has no
-//! browser-bundle constraint, so — per the plan — the operations live
+//! The thirteen canonical §12 operations, under the exact §12.2 Rust names,
+//! as methods on the existing [`crate::client::AxiamClient`] (this SDK has
+//! no browser-bundle constraint, so — per the plan — the operations live
 //! directly on the client rather than a separate type):
 //!
 //! `oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`,
 //! `login_client_credentials`, `introspect`, `revoke`, `sso_start`,
-//! `sso_complete`.
+//! `sso_complete`, and — added by contract 1.38 — `sso_providers`,
+//! `sso_start_oauth2`, `sso_complete_oauth2`, `sso_complete_handoff`
+//! ([`federation`]).
 //!
 //! Everything is reuse, not reimplementation (§12 forbids forking):
 //!   * transport + §2 error mapping + §5 tenant header + §6 TLS →
@@ -64,6 +66,7 @@ pub mod authorize;
 pub mod device;
 pub mod discovery;
 pub mod exchange;
+pub mod federation;
 pub mod id_token;
 pub mod logout;
 pub mod par;
@@ -81,6 +84,12 @@ pub use exchange::{
     IntrospectParams, IntrospectionResult, LoginClientCredentialsParams, OidcExchangeParams,
     OidcRefreshParams, OidcTokenSet, RevokeParams, SsoCompleteParams, SsoCompleteResult,
     SsoStartParams, SsoStartResult,
+};
+pub use federation::{
+    FederationProvider, FederationProviderList, HANDOFF_CODE_TTL_SECS, HANDOFF_QUERY_PARAM,
+    PROTOCOL_OAUTH2, PROTOCOL_OIDC_CONNECT, PROTOCOL_SAML, SSO_HANDOFF_PATH,
+    SSO_OAUTH2_CALLBACK_PATH, SSO_OAUTH2_START_PATH, SSO_PROVIDERS_PATH, SsoCompleteHandoffParams,
+    SsoCompleteOauth2Params, SsoProvidersParams, SsoStartOauth2Params,
 };
 pub use id_token::{IdTokenClaims, MAX_CLOCK_SKEW_SEC};
 pub use logout::{

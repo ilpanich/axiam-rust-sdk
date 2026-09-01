@@ -137,6 +137,14 @@ def doc_lines(text: str | None, indent: str = "") -> list[str]:
         # `[` starts an intra-doc link in rustdoc; a stray one from a server
         # doc comment becomes a broken-link warning under `cargo doc`.
         line = line.replace("[", "\\[").replace("]", "\\]")
+        # `<` opens an HTML tag when a name follows it, so a server doc comment
+        # writing a placeholder as `<provider>` (contract 1.38 added one) is an
+        # unclosed tag and `cargo doc` under `-D warnings` refuses to build the
+        # crate. Escape only that shape: `\<` renders as a literal `<`, which is
+        # what the prose meant. A bare `<` (`L1 < L1Plus`) and every `>` are
+        # left alone -- neither opens a tag, and escaping them would put stray
+        # backslashes inside code spans.
+        line = re.sub(r"<(?=[A-Za-z/!])", "\\\\<", line)
         out.append(f"{indent}/// {line}".rstrip())
     return out
 

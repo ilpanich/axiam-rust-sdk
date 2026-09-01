@@ -677,11 +677,34 @@ pub struct CreateCertificateRequest {
 /// point you need it.
 #[derive(Debug, Clone)]
 pub struct CreateFederationConfigRequest {
+    /// Whether tenants of this organization may inherit this provider. Only
+    /// meaningful on a config in the organization-scope tenant.
+    pub allow_tenant_inheritance: Option<bool>,
     /// Accepted JWT signing algorithms (OIDC) or signature algorithms (SAML).
     /// Defaults to `\["RS256"\]` when not provided (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
+    /// External IdP tenant identifiers accepted when the provider publishes a
+    /// templated issuer (Entra ID's `{tenantid}`).
+    pub allowed_issuer_tenants: Option<Vec<String>>,
+    /// Apple Key ID of the `.p8` signing key (10 characters). With both Apple
+    /// identifiers set, `client_secret` is the `.p8` key itself and AXIAM mints a
+    /// fresh five-minute client secret per token exchange.
+    pub apple_key_id: Option<String>,
+    /// Apple Team ID (10 characters).
+    pub apple_team_id: Option<String>,
     /// Maps external IdP attributes to AXIAM user fields.
     pub attribute_map: Option<serde_json::Value>,
+    /// OAuth2-variant authorization endpoint. Required for `OAuth2`.
+    pub authorization_endpoint: Option<String>,
+    /// Sign-in-button icon for a **generic** provider, as a base64 raster data
+    /// URL (`data:image/png;base64,…`), already cropped to
+    /// `PROVIDER_ICON_SIZE_PX` square by the client.
+    ///
+    /// Refused for the branded kinds: Google, Apple and Microsoft all publish
+    /// sign-in-button rules that require their own mark, so substituting a
+    /// picture would produce a button that breaks the guidelines it exists to
+    /// follow.
+    pub button_icon: Option<String>,
     /// OAuth2 client ID registered with the external IdP.
     pub client_id: String,
     /// OAuth2 client secret registered with the external IdP.
@@ -698,17 +721,48 @@ pub struct CreateFederationConfigRequest {
     pub protocol: String,
     /// Display name for the identity provider (e.g., "Google", "Okta").
     pub provider: String,
+    /// Which provider this is: `google`, `github`, `facebook`, `apple`,
+    /// `microsoft`, `generic_oidc`, `generic_oauth2` or `generic_saml`.
+    ///
+    /// Selects the sign-in button's branding, the per-kind defaults, and the key
+    /// on which a tenant config overrides an inherited organization one. Omitted
+    /// ⇒ derived from `protocol`, which is what every config written before this
+    /// field existed means.
+    pub provider_kind: Option<String>,
+    /// Operator-chosen identifier, **required** for the `generic_*` kinds and
+    /// refused for the branded ones.
+    pub provider_slug: Option<String>,
+    /// Send PKCE on the authorization request. Forced on for `OAuth2`.
+    pub require_pkce: Option<bool>,
+    /// Scopes to request. Omitted or empty ⇒ the per-kind default.
+    pub scopes: Option<Vec<String>>,
+    /// OAuth2-variant token endpoint. Required for `OAuth2`.
+    pub token_endpoint: Option<String>,
     /// `token_exchange`.
     pub token_exchange: Option<TokenExchangeTrustRequest>,
+    /// OAuth2-variant userinfo endpoint. Required for `OAuth2`.
+    pub userinfo_endpoint: Option<String>,
 }
 
 /// Wire twin of [`CreateFederationConfigRequest`] -- plain strings, private, never logged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CreateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) allow_tenant_inheritance: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_algorithms: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) allowed_issuer_tenants: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) apple_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) apple_team_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attribute_map: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) authorization_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) button_icon: Option<String>,
     pub(crate) client_id: String,
     pub(crate) client_secret: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -718,21 +772,45 @@ pub(crate) struct CreateFederationConfigRequestWire {
     pub(crate) protocol: String,
     pub(crate) provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) require_pkce: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) token_exchange: Option<TokenExchangeTrustRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) userinfo_endpoint: Option<String>,
 }
 
 impl From<&CreateFederationConfigRequest> for CreateFederationConfigRequestWire {
     fn from(v: &CreateFederationConfigRequest) -> Self {
         Self {
+            allow_tenant_inheritance: v.allow_tenant_inheritance,
             allowed_algorithms: v.allowed_algorithms.clone(),
+            allowed_issuer_tenants: v.allowed_issuer_tenants.clone(),
+            apple_key_id: v.apple_key_id.clone(),
+            apple_team_id: v.apple_team_id.clone(),
             attribute_map: v.attribute_map.clone(),
+            authorization_endpoint: v.authorization_endpoint.clone(),
+            button_icon: v.button_icon.clone(),
             client_id: v.client_id.clone(),
             client_secret: crate::management::error::expose_for_wire(&v.client_secret),
             idp_signing_cert_pem: v.idp_signing_cert_pem.clone(),
             metadata_url: v.metadata_url.clone(),
             protocol: v.protocol.clone(),
             provider: v.provider.clone(),
+            provider_kind: v.provider_kind.clone(),
+            provider_slug: v.provider_slug.clone(),
+            require_pkce: v.require_pkce,
+            scopes: v.scopes.clone(),
+            token_endpoint: v.token_endpoint.clone(),
             token_exchange: v.token_exchange.clone(),
+            userinfo_endpoint: v.userinfo_endpoint.clone(),
         }
     }
 }
@@ -1264,29 +1342,78 @@ pub enum FailurePolicy {
 /// Federation config response -- omits client_secret.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FederationConfigResponse {
+    /// Whether tenants of this organization may inherit this provider.
+    pub allow_tenant_inheritance: bool,
+    /// Accepted signing algorithms. Returned for OIDC and SAML; meaningless, and
+    /// therefore empty, for the OAuth2 variant.
+    pub allowed_algorithms: Vec<String>,
+    /// Accepted external IdP tenants for a templated issuer.
+    pub allowed_issuer_tenants: Vec<String>,
+    /// Apple Key ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_key_id: Option<String>,
+    /// Apple Team ID. Not secret — the `.p8` key is, and it is never returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_team_id: Option<String>,
     /// `attribute_map`.
     pub attribute_map: serde_json::Value,
+    /// OAuth2-variant authorization endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
+    /// Custom sign-in-button icon, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button_icon: Option<String>,
     /// `client_id`.
     pub client_id: String,
     /// `created_at`.
     pub created_at: String,
+    /// The per-kind default that an empty `scopes` resolves to. Returned so the
+    /// admin UI can show what will actually be requested without duplicating the
+    /// table.
+    pub effective_scopes: Vec<String>,
     /// `enabled`.
     pub enabled: bool,
+    /// Whether AXIAM ships this provider's own mark. When true the button uses it
+    /// and `button_icon` is refused; when false the button reads "Sign in with
+    /// \<provider>" and may carry a custom icon.
+    pub has_bundled_mark: bool,
     /// `id`.
     pub id: Uuid,
     /// `metadata_url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_url: Option<String>,
+    /// Whether AXIAM mints this provider's client secret itself, per exchange,
+    /// rather than sending a stored one. True only for an Apple config with both
+    /// identifiers set.
+    pub mints_client_secret: bool,
+    /// Whether PKCE is sent on the authorization request. Always true for the
+    /// OAuth2 variant regardless of the stored flag.
+    pub pkce_required: bool,
     /// `protocol`.
     pub protocol: String,
     /// `provider`.
     pub provider: String,
+    /// Which provider this is. Derived from `protocol` for a config written
+    /// before the field existed.
+    pub provider_kind: String,
+    /// Operator-chosen identifier for a `generic_*` kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_slug: Option<String>,
+    /// Scopes as stored. Empty means "use the per-kind default"; see
+    /// `effective_scopes`.
+    pub scopes: Vec<String>,
     /// `tenant_id`.
     pub tenant_id: Uuid,
+    /// OAuth2-variant token endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
     /// X4 external token-exchange trust.
     pub token_exchange: TokenExchangeTrustResponse,
     /// `updated_at`.
     pub updated_at: String,
+    /// OAuth2-variant userinfo endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userinfo_endpoint: Option<String>,
 }
 
 /// `FederationLinkResponse` (generated from openapi.json).
@@ -3445,10 +3572,22 @@ pub enum UnknownAaguidAction {
 /// point you need it.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateFederationConfigRequest {
+    /// Whether tenants may inherit this organization-level provider.
+    pub allow_tenant_inheritance: Option<bool>,
     /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
+    /// Accepted external IdP tenants for a templated issuer. Replaced wholesale.
+    pub allowed_issuer_tenants: Option<Vec<String>>,
+    /// Apple Key ID. `Some(None)` clears it.
+    pub apple_key_id: Option<String>,
+    /// Apple Team ID. `Some(None)` clears it.
+    pub apple_team_id: Option<String>,
     /// `attribute_map`.
     pub attribute_map: Option<serde_json::Value>,
+    /// OAuth2-variant authorization endpoint. `Some(None)` clears it.
+    pub authorization_endpoint: Option<String>,
+    /// Sign-in-button icon for a generic provider. `Some(None)` clears it.
+    pub button_icon: Option<String>,
     /// `client_id`.
     pub client_id: Option<String>,
     /// `client_secret`.
@@ -3465,17 +3604,40 @@ pub struct UpdateFederationConfigRequest {
     pub metadata_url: Option<String>,
     /// `provider`.
     pub provider: Option<String>,
+    /// Operator-chosen identifier for a `generic_*` kind. `Some(None)` clears it.
+    pub provider_slug: Option<String>,
+    /// Send PKCE on the authorization request.
+    pub require_pkce: Option<bool>,
+    /// Scopes to request. Replaced wholesale; empty restores the per-kind
+    /// default.
+    pub scopes: Option<Vec<String>>,
+    /// OAuth2-variant token endpoint. `Some(None)` clears it.
+    pub token_endpoint: Option<String>,
     /// `token_exchange`.
     pub token_exchange: Option<TokenExchangeTrustRequest>,
+    /// OAuth2-variant userinfo endpoint. `Some(None)` clears it.
+    pub userinfo_endpoint: Option<String>,
 }
 
 /// Wire twin of [`UpdateFederationConfigRequest`] -- plain strings, private, never logged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct UpdateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) allow_tenant_inheritance: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_algorithms: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) allowed_issuer_tenants: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) apple_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) apple_team_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attribute_map: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) authorization_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) button_icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3489,14 +3651,30 @@ pub(crate) struct UpdateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) require_pkce: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scopes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) token_exchange: Option<TokenExchangeTrustRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) userinfo_endpoint: Option<String>,
 }
 
 impl From<&UpdateFederationConfigRequest> for UpdateFederationConfigRequestWire {
     fn from(v: &UpdateFederationConfigRequest) -> Self {
         Self {
+            allow_tenant_inheritance: v.allow_tenant_inheritance,
             allowed_algorithms: v.allowed_algorithms.clone(),
+            allowed_issuer_tenants: v.allowed_issuer_tenants.clone(),
+            apple_key_id: v.apple_key_id.clone(),
+            apple_team_id: v.apple_team_id.clone(),
             attribute_map: v.attribute_map.clone(),
+            authorization_endpoint: v.authorization_endpoint.clone(),
+            button_icon: v.button_icon.clone(),
             client_id: v.client_id.clone(),
             client_secret: v
                 .client_secret
@@ -3506,7 +3684,12 @@ impl From<&UpdateFederationConfigRequest> for UpdateFederationConfigRequestWire 
             idp_signing_cert_pem: v.idp_signing_cert_pem.clone(),
             metadata_url: v.metadata_url.clone(),
             provider: v.provider.clone(),
+            provider_slug: v.provider_slug.clone(),
+            require_pkce: v.require_pkce,
+            scopes: v.scopes.clone(),
+            token_endpoint: v.token_endpoint.clone(),
             token_exchange: v.token_exchange.clone(),
+            userinfo_endpoint: v.userinfo_endpoint.clone(),
         }
     }
 }
