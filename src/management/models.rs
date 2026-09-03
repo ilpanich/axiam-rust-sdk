@@ -3041,6 +3041,8 @@ pub struct SecuritySettings {
     pub token: TokenPolicy,
     /// `updated_at`.
     pub updated_at: String,
+    /// `webauthn`.
+    pub webauthn: WebauthnPolicy,
 }
 
 /// Response for service account creation — includes the one-time plaintext
@@ -3205,6 +3207,9 @@ pub struct SetOrgSettings {
     pub require_symbols: bool,
     /// `require_uppercase`.
     pub require_uppercase: bool,
+    /// `webauthn_user_verification`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webauthn_user_verification: Option<String>,
 }
 
 /// Whether a settings row belongs to an organization or a tenant.
@@ -3436,6 +3441,9 @@ pub struct TenantSettingsOverride {
     /// `require_uppercase`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_uppercase: Option<bool>,
+    /// `webauthn_user_verification`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webauthn_user_verification: Option<String>,
 }
 
 /// Lifecycle status of a tenant.
@@ -4137,6 +4145,27 @@ pub struct WebauthnAttestationPolicy {
     /// `unknown_aaguid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_aaguid: Option<UnknownAaguidAction>,
+}
+
+/// WebAuthn ceremony policy.
+///
+/// One field today. It is a struct rather than a bare field on
+/// \[`SecuritySettings`\] so that the next WebAuthn control has an obvious
+/// home, and so the admin UI can group them.
+///
+/// The *attestation* policy is deliberately not here: it lives in
+/// \[`crate::models::webauthn_policy::WebauthnAttestationPolicy`\], is tenant-
+/// only, and cannot join this model because AAGUID allow/block lists have no
+/// "more restrictive than" ordering to validate an override against. User
+/// verification does, so it can.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebauthnPolicy {
+    /// How hard the authenticator must prove *who* is present.
+    ///
+    /// Applies to enrolment and to second-factor authentication. Usernameless
+    /// sign-in is held to `required` whatever this says — see
+    /// \[`WebauthnUserVerification`\].
+    pub webauthn_user_verification: String,
 }
 
 /// Webhook response — omits the shared secret.
