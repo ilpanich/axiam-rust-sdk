@@ -529,6 +529,14 @@ impl JwksVerifier {
     /// `crate::oidc` to verify ID tokens against the `jwks_uri` the OIDC
     /// discovery document advertises, which is not necessarily
     /// `{base_url}/oauth2/jwks` (e.g. behind a proxy).
+    ///
+    /// The caller owns the X-2 scheme check. `jwks_url` here is remote input,
+    /// unlike [`Self::new`]'s `base_url`, which
+    /// `AxiamClientBuilder::base_url` already validated. The sole caller,
+    /// `AxiamClient::oidc_verifier_for`, runs
+    /// [`crate::url_guard::ensure_secure_scheme`] before constructing — keep
+    /// it that way if a second caller ever appears, or the SDK will fetch its
+    /// signing keys over cleartext.
     pub(crate) fn for_jwks_url(http_client: reqwest::Client, jwks_url: url::Url) -> Self {
         Self {
             http_client,
