@@ -162,15 +162,6 @@ jobs:
       # release, so running it under the pinned MSRV compiler would turn each
       # new lint into a spurious MSRV-job failure. The MSRV job's job is to
       # prove the crate still COMPILES on 1.88, not to re-police style.
-      # CONTRACT §27.8: the management surface is generated from the vendored
-      # management-registry.json and committed. This fails when the two have
-      # drifted -- which happens whenever the registry is re-vendored and
-      # nobody re-ran the generator, and which would otherwise ship 146
-      # methods pointing at last release's routes.
-      - name: §27 management surface is regenerated
-        if: matrix.toolchain == 'stable'
-        run: python3 tools/gen_management.py --check
-
       - name: Format check
         if: matrix.toolchain == 'stable'
         run: cargo fmt --all --check
@@ -260,6 +251,34 @@ jobs:
       - name: Dry-run publish gate (SC#5)
         run: cd axiam-sdk-macros && cargo publish --dry-run --all-features --allow-dirty
 
+  # CONTRACT §27.8: the management surface is generated from the vendored
+  # management-registry.json and committed. This fails when the two have
+  # drifted -- which happens whenever the registry is re-vendored and nobody
+  # re-ran the generator, and which would otherwise ship 146 methods pointing
+  # at last release's routes.
+  #
+  # R-2 (T-235): this was a step inside the `test` job, which is
+  # `pull_request`-only, so a stale surface reaching a tag by any route other
+  # than `scripts/mass-tag.sh` met no repository-side gate at all — and
+  # crates.io never lets a version number be reused. It is its own job now,
+  # with no `if:`, so it runs on tag pushes too without dragging the whole
+  # MSRV-plus-stable test matrix onto a trigger it does not run on today. The
+  # `publish` job `needs:` it.
+  management-drift-check:
+    name: §27 management surface drift-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # `--check` formats its candidate output with rustfmt before comparing,
+      # because rustfmt is the formatting authority for the generated files.
+      # Without the toolchain here every file would compare as stale.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # stable (2026-03-27)
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Fail on drift — committed §27 surface must match the registry
+        run: python3 tools/gen_management.py --check
+
   # Publishing to crates.io is IRREVERSIBLE — a version number can never be
   # reclaimed. Git tags are NOT branch-scoped, so without this gate a release
   # tag cut on a feature branch would ship unreviewed code to the world under a
@@ -285,7 +304,7 @@ jobs:
   publish:
     name: Publish to crates.io
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: verify-tag-on-main
+    needs: [management-drift-check, verify-tag-on-main]
     runs-on: ubuntu-latest
     # Manual-on-tag, side-effecting job: it runs only when a maintainer pushes
     # a tag matching vX.Y.Z, never from a PR (T-16-26).
