@@ -901,6 +901,26 @@ impl AxiamClient {
             message: format!("invalid jwks_uri in discovery document: {e}"),
             source: None,
         })?;
+        // X-2: `jwks_uri` is remote input — it is whatever the OIDC discovery
+        // document advertises, not a URL this process composed. `base_url` is
+        // scheme-checked in `AxiamClientBuilder::base_url`, but nothing had
+        // checked this one, so a discovery document naming `http://…` would
+        // have had the SDK fetch its ID-token signing keys over cleartext.
+        // That is a trust-anchor substitution primitive: an on-path attacker
+        // rewrites the JWKS response, and every ID token it then signs
+        // verifies. Refuse it here, at the only unguarded entry into
+        // `JwksVerifier::for_jwks_url`, with the same loopback carve-out the
+        // other transports get.
+        crate::url_guard::ensure_secure_scheme(
+            "OIDC jwks_uri",
+            url.scheme(),
+            url.host_str(),
+            "https",
+        )
+        .map_err(|message| AxiamError::Network {
+            message,
+            source: None,
+        })?;
         let verifier = Arc::new(JwksVerifier::for_jwks_url(self.inner.http.clone(), url));
         if let Ok(mut map) = self.inner.oidc_verifiers.write() {
             map.entry(jwks_uri.to_string())
@@ -1074,6 +1094,80 @@ mod tests {
                 "loopback dev URL must be allowed: {url}"
             );
         }
+    }
+
+    // X-2, §12.3 rule 6: `jwks_uri` comes out of the OIDC discovery document,
+    // so it is remote input and gets the same scheme check `base_url` gets.
+    // Without it a discovery document naming `http://…` would have the SDK
+    // fetch its ID-token signing keys over cleartext, which lets an on-path
+    // attacker swap the trust anchor and mint ID tokens that verify.
+    #[cfg(feature = "rest")]
+    fn client_for_jwks_uri_test() -> AxiamClient {
+        AxiamClient::builder()
+            .base_url("https://iam.example.com")
+            .expect("valid base_url")
+            .tenant_slug("acme")
+            .org_slug("globex")
+            .build()
+            .expect("valid client")
+    }
+
+    #[cfg(feature = "rest")]
+    #[test]
+    fn plaintext_jwks_uri_from_discovery_is_rejected() {
+        let client = client_for_jwks_uri_test();
+        match client.oidc_verifier_for("http://idp.example.com/oauth2/jwks") {
+            Ok(_) => panic!("a plaintext http:// jwks_uri must be rejected (X-2)"),
+            Err(AxiamError::Network { message, .. }) => {
+                assert!(message.contains("https"), "message: {message}");
+                assert!(message.contains("jwks_uri"), "message: {message}");
+            }
+            Err(other) => panic!("expected Network error, got {other}"),
+        }
+    }
+
+    #[cfg(feature = "rest")]
+    #[test]
+    fn https_jwks_uri_from_discovery_is_accepted() {
+        let client = client_for_jwks_uri_test();
+        assert!(
+            client
+                .oidc_verifier_for("https://idp.example.com/oauth2/jwks")
+                .is_ok()
+        );
+    }
+
+    // The loopback carve-out matches the one `base_url` and the gRPC channel
+    // already get, so a local dev IdP on plain HTTP still works.
+    #[cfg(feature = "rest")]
+    #[test]
+    fn plaintext_loopback_jwks_uri_is_allowed() {
+        let client = client_for_jwks_uri_test();
+        for uri in [
+            "http://localhost:8080/oauth2/jwks",
+            "http://127.0.0.1:8080/oauth2/jwks",
+            "http://[::1]:8080/oauth2/jwks",
+        ] {
+            assert!(
+                client.oidc_verifier_for(uri).is_ok(),
+                "loopback dev jwks_uri must be allowed: {uri}"
+            );
+        }
+    }
+
+    // The per-`jwks_uri` verifier cache must not hand back a verifier for a
+    // URI the guard would now refuse: the guard runs before the cache is
+    // populated, so a rejected URI never gets an entry to be served later.
+    #[cfg(feature = "rest")]
+    #[test]
+    fn a_rejected_jwks_uri_is_not_cached() {
+        let client = client_for_jwks_uri_test();
+        let uri = "http://idp.example.com/oauth2/jwks";
+        assert!(client.oidc_verifier_for(uri).is_err());
+        assert!(
+            client.oidc_verifier_for(uri).is_err(),
+            "a refused jwks_uri must stay refused on every later call"
+        );
     }
 
     // §5: `build()` never silently defaults a missing tenant identifier.
