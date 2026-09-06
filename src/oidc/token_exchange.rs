@@ -222,7 +222,12 @@ impl AxiamClient {
         let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
         let client_id = self.oidc_client_id_or_err()?.to_string();
         let client_secret = self.oidc_client_secret_or_err("token_exchange")?;
-        let url = self.oidc_endpoint_url(&configuration.token_endpoint, tenant_id)?;
+        let endpoint = self.mtls_preferred(
+            &configuration,
+            |a| a.token_endpoint.as_deref(),
+            &configuration.token_endpoint,
+        );
+        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
         let scope = params.scopes.as_ref().map(|s| s.join(" "));
         let actor = params.actor_token.as_ref().map(|t| t.expose().as_str());

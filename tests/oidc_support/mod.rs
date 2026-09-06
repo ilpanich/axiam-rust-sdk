@@ -235,6 +235,57 @@ pub fn discovery_document(base_url: &str) -> Value {
     })
 }
 
+/// The six RFC 8705 §5 aliases, every one on `mtls_base_url` (CONTRACT.md
+/// §21.3 rule 2, contract 1.40).
+pub fn mtls_endpoint_aliases(mtls_base_url: &str) -> Value {
+    json!({
+        "token_endpoint": format!("{mtls_base_url}/oauth2/token"),
+        "userinfo_endpoint": format!("{mtls_base_url}/oauth2/userinfo"),
+        "revocation_endpoint": format!("{mtls_base_url}/oauth2/revoke"),
+        "introspection_endpoint": format!("{mtls_base_url}/oauth2/introspect"),
+        "device_authorization_endpoint": format!("{mtls_base_url}/oauth2/device_authorization"),
+        "pushed_authorization_request_endpoint": format!("{mtls_base_url}/oauth2/par"),
+    })
+}
+
+/// The standard discovery document plus an `mtls_endpoint_aliases` object
+/// pointing at a *second* origin — the shape a deployment that terminates
+/// mutual TLS on its own host publishes.
+pub fn discovery_document_with_aliases(base_url: &str, mtls_base_url: &str) -> Value {
+    let mut doc = discovery_document(base_url);
+    doc.as_object_mut().expect("discovery is an object").insert(
+        "mtls_endpoint_aliases".into(),
+        mtls_endpoint_aliases(mtls_base_url),
+    );
+    doc
+}
+
+/// Generate a throwaway self-signed certificate + PKCS#8 key PEM pair, for use
+/// as a §6.1 client identity. Minted fresh in-process; nothing is committed.
+pub fn generate_client_identity() -> (String, String) {
+    let cert = rcgen::generate_simple_self_signed(vec!["axiam-sdk-test-client".to_string()])
+        .expect("rcgen must generate a self-signed cert");
+    (cert.cert.pem(), cert.signing_key.serialize_pem())
+}
+
+/// [`build_client`], plus a §6.1 mTLS client identity — so every request this
+/// client makes presents a certificate, and CONTRACT.md §21.3 rule 2 applies.
+pub fn build_mtls_client(base_url: &str, with_client_secret: bool) -> AxiamClient {
+    let (cert_pem, key_pem) = generate_client_identity();
+    let mut builder = AxiamClient::builder()
+        .base_url(base_url)
+        .expect("valid base url")
+        .tenant_id(tenant_id())
+        .org_id(org_id())
+        .oidc_client_id(CLIENT_ID)
+        .with_client_cert(cert_pem.as_bytes(), key_pem.as_bytes())
+        .expect("a freshly-minted rcgen identity is valid PEM");
+    if with_client_secret {
+        builder = builder.oidc_client_secret(CLIENT_SECRET);
+    }
+    builder.build().expect("client builds")
+}
+
 /// A discovery document with the §14/§12.7 endpoints deliberately absent —
 /// the shape an older AXIAM, or a third-party OP without those features,
 /// publishes. Used to assert the SDK errors rather than concatenating a URL

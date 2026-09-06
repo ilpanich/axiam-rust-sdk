@@ -25,6 +25,63 @@ pub const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 /// sets a floor of 5 minutes; a smaller configured value is raised to it.
 pub const MIN_DISCOVERY_TTL: Duration = Duration::from_secs(300);
 
+/// RFC 8705 §5 `mtls_endpoint_aliases` — the six endpoints re-based on the
+/// host that performs the mutual-TLS handshake (wire schema
+/// `MtlsEndpointAliases`, contract 1.40).
+///
+/// A TLS listener decides whether to request a client certificate during the
+/// handshake, before it has seen any HTTP, so "ask for a certificate on
+/// `/oauth2/token` but not on `/oauth2/authorize`" is not something one
+/// listener can do. A deployment wanting both runs two, and this object names
+/// the second.
+///
+/// Only these six are ever aliased. `authorization_endpoint` and
+/// `end_session_endpoint` are front-channel and `jwks_uri` is public key
+/// material, so CONTRACT.md §21.3 rule 2 forbids synthesising an alias for any
+/// of them — sending a browser to an mTLS host raises a native
+/// certificate-chooser dialog most users cannot answer. `issuer` is not an
+/// endpoint and does not move either: §12.4 rule 3 still compares `iss`
+/// against it by exact string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Why every field is `Option`, though the schema marks all six required
+///
+/// AXIAM builds all six from one path through a shared macro, so a real AXIAM
+/// deployment always publishes the complete set and this type accepts every
+/// document it serves. Modelling them as required would additionally make a
+/// *partial* object — which RFC 8705 §5 permits, and which another OP may well
+/// serve — fail the whole discovery document, taking every §12 operation down
+/// with it. That is the same mistake rule 2 point 1 names, one level in: the
+/// shape of this member must never be why a client stops working. An absent
+/// entry falls back to the top-level endpoint of the same name, exactly as an
+/// absent object does.
+pub struct MtlsEndpointAliases {
+    /// The mTLS token endpoint — RFC 8705 §2 client authentication, and §3
+    /// the mint of a certificate-bound token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    /// The mTLS userinfo endpoint — OIDC Core §5.3, reached with an access
+    /// token that may carry `cnf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userinfo_endpoint: Option<String>,
+    /// The mTLS revocation endpoint — RFC 7009 §2.1, which authenticates the
+    /// client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_endpoint: Option<String>,
+    /// The mTLS introspection endpoint — RFC 7662 §2.1, which authenticates
+    /// the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_endpoint: Option<String>,
+    /// The mTLS device authorization endpoint — RFC 8628 §3.1, which
+    /// authenticates the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
+    /// The mTLS pushed authorization request endpoint — RFC 9126 §2, which
+    /// authenticates the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_authorization_request_endpoint: Option<String>,
+}
+
 /// The OIDC Discovery 1.0 metadata document served by
 /// `GET /.well-known/openid-configuration` (wire schema
 /// `OidcDiscoveryDocument`). Every field is required by the server's schema.
@@ -108,6 +165,20 @@ pub struct OidcConfiguration {
     /// Whether those logout tokens carry `sid`. AXIAM always sends it.
     #[serde(default)]
     pub backchannel_logout_session_supported: Option<bool>,
+
+    /// RFC 8705 §5 endpoint aliases for a deployment that terminates mutual
+    /// TLS on a host other than the issuer's own (contract 1.40, §21.3
+    /// rule 2).
+    ///
+    /// `Option`, and **`None` means "no separate host", not "mTLS
+    /// unsupported"**: a deployment running `client_auth = optional` on one
+    /// listener serves both populations at the conventional endpoints and
+    /// correctly publishes nothing here. A client treating absence as an
+    /// error would refuse the most common mTLS topology AXIAM ships. The
+    /// server omits the key rather than serialising `null`, and
+    /// `skip_serializing_if` keeps this type's own output the same shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_endpoint_aliases: Option<MtlsEndpointAliases>,
 }
 
 /// Normalize a base URL to its cache key: lowercased scheme and host with

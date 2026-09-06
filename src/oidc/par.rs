@@ -147,9 +147,14 @@ impl AxiamClient {
         let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
         let client_id = self.oidc_client_id_or_err()?.to_string();
 
-        let endpoint = configuration
-            .pushed_authorization_request_endpoint
-            .as_deref()
+        let endpoint = self
+            .mtls_preferred_opt(
+                &configuration,
+                |a| a.pushed_authorization_request_endpoint.as_deref(),
+                configuration
+                    .pushed_authorization_request_endpoint
+                    .as_deref(),
+            )
             .ok_or_else(|| {
                 AxiamError::auth(
                     "the authorization server's discovery document advertises no \

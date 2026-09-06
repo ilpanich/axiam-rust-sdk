@@ -416,7 +416,12 @@ impl AxiamClient {
         let tenant_id = self.resolve_oidc_tenant_id(tenant_id).await?;
         let client_id = self.oidc_client_id_or_err()?.to_string();
         let client_secret = self.oidc_client_secret_or_err("uma_exchange_ticket")?;
-        let url = self.oidc_endpoint_url(&configuration.token_endpoint, tenant_id)?;
+        let endpoint = self.mtls_preferred(
+            &configuration,
+            |a| a.token_endpoint.as_deref(),
+            &configuration.token_endpoint,
+        );
+        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
         let form = UmaTicketForm {
             grant_type: UMA_TICKET_GRANT_TYPE,
