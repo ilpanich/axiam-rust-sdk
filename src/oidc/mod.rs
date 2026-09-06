@@ -79,7 +79,7 @@ pub use device::{
     DEFAULT_POLL_INTERVAL_SECS, DEVICE_CODE_GRANT_TYPE, DeviceAuthorization, DeviceAuthorizeParams,
     DeviceLoginParams, DevicePollParams, SLOW_DOWN_INCREMENT_SECS,
 };
-pub use discovery::{DISCOVERY_PATH, MIN_DISCOVERY_TTL, OidcConfiguration};
+pub use discovery::{DISCOVERY_PATH, MIN_DISCOVERY_TTL, MtlsEndpointAliases, OidcConfiguration};
 pub use exchange::{
     IntrospectParams, IntrospectionResult, LoginClientCredentialsParams, OidcExchangeParams,
     OidcRefreshParams, OidcTokenSet, RevokeParams, SsoCompleteParams, SsoCompleteResult,

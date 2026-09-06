@@ -230,7 +230,13 @@ impl AxiamClient {
         let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
         let client_id = self.oidc_client_id_or_err()?.to_string();
 
-        let endpoint = configuration.device_authorization_endpoint.as_deref().ok_or_else(|| {
+        let endpoint = self
+            .mtls_preferred_opt(
+                &configuration,
+                |a| a.device_authorization_endpoint.as_deref(),
+                configuration.device_authorization_endpoint.as_deref(),
+            )
+            .ok_or_else(|| {
             AxiamError::Auth {
                 message:
                     "the authorization server's discovery document advertises no device_authorization_endpoint: this server does not support the device grant (CONTRACT.md §14.1)"
@@ -304,7 +310,12 @@ impl AxiamClient {
         };
         let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
         let client_id = self.oidc_client_id_or_err()?.to_string();
-        let url = self.oidc_endpoint_url(&configuration.token_endpoint, tenant_id)?;
+        let endpoint = self.mtls_preferred(
+            &configuration,
+            |a| a.token_endpoint.as_deref(),
+            &configuration.token_endpoint,
+        );
+        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
         let form = DeviceTokenForm {
             grant_type: DEVICE_CODE_GRANT_TYPE,

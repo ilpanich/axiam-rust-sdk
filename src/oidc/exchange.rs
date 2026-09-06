@@ -14,7 +14,7 @@ use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
 use crate::rest::auth::CsrfHeaderExt;
 
-use super::discovery::OidcConfiguration;
+use super::discovery::{MtlsEndpointAliases, OidcConfiguration};
 use super::id_token::{IdTokenClaims, IdTokenExpectations, check_id_token_claims};
 
 /// Path of the federation SSO step-1 endpoint.
@@ -401,6 +401,72 @@ impl AxiamClient {
         })
     }
 
+    /// Whether this client presents a §6.1 mTLS client certificate, and so
+    /// whether CONTRACT.md §21.3 rule 2 applies to the calls it makes.
+    ///
+    /// The identity is configured once on the builder and presented on every
+    /// request the client issues, so "is this call going over mutual TLS" has
+    /// a whole-client answer here rather than a per-call one.
+    pub(crate) fn presents_client_certificate(&self) -> bool {
+        self.inner.client_cert_pem.is_some()
+    }
+
+    /// The RFC 8705 §5 alias for an always-advertised endpoint, falling back
+    /// to the top-level entry (CONTRACT.md §21.3 rule 2).
+    ///
+    /// Three things this deliberately does NOT do, each of them a documented
+    /// way to get rule 2 wrong:
+    ///
+    /// * An absent `mtls_endpoint_aliases` is never an error. It means "no
+    ///   separate mTLS host", not "mTLS unsupported" — a deployment running
+    ///   `client_auth = optional` on one listener serves both populations at
+    ///   the conventional endpoints and correctly publishes nothing.
+    /// * The `select` closure can only reach [`MtlsEndpointAliases`], so
+    ///   `authorization_endpoint`, `end_session_endpoint` and `jwks_uri` are
+    ///   unreachable rather than merely unused: they are front-channel or
+    ///   public, and an mTLS host would raise a certificate-chooser dialog in
+    ///   the user's browser.
+    /// * `issuer` is untouched. It is an identifier, not an endpoint, and
+    ///   §12.4 rule 3 still compares a token's `iss` against
+    ///   `configuration.issuer` by exact string — including for a token
+    ///   minted at an alias endpoint.
+    pub(crate) fn mtls_preferred<'a>(
+        &self,
+        configuration: &'a OidcConfiguration,
+        select: impl Fn(&'a MtlsEndpointAliases) -> Option<&'a str>,
+        top_level: &'a str,
+    ) -> &'a str {
+        self.mtls_alias(configuration, select).unwrap_or(top_level)
+    }
+
+    /// The alias itself, or `None` when this call is not going over mTLS, the
+    /// document publishes no aliases, or it publishes none for this endpoint.
+    fn mtls_alias<'a>(
+        &self,
+        configuration: &'a OidcConfiguration,
+        select: impl Fn(&'a MtlsEndpointAliases) -> Option<&'a str>,
+    ) -> Option<&'a str> {
+        if !self.presents_client_certificate() {
+            return None;
+        }
+        configuration
+            .mtls_endpoint_aliases
+            .as_ref()
+            .and_then(select)
+    }
+
+    /// The same preference for a conditionally-advertised endpoint. `None`
+    /// still means "this server does not support the feature" — the caller
+    /// raises that, and never concatenates a URL onto the issuer.
+    pub(crate) fn mtls_preferred_opt<'a>(
+        &self,
+        configuration: &'a OidcConfiguration,
+        select: impl Fn(&'a MtlsEndpointAliases) -> Option<&'a str>,
+        top_level: Option<&'a str>,
+    ) -> Option<&'a str> {
+        self.mtls_alias(configuration, select).or(top_level)
+    }
+
     /// Build the token/introspection/revocation endpoint URL with the
     /// mandatory `?tenant_id=<uuid>` query parameter (§12.1 note 2).
     pub(crate) fn oidc_endpoint_url(
@@ -423,7 +489,12 @@ impl AxiamClient {
         form: &TokenRequestForm<'_>,
         tenant_id: Uuid,
     ) -> Result<TokenResponseWire, AxiamError> {
-        let url = self.oidc_endpoint_url(&configuration.token_endpoint, tenant_id)?;
+        let endpoint = self.mtls_preferred(
+            configuration,
+            |a| a.token_endpoint.as_deref(),
+            &configuration.token_endpoint,
+        );
+        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let response = self
             .http()
             .post(url)
@@ -663,7 +734,12 @@ impl AxiamClient {
         let client_id = self.oidc_client_id_or_err()?.to_string();
         let client_secret = self.oidc_client_secret_or_err("introspect")?;
 
-        let url = self.oidc_endpoint_url(&configuration.introspection_endpoint, tenant_id)?;
+        let endpoint = self.mtls_preferred(
+            &configuration,
+            |a| a.introspection_endpoint.as_deref(),
+            &configuration.introspection_endpoint,
+        );
+        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let form = IntrospectOrRevokeForm {
             token: params.token.expose().as_str(),
             client_id: &client_id,
@@ -721,7 +797,12 @@ impl AxiamClient {
         let client_id = self.oidc_client_id_or_err()?.to_string();
         let client_secret = self.oidc_client_secret_or_err("revoke")?;
 
-        let url = self.oidc_endpoint_url(&configuration.revocation_endpoint, tenant_id)?;
+        let endpoint = self.mtls_preferred(
+            &configuration,
+            |a| a.revocation_endpoint.as_deref(),
+            &configuration.revocation_endpoint,
+        );
+        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let form = IntrospectOrRevokeForm {
             token: params.token.expose().as_str(),
             client_id: &client_id,
