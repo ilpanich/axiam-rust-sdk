@@ -21,7 +21,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use oidc_support::{
     CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, build_client, discovery_document,
-    discovery_document_without_optional_endpoints,
+    discovery_document_without_optional_endpoints, tenant_id,
 };
 
 const REQUEST_URI: &str = "urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c";
@@ -283,11 +283,26 @@ async fn an_op_without_a_par_endpoint_errors_rather_than_concatenating() {
 }
 
 // ---------------------------------------------------------------------------
-// §26.2 rule 2 — the redirect URL carries exactly two parameters
+// §26.2 rule 2 — no authorization parameter accompanies the request_uri
 // ---------------------------------------------------------------------------
 
+/// Re-pointed at contract 1.42, not relaxed.
+///
+/// This asserted a parameter count of exactly two, which was the whole of the
+/// redirect URL before `/oauth2/authorize` grew a `tenant_id` it reads for a
+/// request carrying no authenticated principal. A PAR redirect is always such
+/// a request — the user has not logged in yet, that is what the redirect is
+/// for — so the server now answers `401` to a tenant-less one.
+///
+/// The count is therefore three, and the assertion below is strengthened
+/// rather than loosened: it names every expected parameter instead of
+/// counting them, so an inline `scope`, `state`, `redirect_uri` or PKCE value
+/// creeping back in still fails it. That is the property §26.2 rule 2 exists
+/// to protect, and `tenant_id` is not one of those parameters — it is AXIAM's
+/// tenant routing parameter, never part of the pushed body, so there is no
+/// pushed copy for it to contradict.
 #[tokio::test]
-async fn the_authorization_url_carries_exactly_two_parameters() {
+async fn the_authorization_url_carries_no_inline_authorization_parameter() {
     let server = MockServer::start().await;
     mount_par(&server, created()).await;
 
@@ -320,13 +335,20 @@ async fn the_authorization_url_carries_exactly_two_parameters() {
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
 
-    // Asserted on the FULL parameter set, not on the presence of the two: the
-    // server refuses a request mixing a request_uri with inline authorization
-    // parameters rather than merging them, and re-adding them "for
-    // compatibility" restores the parameter-confusion attack that prevents.
-    assert_eq!(params.len(), 2, "unexpected parameters: {params:?}");
+    // Asserted on the FULL parameter set, by name: the server refuses a
+    // request mixing a request_uri with inline authorization parameters
+    // rather than merging them, and re-adding them "for compatibility"
+    // restores the parameter-confusion attack that prevents.
+    let mut names: Vec<&str> = params.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["client_id", "request_uri", "tenant_id"],
+        "unexpected parameters: {params:?}"
+    );
     assert_eq!(params["client_id"], CLIENT_ID);
     assert_eq!(params["request_uri"], REQUEST_URI);
+    assert_eq!(params["tenant_id"], tenant_id().to_string());
     assert!(
         pushed
             .url

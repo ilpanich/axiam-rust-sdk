@@ -1619,9 +1619,12 @@ Nothing in this SDK's API changes. The `/oauth2/*` helpers now *replace* rather 
 `tenant_id` they resolve, so a scoped document produces one parameter instead of two, and any
 other query parameter the endpoint carries is preserved — RFC 6749 §3.1/§3.2 require a client
 adding parameters of its own to retain the endpoint's existing query component. `oidc_par`'s
-redirect target carries that one parameter through as well, which it previously discarded: the
-authorization endpoint reads it to route a browser that has no session yet, which is every
-browser arriving on a PAR redirect.
+redirect target now always carries the tenant the push was made under, which it previously
+discarded entirely: the authorization endpoint reads `tenant_id` for a request with no
+authenticated principal — every browser on a PAR redirect, since logging in is what the
+redirect is for — and answers `401` without it. It is sent unconditionally rather than copied
+from the advertised endpoint, because `oidc_discover` names no tenant, so a multi-tenant
+deployment with no default tenant serves a document carrying none.
 
 `userinfo_endpoint` and `jwks_uri` are never scoped — one resolves the tenant from its bearer
 token, the other is deployment-wide.

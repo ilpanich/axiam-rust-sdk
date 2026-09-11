@@ -198,9 +198,8 @@ async fn token_endpoint_still_adds_the_tenant_when_the_document_omits_it() {
     assert_eq!(tenant_ids(&url), vec![tenant_id().to_string()]);
 }
 
-/// The PAR redirect target keeps the tenant the document put on
-/// `authorization_endpoint`, and still carries nothing else beyond
-/// `client_id` and `request_uri`.
+/// A tenant-scoped `authorization_endpoint` yields exactly one `tenant_id`,
+/// and nothing else beyond `client_id` and `request_uri`.
 ///
 /// §26.2 rule 2 caps what may accompany a `request_uri`, and this is the one
 /// carry-over: `tenant_id` is AXIAM's tenant routing parameter rather than an
@@ -210,7 +209,7 @@ async fn token_endpoint_still_adds_the_tenant_when_the_document_omits_it() {
 /// the query, as this code did before contract 1.42, produced a URL the
 /// server answers `401` to.
 #[tokio::test]
-async fn par_redirect_keeps_the_advertised_tenant_and_adds_nothing_else() {
+async fn par_redirect_carries_one_tenant_and_adds_nothing_else() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth2/par"))
@@ -249,7 +248,7 @@ async fn par_redirect_keeps_the_advertised_tenant_and_adds_nothing_else() {
     assert_eq!(
         tenant_ids(&url),
         vec![tenant_id().to_string()],
-        "the tenant the server advertised must survive into the redirect",
+        "exactly one tenant_id, never the two an append would produce",
     );
 
     let mut names: Vec<String> = url.query_pairs().map(|(k, _)| k.into_owned()).collect();
@@ -265,10 +264,24 @@ async fn par_redirect_keeps_the_advertised_tenant_and_adds_nothing_else() {
     );
 }
 
-/// A bare `authorization_endpoint` still yields the two-parameter redirect
-/// §26.2 rule 2 describes — no empty `tenant_id=` invented for symmetry.
+/// A **bare** `authorization_endpoint` still gets the tenant — this is the
+/// case the carry-over-only fix missed.
+///
+/// `oidc_discover` fetches `/.well-known/openid-configuration` with no tenant
+/// of its own, so a multi-tenant deployment that configures no
+/// `oauth2_default_tenant_id` serves a document whose `authorization_endpoint`
+/// carries no `tenant_id` at all. Copying only what the document published
+/// therefore fixed the scoped case and left this one redirecting a
+/// session-less browser at an endpoint that answers `401`.
+///
+/// This assertion previously demanded exactly `client_id` and `request_uri`
+/// and nothing else. It is re-pointed rather than deleted: the shape it was
+/// guarding — that no *authorization* parameter rides along with a
+/// `request_uri` (§26.2 rule 2) — is still asserted below, and is still the
+/// thing that matters. What changed is that `tenant_id`, which is routing
+/// rather than an authorization parameter, is now always present.
 #[tokio::test]
-async fn par_redirect_from_a_bare_endpoint_carries_exactly_two_parameters() {
+async fn par_redirect_from_a_bare_endpoint_still_carries_the_resolved_tenant() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth2/par"))
@@ -304,11 +317,25 @@ async fn par_redirect_from_a_bare_endpoint_carries_exactly_two_parameters() {
         .expect("the push succeeds");
 
     let url = Url::parse(&pushed.url).expect("the redirect target is a URL");
+    assert_eq!(
+        tenant_ids(&url),
+        vec![tenant_id().to_string()],
+        "a bare document must not leave the redirect tenant-less: /oauth2/authorize \
+         reads tenant_id for a request with no principal, and a PAR redirect is \
+         always one",
+    );
+
     let mut names: Vec<String> = url.query_pairs().map(|(k, _)| k.into_owned()).collect();
     names.sort();
     assert_eq!(
         names,
-        vec!["client_id".to_owned(), "request_uri".to_owned()]
+        vec![
+            "client_id".to_owned(),
+            "request_uri".to_owned(),
+            "tenant_id".to_owned()
+        ],
+        "§26.2 rule 2 still holds: no authorization parameter accompanies the \
+         request_uri",
     );
 }
 
