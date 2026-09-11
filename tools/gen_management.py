@@ -102,21 +102,69 @@ def field_name(name: str) -> tuple[str, str | None]:
     return ident, None
 
 
+# A Markdown list item: `* x`, `- x`, `+ x`, `1. x`. Matched at the start of a
+# source line only, so a `*` used for emphasis mid-sentence is not a bullet.
+LIST_ITEM_RE = re.compile(r"^\s*(?:[*+-]|\d+[.)])\s+")
+
+
 def wrap_doc(text: str, width: int = 74) -> list[str]:
-    """Reflow a paragraph to `width`, preserving blank lines.
+    """Reflow a paragraph to `width`, preserving blank lines and list items.
 
     rustfmt does not reflow comments, so without this every generated doc
     comment is one 400-column line and the files are unreadable in review.
+
+    A paragraph is NOT collapsed wholesale, because an upstream description
+    may carry a Markdown list inside one. Collapsing that runs the bullets
+    together mid-line and leaves their continuations flush against the
+    margin, which is malformed Markdown -- rustdoc stops rendering the list
+    and `clippy::doc_lazy_continuation` fires on every continuation line. The
+    crate is built with `-D warnings` in CI, so a description containing a
+    list used to be enough to fail the build of generated code nobody edited.
+
+    Each list item is therefore wrapped as its own block with its
+    continuation lines indented under the marker, and only the runs of plain
+    prose between items are collapsed.
     """
     import textwrap
 
+    def blocks(para: str) -> list[list[str]]:
+        """Split a paragraph into prose runs and individual list items."""
+        grouped: list[list[str]] = []
+        for line in para.split("\n"):
+            if LIST_ITEM_RE.match(line):
+                grouped.append([line])
+            elif grouped and grouped[-1] and LIST_ITEM_RE.match(grouped[-1][0]):
+                # A continuation line of the list item above it.
+                grouped[-1].append(line)
+            elif grouped and not LIST_ITEM_RE.match(grouped[-1][0]):
+                grouped[-1].append(line)
+            else:
+                grouped.append([line])
+        return grouped
+
     out: list[str] = []
     for para in text.strip().split("\n\n"):
-        collapsed = " ".join(para.split())
-        if not collapsed:
+        if not para.strip():
             out.append("")
             continue
-        out.extend(textwrap.wrap(collapsed, width=width) or [""])
+        for block in blocks(para):
+            collapsed = " ".join(" ".join(block).split())
+            if not collapsed:
+                continue
+            marker = LIST_ITEM_RE.match(block[0])
+            if marker:
+                # Continuations indented to the item's text column, so the
+                # list keeps its shape through both rustdoc and clippy.
+                out.extend(
+                    textwrap.wrap(
+                        collapsed,
+                        width=width,
+                        subsequent_indent="  ",
+                    )
+                    or [""]
+                )
+            else:
+                out.extend(textwrap.wrap(collapsed, width=width) or [""])
         out.append("")
     while out and out[-1] == "":
         out.pop()
