@@ -129,6 +129,30 @@ pub struct OidcConfiguration {
     /// Grant types the token endpoint supports.
     pub grant_types_supported: Vec<String>,
 
+    /// RFC 8414 §2 / RFC 7636 §4.3 — the PKCE transformations the server
+    /// accepts (contract 1.42, §21.5). AXIAM publishes `["S256"]`, and its
+    /// authorization endpoint refuses `plain`.
+    ///
+    /// `Option` even though the server's own schema marks it required, and
+    /// the contract row is why: *"RFC 8414 defines no default for this
+    /// member, so its **absence** does not mean `S256`"*. `None` means the
+    /// document did not say — which is what a pre-1.42 AXIAM and most
+    /// third-party OPs will give this SDK — and is not the same answer as
+    /// `Some(vec![])`. Modelling it required would refuse documents this
+    /// SDK accepts today.
+    #[serde(default)]
+    pub code_challenge_methods_supported: Option<Vec<String>>,
+
+    /// RFC 8414 §2 — the JWS algorithms the token endpoint accepts on a
+    /// `private_key_jwt` client assertion (contract 1.42, §21.5). AXIAM
+    /// publishes the same three as `dpop_signing_alg_values_supported`
+    /// (`PS256`, `ES256`, `EdDSA`); FAPI 2.0 §5.3.1.1 is why they are one
+    /// profile.
+    ///
+    /// `Option` for [`Self::code_challenge_methods_supported`]'s reason.
+    #[serde(default)]
+    pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
+
     /// RFC 8628 device authorization endpoint, used by
     /// [`crate::client::AxiamClient::device_authorize`] (§14.1).
     ///

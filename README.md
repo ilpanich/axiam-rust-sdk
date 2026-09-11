@@ -65,7 +65,7 @@ including the four public "Sign in with X" entry points, on the same host object
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§27 is implemented **in full**, both halves: the 147-operation imperative surface *and*
+§27 is implemented **in full**, both halves: the 158-operation imperative surface *and*
 the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
 that ships only one half to say which; this one ships both.
 
@@ -1326,7 +1326,7 @@ why the ~870 lines of group arithmetic the SRP implementation needed are gone.
 Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
 about a resource, `verify_webhook` checks a delivery signature — and none of them can
 create the user, declare the resource or register the webhook. `client.management` is the
-part that can: **147 operations across 24 namespaces**, generated from
+part that can: **158 operations across 24 namespaces**, generated from
 `management-registry.json`, which is the whole server API minus what other contract
 sections own and minus organization creation and deletion (§27.0 keeps those out of reach
 of a client library on purpose).
@@ -1434,7 +1434,7 @@ the whole `list` — taking down every record on the page over one field of one 
 
 ### Declarative manifests (§27.6, §27.7)
 
-Calling 147 operations one at a time is rarely what an application wants. What it does at
+Calling 158 operations one at a time is rarely what an application wants. What it does at
 start-up, in a migration, or in a test fixture is assert a shape:
 
 ```rust
@@ -1477,7 +1477,7 @@ within its resource — and returns the ordered actions that would reconcile the
   a tenant that also holds hand-made state.
 - **Applying twice converges**: the second plan is all `NoChange`. That is what makes
   re-running after a failure safe.
-- **There is no transaction** across 147 independent HTTP endpoints, and `ApplyReport` does
+- **There is no transaction** across 158 independent HTTP endpoints, and `ApplyReport` does
   not pretend there is. If step 12 of 30 fails, steps 1–11 have happened; the report says
   which, execution stops rather than continuing blindly, and there is no `rollback` —
   because this SDK could not honour one.
@@ -1606,6 +1606,45 @@ Three things this deliberately does **not** do:
 A client built without `with_client_cert` keeps using the top-level endpoints even when the
 document publishes aliases: the alias exists for the handshake, and there is no handshake to
 make.
+
+#### The discovery document now carries the tenant (contract 1.42)
+
+Since AXIAM's first OpenID Foundation conformance run, a discovery document that describes one
+tenant publishes `?tenant_id=<uuid>` **inside the endpoint URLs it advertises** — every endpoint
+that authenticates a client, plus `authorization_endpoint` and `end_session_endpoint`. A document
+that names no tenant (and a deployment with no default tenant configured) still advertises them
+bare, exactly as before.
+
+Nothing in this SDK's API changes. The `/oauth2/*` helpers now *replace* rather than append the
+`tenant_id` they resolve, so a scoped document produces one parameter instead of two, and any
+other query parameter the endpoint carries is preserved — RFC 6749 §3.1/§3.2 require a client
+adding parameters of its own to retain the endpoint's existing query component. `oidc_par`'s
+redirect target carries that one parameter through as well, which it previously discarded: the
+authorization endpoint reads it to route a browser that has no session yet, which is every
+browser arriving on a PAR redirect.
+
+`userinfo_endpoint` and `jwks_uri` are never scoped — one resolves the tenant from its bearer
+token, the other is deployment-wide.
+
+#### The ID token no longer carries `tenant_id`, `org_id` or `email` (contract 1.42)
+
+OIDC Core §5.4: the ID token carries standard OIDC claims only, and the `email` scope is answered
+at UserInfo rather than in the token. This SDK never typed those three — `IdTokenClaims` models
+the claims §12.4 validates and keeps everything else in `extra` — so no type changed and no code
+here needed fixing. But if your application read them out of `extra`, they will now be absent.
+
+Resolve them from the **access-token claims** returned by login, which still carry `tenant_id`
+and `org_id`, or from **UserInfo**, which carries both as always-present members. An OP other
+than AXIAM that still sends them is unaffected: they keep arriving in `extra`, as any
+unrecognised claim does.
+
+#### RFC 9449 §10 `dpop_jkt` at PAR (contract 1.42)
+
+`OidcParParams::dpop_jkt` pins the pushed request to a DPoP key, so the authorization code it
+yields cannot be redeemed by anyone else. It is caller-supplied: this SDK verifies proofs but
+does not generate them (§21.9), so compute the thumbprint from your public JWK with
+`axiam_sdk::token::jwk_thumbprint_s256` — the same function the resource-server half uses for
+§21.7.2 check 10, so the two cannot disagree about what a thumbprint is.
 
 ## Release-profile tuning (for consumers)
 

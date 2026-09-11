@@ -270,6 +270,7 @@ async fn introspect_revoke_device_and_par_all_go_to_their_aliases() {
             scope: Some("openid".into()),
             tenant_id: None,
             configuration: None,
+            dpop_jkt: None,
         })
         .await
         .expect("oidc_par succeeds");

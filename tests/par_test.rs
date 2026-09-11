@@ -116,6 +116,7 @@ async fn a_201_is_treated_as_success() {
             scope: Some("openid profile".into()),
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect("a 201 is the RFC 9126 success status");
@@ -152,6 +153,7 @@ async fn the_push_carries_exactly_the_rule_1_parameters() {
             scope: Some("openid profile".into()),
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect("push");
@@ -203,6 +205,7 @@ async fn a_public_client_omits_client_secret() {
             scope: None,
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect("push");
@@ -234,6 +237,7 @@ async fn openid_is_added_when_the_caller_omits_it() {
             scope: Some("profile".into()),
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect("push");
@@ -270,6 +274,7 @@ async fn an_op_without_a_par_endpoint_errors_rather_than_concatenating() {
             scope: None,
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect_err("no PAR endpoint");
@@ -304,6 +309,7 @@ async fn the_authorization_url_carries_exactly_two_parameters() {
             scope: None,
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect("push");
@@ -361,6 +367,7 @@ async fn state_nonce_and_verifier_come_from_oidc_begin_and_stay_secret() {
             scope: None,
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect("push");
@@ -410,6 +417,7 @@ async fn a_5xx_is_not_retried() {
             scope: None,
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await
         .expect_err("503");
@@ -449,6 +457,7 @@ async fn oauth2_errors_map_through_the_shared_mapper() {
                 scope: None,
                 tenant_id: None,
                 configuration: Some(configuration),
+                dpop_jkt: None,
             })
             .await
             .expect_err("oauth2 error");

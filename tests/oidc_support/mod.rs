@@ -235,6 +235,41 @@ pub fn discovery_document(base_url: &str) -> Value {
     })
 }
 
+/// The discovery document a **tenant-scoped** AXIAM serves (contract 1.42).
+///
+/// Since the first OIDF conformance run, every endpoint that authenticates a
+/// client — token, revocation, introspection, device authorization, PAR — plus
+/// `authorization_endpoint` and `end_session_endpoint` are published already
+/// carrying `?tenant_id=<uuid>`, whenever the discovery request named a tenant
+/// or the deployment configures a default one. `userinfo_endpoint` and
+/// `jwks_uri` are bare on purpose: one resolves the tenant from its bearer
+/// token, the other is deployment-wide.
+///
+/// `token_endpoint` additionally carries an unrelated parameter, because
+/// RFC 6749 §3.2 requires a client adding parameters of its own to retain the
+/// endpoint's existing query component — not merely the part it recognises.
+pub fn tenant_scoped_discovery_document(base_url: &str, tenant: Uuid) -> Value {
+    let mut doc = discovery_document(base_url);
+    let map = doc
+        .as_object_mut()
+        .expect("discovery document is an object");
+    for endpoint in [
+        "authorization_endpoint",
+        "token_endpoint",
+        "revocation_endpoint",
+        "introspection_endpoint",
+        "device_authorization_endpoint",
+        "pushed_authorization_request_endpoint",
+        "end_session_endpoint",
+    ] {
+        let bare = map[endpoint].as_str().expect("endpoint is a string");
+        map[endpoint] = json!(format!("{bare}?tenant_id={tenant}"));
+    }
+    let token = map["token_endpoint"].as_str().expect("token endpoint");
+    map["token_endpoint"] = json!(format!("{token}&deployment=eu-west"));
+    doc
+}
+
 /// The six RFC 8705 §5 aliases, every one on `mtls_base_url` (CONTRACT.md
 /// §21.3 rule 2, contract 1.40).
 pub fn mtls_endpoint_aliases(mtls_base_url: &str) -> Value {

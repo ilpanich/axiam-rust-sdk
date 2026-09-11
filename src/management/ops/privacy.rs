@@ -11,6 +11,7 @@
 
 use crate::AxiamError;
 use crate::client::AxiamClient;
+use crate::management::models;
 use crate::management::request::{Call, Verb};
 use crate::management::scope::Scope;
 
@@ -100,6 +101,58 @@ impl<'c> Privacy<'c> {
             verb: Verb::Get,
             path_template: "/api/v1/auth/account/delete/cancel",
             path: "/api/v1/auth/account/delete/cancel".to_string(),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, None::<&()>)
+            .await
+    }
+
+    /// `GET /api/v1/account/consents`
+    pub async fn list_consents(&self) -> Result<Vec<models::ConsentView>, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "privacy.list_consents",
+            verb: Verb::Get,
+            path_template: "/api/v1/account/consents",
+            path: "/api/v1/account/consents".to_string(),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Vec<models::ConsentView>>(call, None::<&()>)
+            .await
+    }
+
+    /// `POST /api/v1/account/consents/oidc-scopes`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn grant_scope_consent(
+        &self,
+        body: &models::GrantScopeConsent,
+    ) -> Result<(), AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "privacy.grant_scope_consent",
+            verb: Verb::Post,
+            path_template: "/api/v1/account/consents/oidc-scopes",
+            path: "/api/v1/account/consents/oidc-scopes".to_string(),
+            query: &query,
+        };
+        self.client
+            .management_send_no_content(call, Some(body))
+            .await
+    }
+
+    /// `DELETE /api/v1/account/consents/oidc-scopes/{client_id}`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn withdraw_scope_consent(&self, client_id: &str) -> Result<(), AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "privacy.withdraw_scope_consent",
+            verb: Verb::Delete,
+            path_template: "/api/v1/account/consents/oidc-scopes/{client_id}",
+            path: format!("/api/v1/account/consents/oidc-scopes/{client_id}"),
             query: &query,
         };
         self.client

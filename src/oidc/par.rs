@@ -35,11 +35,17 @@ use crate::rest::auth::CsrfHeaderExt;
 pub struct PushedAuthorizationRequest {
     /// Where to redirect the user agent.
     ///
-    /// Carries **exactly** `client_id` and `request_uri`. Not `response_type`,
-    /// not `redirect_uri`, not `scope`, not `state` — the server refuses a
-    /// request that mixes a `request_uri` with inline authorization parameters
-    /// rather than merging them, because merging is where parameter confusion
-    /// lives (§26.2 rule 2).
+    /// Carries **exactly** `client_id` and `request_uri`, plus the `tenant_id`
+    /// the discovery document's own `authorization_endpoint` already carried
+    /// (contract 1.42). Not `response_type`, not `redirect_uri`, not `scope`,
+    /// not `state` — the server refuses a request that mixes a `request_uri`
+    /// with inline authorization parameters rather than merging them, because
+    /// merging is where parameter confusion lives (§26.2 rule 2).
+    ///
+    /// `tenant_id` is not one of those parameters: it is AXIAM's tenant
+    /// routing parameter, never part of the pushed body, and `/oauth2/authorize`
+    /// needs it to route a browser that has no session yet. See
+    /// [`AxiamClient::oidc_par`]'s implementation for the full argument.
     pub url: String,
     /// The opaque, single-use handle.
     ///
@@ -80,6 +86,25 @@ pub struct OidcParParams {
     pub tenant_id: Option<Uuid>,
     /// The discovery document; fetched via `oidc_discover` when `None`.
     pub configuration: Option<OidcConfiguration>,
+    /// RFC 9449 §10 `dpop_jkt` — the RFC 7638 SHA-256 thumbprint of the key
+    /// the client will prove possession of at the token endpoint
+    /// (contract 1.42).
+    ///
+    /// Binds the authorization code to that key at push time, so a code
+    /// intercepted in the browser cannot be redeemed by anyone else. §10.1
+    /// makes this one of two carriers an AS supporting both PAR and DPoP must
+    /// accept; the other is a `DPoP` proof header on this same request, and
+    /// when both arrive the server requires them to agree.
+    ///
+    /// Caller-supplied, because this SDK verifies DPoP proofs but does not
+    /// generate them (CONTRACT.md §21.9). A caller holding the key computes
+    /// the value with [`crate::token::jwk_thumbprint_s256`] over its public
+    /// JWK — the same function the resource-server half uses for check 10, so
+    /// the two halves cannot disagree about what a thumbprint is.
+    ///
+    /// Omitted from the pushed form entirely when `None`; §12.1 forbids
+    /// sending an empty value for an absent optional field.
+    pub dpop_jkt: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -94,6 +119,9 @@ struct ParForm<'a> {
     code_challenge_method: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     client_secret: Option<&'a str>,
+    /// RFC 9449 §10 — absent, not empty, when the caller pins no key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dpop_jkt: Option<&'a str>,
 }
 
 impl std::fmt::Debug for ParForm<'_> {
@@ -111,6 +139,9 @@ impl std::fmt::Debug for ParForm<'_> {
                 "client_secret",
                 &self.client_secret.map(|_| "[REDACTED]").unwrap_or("None"),
             )
+            // A public-key thumbprint, not a secret: it is published in the
+            // token's `cnf.jkt` and in every proof's header.
+            .field("dpop_jkt", &self.dpop_jkt)
             .finish()
     }
 }
@@ -181,6 +212,7 @@ impl AxiamClient {
             code_challenge: &code_challenge,
             code_challenge_method: CODE_CHALLENGE_METHOD_S256,
             client_secret: client_secret.as_deref(),
+            dpop_jkt: params.dpop_jkt.as_deref(),
         };
 
         let response = self
@@ -210,23 +242,56 @@ impl AxiamClient {
                 source: Some(Box::new(e)),
             })?;
 
-        // §26.2 rule 2: exactly two query parameters. The server REFUSES a
-        // request carrying both a `request_uri` and any inline authorization
-        // parameter rather than merging them: an attacker supplies the inline
-        // value they want and lets the pushed copy satisfy whichever check
-        // reads the other one. Re-adding them "for compatibility" restores the
-        // attack.
-        let mut target = url::Url::parse(&configuration.authorization_endpoint).map_err(|e| {
+        // §26.2 rule 2: exactly two *authorization* parameters. The server
+        // REFUSES a request carrying both a `request_uri` and any inline
+        // authorization parameter rather than merging them: an attacker
+        // supplies the inline value they want and lets the pushed copy satisfy
+        // whichever check reads the other one. Re-adding them "for
+        // compatibility" restores the attack.
+        //
+        // `tenant_id` is the one thing carried over from the advertised
+        // endpoint, and it is not an exception to that rule — it is outside
+        // it. Since contract 1.42 the discovery document publishes
+        // `authorization_endpoint` already carrying `?tenant_id=<uuid>`
+        // whenever it describes one tenant, because `/oauth2/authorize` reads
+        // that parameter to route a browser that has no session yet — which is
+        // every browser arriving on a PAR redirect. Wiping the query, as this
+        // code did, hands the user a URL the server answers `401` to.
+        //
+        // It cannot produce the confusion rule 2 exists to prevent: `tenant_id`
+        // is AXIAM's tenant routing parameter, not an OAuth2 authorization
+        // request parameter, it is never part of the pushed body (§12.1 note 2
+        // makes it a query parameter on the push itself), so there is no pushed
+        // copy for a query-string copy to contradict — and the value here is
+        // the authorization server's own, read from a document fetched over
+        // TLS, not the browser's.
+        //
+        // Everything else the endpoint's query might carry is still dropped.
+        // Rule 2 caps what may accompany a `request_uri`, and "the server sent
+        // it to us" is not a reason to widen that cap past the one parameter
+        // the server demonstrably needs.
+        let advertised = url::Url::parse(&configuration.authorization_endpoint).map_err(|e| {
             AxiamError::Network {
                 message: format!("invalid authorization_endpoint in discovery document: {e}"),
                 source: None,
             }
         })?;
+        let advertised_tenant: Option<String> = advertised
+            .query_pairs()
+            .find(|(k, _)| k == "tenant_id")
+            .map(|(_, v)| v.into_owned());
+
+        let mut target = advertised;
         target.set_query(None);
-        target
-            .query_pairs_mut()
-            .append_pair("client_id", &client_id)
-            .append_pair("request_uri", &wire.request_uri);
+        {
+            let mut pairs = target.query_pairs_mut();
+            if let Some(tenant) = advertised_tenant.as_deref() {
+                pairs.append_pair("tenant_id", tenant);
+            }
+            pairs
+                .append_pair("client_id", &client_id)
+                .append_pair("request_uri", &wire.request_uri);
+        }
 
         Ok(PushedAuthorizationRequest {
             url: target.to_string(),
@@ -262,6 +327,7 @@ mod tests {
                 code_challenge: "challenge-value",
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256,
                 client_secret: Some("super-secret-value"),
+                dpop_jkt: None,
             }
         );
         assert!(!rendered.contains("super-secret-value"), "{rendered}");
@@ -299,9 +365,18 @@ mod tests {
                 code_challenge: "challenge-value",
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256,
                 client_secret: None,
+                dpop_jkt: Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"),
             }
         );
         assert!(rendered.contains("None"), "{rendered}");
         assert!(!rendered.contains("[REDACTED]"), "{rendered}");
+        // RFC 9449 §10 `dpop_jkt` is a PUBLIC key thumbprint — it is published
+        // in the token's `cnf.jkt` and in the header of every proof. Redacting
+        // it would cost the one field that makes a DPoP push debuggable while
+        // protecting nothing.
+        assert!(
+            rendered.contains("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"),
+            "{rendered}"
+        );
     }
 }

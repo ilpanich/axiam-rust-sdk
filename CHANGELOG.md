@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SDK contract 1.42 — the two RFC 8414 discovery members the first OpenID
+  Foundation conformance run found missing (CONTRACT.md §21.5).**
+  `OidcConfiguration` gains `code_challenge_methods_supported` (RFC 7636 §4.3;
+  AXIAM publishes `["S256"]` and refuses `plain`) and
+  `token_endpoint_auth_signing_alg_values_supported` (the JWS algorithms
+  accepted on a `private_key_jwt` client assertion).
+
+  Both are `Option<Vec<String>>` despite `openapi.json` marking them required,
+  because RFC 8414 defines no default for either: absence means "this client
+  cannot establish that the capability is available", which is a different
+  answer from an empty list, and modelling them required would refuse every
+  document served by a pre-1.42 AXIAM or a third-party OP.
+
+- **RFC 9449 §10 `dpop_jkt` on pushed authorization requests.**
+  `OidcParParams` gains an optional `dpop_jkt`, emitted in the `POST
+  /oauth2/par` form only when set. It binds the authorization code to a DPoP
+  key at push time, so a code intercepted in the browser cannot be redeemed by
+  anyone else.
+
+  Caller-supplied: this SDK verifies DPoP proofs but does not generate them
+  (§21.9), so the caller computes the thumbprint from its public JWK with
+  `axiam_sdk::token::jwk_thumbprint_s256` — the same function the
+  resource-server half uses for §21.7.2 check 10.
+
 - **RFC 8705 §5 `mtls_endpoint_aliases` (SDK contract 1.40, CONTRACT.md §21.3
   rule 2).** `OidcConfiguration` gains an optional `mtls_endpoint_aliases`
   field (the new `MtlsEndpointAliases` type, re-exported from
@@ -29,18 +53,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   §12.4 rule 3 still compares a token's `iss` against it by exact string —
   including for a token minted at an alias endpoint.
 
+### Fixed
+
+- **The tenant is no longer doubled on, or stripped from, an endpoint URL the
+  discovery document already scoped (contract 1.42).** Since the conformance
+  run, AXIAM publishes `?tenant_id=<uuid>` *inside* the endpoint URLs it
+  advertises — `authorization_endpoint`, `token_endpoint`,
+  `revocation_endpoint`, `introspection_endpoint`,
+  `device_authorization_endpoint`, `pushed_authorization_request_endpoint` and
+  `end_session_endpoint` — whenever the discovery request named a tenant or the
+  deployment configures a default one. Two call paths got this wrong:
+
+  - the shared `/oauth2/*` URL builder **appended** a second `tenant_id`,
+    producing `?tenant_id=A&tenant_id=B`, which the server cannot deserialise
+    into one `Uuid`. It now replaces any `tenant_id` the endpoint already
+    carries and preserves every other query parameter, as RFC 6749 §3.1/§3.2
+    require of a client adding parameters of its own;
+  - `oidc_par` **cleared the query outright** when building the redirect
+    target, discarding the tenant the server had just published. The
+    authorization endpoint reads `tenant_id` to route a browser with no
+    session — which is every browser arriving on a PAR redirect — so the
+    result was a `401`. It now carries that one parameter through. §26.2
+    rule 2 is unaffected: `tenant_id` is AXIAM's tenant routing parameter,
+    never part of the pushed body, so no query-string copy can contradict a
+    pushed one. Every other pre-existing query parameter is still dropped.
+
+  A bare (non-tenant-scoped) document behaves exactly as before.
+
+- **Generated `///` doc comments no longer reflow Markdown lists into invalid
+  Markdown.** `tools/gen_management.py` collapsed each paragraph wholesale,
+  which ran an upstream description's bullets together mid-line and left their
+  continuations flush against the margin — enough for rustdoc to stop
+  rendering the list and for `clippy::doc_lazy_continuation` to fire on every
+  continuation line, failing a `-D warnings` build of code nobody had edited.
+  List items are now wrapped individually with their continuations indented.
+  No pre-existing doc comment changed.
+
 ### Changed
 
 - Re-vendored `CONTRACT.md`, `openapi.json` and `management-registry.json` from
-  `ilpanich/axiam` at SDK contract 1.40. The registry's 155 operations are
-  unchanged, so the generated §27 surface is unchanged; `openapi.json` gained
-  the `MtlsEndpointAliases` schema and one optional property on
-  `OidcDiscoveryDocument`.
+  `ilpanich/axiam` at SDK contract **1.42** (upstream `cdedf33`). This repo was
+  vendored at 1.40, so the sync absorbs **two** revisions.
 
-  Additive and server-side: no deployment publishes `mtls_endpoint_aliases`
-  until an operator sets `AXIAM__AUTH__OAUTH2_MTLS_BASE_URL`, so every existing
-  consumer keeps working unchanged against every existing deployment. No public
-  API was removed or renamed.
+  The registry grows from 155 to **158 operations across 24 namespaces** — the
+  `privacy` namespace gains `list_consents`, `grant_scope_consent` and
+  `withdraw_scope_consent` — and the generated §27 surface is regenerated
+  accordingly. `openapi.json` adds the `Address`, `AuthnRequestParamsMode`,
+  `ConsentView`, `GrantScopeConsent`, `OidcPolicy` and `UserInfoPostForm`
+  schemas, `client_secret_basic` to `ClientAuthMethod`, and optional members to
+  nine existing schemas. `proto/` is byte-identical upstream, so the gRPC and
+  AMQP surfaces are untouched.
+
+  Everything above is additive on the wire. The one source-level break is
+  listed below.
+
+### Breaking
+
+- **`OidcParParams` gains a `dpop_jkt` field.** Code constructing it with a
+  struct literal must add `dpop_jkt: None` to keep its current behaviour; the
+  emitted request is unchanged when it is `None`. No other public type gained
+  or lost a field, and no behaviour changed for a caller that passes `None`.
+
+- **Not a source break, but read it as one if you depend on the ID token:**
+  as of contract 1.42 AXIAM no longer puts `tenant_id`, `org_id` or `email` in
+  the ID token (OIDC Core §5.4). This SDK never typed them — they arrived in
+  `IdTokenClaims::extra` and simply stop arriving — so nothing here changed,
+  but code reading `id_claims.extra["tenant_id"]` will now find nothing.
+  Resolve the tenant and organisation from the access-token claims returned by
+  login (which still carry both), or from UserInfo.
 
 ## [1.0.0-beta12] - 2026-09-06
 

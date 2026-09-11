@@ -262,6 +262,47 @@ pub enum AuditOutcome {
     Unknown(String),
 }
 
+/// Whether this client's authorization requests may carry OpenID Connect's
+/// authentication-request parameters, or whether they are ignored (X7.1).
+///
+/// The bundle this governs is `prompt`, `max_age`, `acr_values`, `claims`,
+/// `id_token_hint`, `login_hint`, `display`, `ui_locales` and
+/// `claims_locales`. It is **one** field rather than nine booleans for the
+/// same reason \[`ClientProfile`\] is one field rather than a dozen: a client
+/// that honours `max_age` but ignores `prompt=none` is not "mostly
+/// conformant", it is a client a relying party cannot reason about.
+///
+/// \[`Ignore`\](Self::Ignore) is the serde default and is exactly what AXIAM
+/// has always done — unknown authorization-request parameters are dropped by
+/// the query deserialiser and never reach a decision. Every row written
+/// before schema v54 therefore decodes to the behaviour it already had.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`AuthnRequestParamsMode::Unknown`\] carrying the string, rather than
+/// failing the response it arrived in -- CONTRACT §27.11 rule 1. A closed
+/// enum here turns the next value the server adds into a parse error on the
+/// whole `list`, taking down every record on the page over one field of one
+/// of them. `#\[non_exhaustive\]` is what makes adding a known variant later
+/// non-breaking for callers; this is what makes *not* knowing it survivable
+/// at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AuthnRequestParamsMode {
+    /// `ignore`
+    #[serde(rename = "ignore")]
+    Ignore,
+    /// `honour`
+    #[serde(rename = "honour")]
+    Honour,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
 /// Request to bind a certificate to a service account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BindCertificate {
@@ -536,6 +577,9 @@ pub enum ClientAuthMethod {
     /// `client_secret_post`
     #[serde(rename = "client_secret_post")]
     ClientSecretPost,
+    /// `client_secret_basic`
+    #[serde(rename = "client_secret_basic")]
+    ClientSecretBasic,
     /// `tls_client_auth`
     #[serde(rename = "tls_client_auth")]
     TlsClientAuth,
@@ -620,6 +664,25 @@ pub struct ComplianceReportEntry {
     pub reason: Option<String>,
     /// `user_id`.
     pub user_id: Uuid,
+}
+
+/// One consent record, as the subject sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsentView {
+    /// `accepted_at`.
+    pub accepted_at: String,
+    /// What was consented to, e.g. `terms_of_service` or
+    /// `oidc_scope_release:\<client_id>`.
+    pub consent_type: String,
+    /// The document version or, for a scope release, the consented scopes.
+    pub version: String,
+    /// Whether this record can be withdrawn here.
+    ///
+    /// `false` for `terms_of_service`: withdrawing it is not a consent operation
+    /// but an erasure, and it has its own endpoint with its own grace period.
+    /// Reported rather than silently absent so the self-service page can show the
+    /// record and explain it.
+    pub withdrawable: bool,
 }
 
 /// `CreateCaCertificateRequest` (generated from openapi.json).
@@ -856,10 +919,32 @@ pub struct CreateNotificationRuleRequest {
 /// `CreateOAuth2ClientRequest` (generated from openapi.json).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateOAuth2ClientRequest {
+    /// X7.1 — whether this client's authorization requests may carry the OpenID
+    /// Connect authentication-request parameters (`prompt`, `max_age`,
+    /// `acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,
+    /// `ui_locales`, `claims_locales`).
+    ///
+    /// `"ignore"` (the default) is what every AXIAM client has always done: they
+    /// are dropped and reach no decision. `"honour"` opts in, and is **refused on
+    /// a `fapi2` client** at both this gate and the authorization endpoint — the
+    /// two are different answers to the same question about what a request from
+    /// this client means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authn_request_params: Option<AuthnRequestParamsMode>,
     /// B5 — where OIDC back-channel logout tokens are delivered. Omit for a
     /// client that does not participate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backchannel_logout_uri: Option<String>,
+    /// X7.3 — whether an unauthenticated authorization request from this client
+    /// may be answered with a redirect to the login page rather than the `401`
+    /// AXIAM answers today.
+    ///
+    /// Accepted and stored, but **nothing reads it yet**: the login hop it gates
+    /// is a later wave. Unlike `authn_request_params` it is permitted on a
+    /// `fapi2` client, because it relaxes nothing — it decides only how an
+    /// anonymous browser is answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_sso: Option<bool>,
     /// RFC 9449 §5.2 — issue DPoP-bound (sender-constrained) access tokens to
     /// this client. Independent of both the authentication method and
     /// `tls_client_certificate_bound_access_tokens`; a client may ask for both
@@ -1783,6 +1868,16 @@ pub struct GrantPermissionRequest {
     pub scope_ids: Option<Vec<Uuid>>,
 }
 
+/// Body for recording an OIDC scope-release consent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantScopeConsent {
+    /// The relying party the claims would be released to.
+    pub client_id: String,
+    /// The sensitive scopes being consented to. Order does not matter; the record
+    /// is written in the canonical order so that the same consent has one name.
+    pub scopes: Vec<String>,
+}
+
 /// A scope named by a grant, resolved to something a human can read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GrantedScope {
@@ -2223,6 +2318,12 @@ impl From<OAuth2ClientCreatedResponseWire> for OAuth2ClientCreatedResponse {
 /// OAuth2 client response -- omits client_secret_hash.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuth2ClientResponse {
+    /// X7.1 — echoed so an operator can audit which clients act on the OIDC
+    /// authentication-request parameters, from this endpoint rather than from the
+    /// database.
+    pub authn_request_params: AuthnRequestParamsMode,
+    /// X7.3 — echoed for the same reason.
+    pub browser_sso: bool,
     /// `client_id`.
     pub client_id: String,
     /// `created_at`.
@@ -2325,6 +2426,57 @@ pub struct OidcCallbackResponse {
     pub newly_provisioned: bool,
     /// `user_id`.
     pub user_id: Uuid,
+}
+
+/// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8).
+///
+/// Two settings that are not password rules, and are here because this is the
+/// org-baseline-plus-tenant-override surface every other per-tenant control
+/// lives on. They are also the two settings in this model that are *not* of
+/// the same kind as each other, so it is worth saying which is which:
+///
+/// * \[`Self::sensitive_scopes_enabled`\] **is** ordered. Releasing personal
+///   data is the less-restrictive direction, so it is validated disable-only
+///   — the mirror image of `mfa_enforced` — and a tenant can turn its
+///   organization's decision off but never on.
+/// * \[`Self::default_locale`\] is **not** ordered, and no ordering is invented
+///   for it. A language is a presentation preference; there is no sense in
+///   which Italian is stricter than French. \[`validate_tenant_override`\]
+///   therefore does not check it and \[`clamp_overrides_to_org`\] never clears
+///   it. The model's rule is "a tenant may only be more restrictive", which
+///   binds every field that *has* a restrictiveness; a field that has none
+///   cannot violate it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OidcPolicy {
+    /// The BCP 47 tag the sign-in page falls back to when the relying party's
+    /// `ui_locales` selects nothing (W5's chain, plan §4.6).
+    ///
+    /// `None` means "no tenant preference", which lands on the deployment default
+    /// (`en`) — the behaviour every deployment had before this field existed. A
+    /// tag this build does not ship also lands there: the parse is exact rather
+    /// than a language lookup, so a stored `fr-CA` reads as "somebody wrote
+    /// something this binary does not ship" rather than as a guess at French.
+    ///
+    /// Stored as a string rather than as the `Locale` enum because that enum
+    /// lives in `axiam-oauth2`, four layers above this crate, and the crate
+    /// layering points inward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_locale: Option<String>,
+    /// Whether `address` and `phone` may be registered on a client, requested at
+    /// the authorization endpoint, and released at UserInfo (X7 G8).
+    ///
+    /// **Off unless an organization turns it on.** The two scopes release a
+    /// postal address and a telephone number — categories of personal data AXIAM
+    /// has no other use for — so the deployment that has never thought about them
+    /// releases nothing, and the operator who has thought about them says so
+    /// once, at the organization level, where the lawful basis for holding the
+    /// data was decided.
+    ///
+    /// The switch is a *capability*, not a grant: with it on, a client still has
+    /// to register the scope, the request still has to ask for it, and the user
+    /// still has to have consented. It is the first of four gates, and it is the
+    /// only one an operator can close for everybody at once.
+    pub sensitive_scopes_enabled: bool,
 }
 
 /// The client-supplied half of an OPAQUE enrolment, as it appears inside
@@ -3027,6 +3179,8 @@ pub struct SecuritySettings {
     pub mfa: MfaPolicy,
     /// `notification`.
     pub notification: NotificationPolicy,
+    /// `oidc`.
+    pub oidc: OidcPolicy,
     /// `opaque`.
     pub opaque: OpaquePolicy,
     /// `password`.
@@ -3161,6 +3315,9 @@ pub struct SetOrgSettings {
     pub admin_notifications_enabled: bool,
     /// `default_cert_validity_days`.
     pub default_cert_validity_days: i32,
+    /// `default_locale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_locale: Option<String>,
     /// `deletion_grace_period_days`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_grace_period_days: Option<i32>,
@@ -3207,6 +3364,9 @@ pub struct SetOrgSettings {
     pub require_symbols: bool,
     /// `require_uppercase`.
     pub require_uppercase: bool,
+    /// `sensitive_scopes_enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive_scopes_enabled: Option<bool>,
     /// `webauthn_user_verification`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_user_verification: Option<String>,
@@ -3378,6 +3538,10 @@ pub struct TenantSettingsOverride {
     /// `default_cert_validity_days`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_cert_validity_days: Option<i32>,
+    /// The tenant's fallback UI language. Not ordered, therefore not validated
+    /// against the baseline and never clamped — see \[`OidcPolicy`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_locale: Option<String>,
     /// `deletion_grace_period_days`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_grace_period_days: Option<i32>,
@@ -3441,6 +3605,9 @@ pub struct TenantSettingsOverride {
     /// `require_uppercase`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_uppercase: Option<bool>,
+    /// `sensitive_scopes_enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive_scopes_enabled: Option<bool>,
     /// `webauthn_user_verification`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_user_verification: Option<String>,
@@ -3751,10 +3918,16 @@ pub struct UpdateNotificationRuleRequest {
 /// `..Default::default()`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct UpdateOAuth2ClientRequest {
+    /// `authn_request_params`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authn_request_params: Option<AuthnRequestParamsMode>,
     /// Pass an empty string to clear a previously registered URI — the one edit
     /// an operator makes when an RP is decommissioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backchannel_logout_uri: Option<String>,
+    /// X7.3 — see \[`CreateOAuth2ClientRequest::browser_sso`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_sso: Option<bool>,
     /// `dpop_bound_access_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dpop_bound_access_tokens: Option<bool>,

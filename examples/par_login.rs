@@ -64,6 +64,7 @@ async fn begin(
             scope: Some(SCOPE.into()),
             tenant_id: None,
             configuration: Some(configuration),
+            dpop_jkt: None,
         })
         .await?;
 

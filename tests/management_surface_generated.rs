@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 155] = [
+const EXERCISED: [&str; 158] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -185,6 +185,9 @@ const EXERCISED: [&str; 155] = [
     "privacy.download_export",
     "privacy.request_delete",
     "privacy.cancel_delete",
+    "privacy.list_consents",
+    "privacy.grant_scope_consent",
+    "privacy.withdraw_scope_consent",
     "platform.health",
     "platform.ready",
     "platform.mds_status",
@@ -1490,7 +1493,7 @@ async fn oauth2_clients_surface() {
     let client = logged_in_client(&server).await;
 
     // oauth2_clients.list
-    mount(&server, "GET", "/api/v1/oauth2-clients", 200, r#"{"items": [{"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    mount(&server, "GET", "/api/v1/oauth2-clients", 200, r#"{"items": [{"authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
     client
         .oauth2_clients()
         .list(PageRequest::first(50))
@@ -1507,7 +1510,9 @@ async fn oauth2_clients_surface() {
     client
         .oauth2_clients()
         .create(&models::CreateOAuth2ClientRequest {
+            authn_request_params: None,
             backchannel_logout_uri: None,
+            browser_sso: None,
             dpop_bound_access_tokens: None,
             dpop_require_nonce: None,
             grant_types: Vec::new(),
@@ -1530,7 +1535,7 @@ async fn oauth2_clients_surface() {
         .expect("oauth2_clients.create");
 
     // oauth2_clients.get
-    mount(&server, "GET", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "GET", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .oauth2_clients()
         .get(example_id())
@@ -1538,7 +1543,7 @@ async fn oauth2_clients_surface() {
         .expect("oauth2_clients.get");
 
     // oauth2_clients.update
-    mount(&server, "PUT", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .oauth2_clients()
         .update(example_id(), &models::UpdateOAuth2ClientRequest::default())
@@ -1900,17 +1905,18 @@ async fn settings_surface() {
     let client = logged_in_client(&server).await;
 
     // settings.get_org
-    mount(&server, "GET", &format!("/api/v1/organizations/{ORG_ID}/settings"), 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
+    mount(&server, "GET", &format!("/api/v1/organizations/{ORG_ID}/settings"), 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "oidc": {"sensitive_scopes_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
     client.settings().get_org().await.expect("settings.get_org");
 
     // settings.set_org
-    mount(&server, "PUT", &format!("/api/v1/organizations/{ORG_ID}/settings"), 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/organizations/{ORG_ID}/settings"), 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "oidc": {"sensitive_scopes_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
     client
         .settings()
         .set_org(&models::SetOrgSettings {
             access_token_lifetime_secs: 1,
             admin_notifications_enabled: true,
             default_cert_validity_days: 1,
+            default_locale: None,
             deletion_grace_period_days: None,
             email_verification_grace_period_hours: 1,
             email_verification_required: true,
@@ -1932,13 +1938,14 @@ async fn settings_surface() {
             require_lowercase: true,
             require_symbols: true,
             require_uppercase: true,
+            sensitive_scopes_enabled: None,
             webauthn_user_verification: None,
         })
         .await
         .expect("settings.set_org");
 
     // settings.get_effective
-    mount(&server, "GET", "/api/v1/settings", 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
+    mount(&server, "GET", "/api/v1/settings", 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "oidc": {"sensitive_scopes_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
     client
         .settings()
         .get_effective()
@@ -1946,7 +1953,7 @@ async fn settings_surface() {
         .expect("settings.get_effective");
 
     // settings.set_effective
-    mount(&server, "PUT", "/api/v1/settings", 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
+    mount(&server, "PUT", "/api/v1/settings", 200, r#"{"certificate": {"default_cert_validity_days": 1, "max_cert_validity_days": 1}, "created_at": "2026-08-26T00:00:00Z", "email": {"email_verification_grace_period_hours": 1, "email_verification_required": true}, "id": "11111111-1111-4111-8111-111111111111", "lockout": {"lockout_backoff_multiplier": 1.0, "lockout_duration_secs": 1, "max_failed_login_attempts": 1, "max_lockout_duration_secs": 1}, "mfa": {"mfa_challenge_lifetime_secs": 1, "mfa_enforced": true}, "notification": {"admin_notifications_enabled": true}, "oidc": {"sensitive_scopes_enabled": true}, "opaque": {"opaque_ksf": "example", "opaque_mode": "example", "opaque_suite": "example"}, "password": {"hibp_check_enabled": true, "min_length": 1, "password_history_count": 1, "require_digits": true, "require_lowercase": true, "require_symbols": true, "require_uppercase": true}, "privacy": {"deletion_grace_period_days": 1}, "scope": "Org", "scope_id": "11111111-1111-4111-8111-111111111111", "token": {"access_token_lifetime_secs": 1, "refresh_token_lifetime_secs": 1}, "updated_at": "2026-08-26T00:00:00Z", "webauthn": {"webauthn_user_verification": "example"}}"#).await;
     client
         .settings()
         .set_effective(&models::TenantSettingsOverride::default())
@@ -2242,6 +2249,47 @@ async fn privacy_surface() {
         .cancel_delete("example")
         .await
         .expect("privacy.cancel_delete");
+
+    // privacy.list_consents
+    mount(&server, "GET", "/api/v1/account/consents", 200, r#"[{"accepted_at": "2026-08-26T00:00:00Z", "consent_type": "example", "version": "example", "withdrawable": true}]"#).await;
+    client
+        .privacy()
+        .list_consents()
+        .await
+        .expect("privacy.list_consents");
+
+    // privacy.grant_scope_consent
+    mount(
+        &server,
+        "POST",
+        "/api/v1/account/consents/oidc-scopes",
+        200,
+        "",
+    )
+    .await;
+    client
+        .privacy()
+        .grant_scope_consent(&models::GrantScopeConsent {
+            client_id: "example".to_string(),
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("privacy.grant_scope_consent");
+
+    // privacy.withdraw_scope_consent
+    mount(
+        &server,
+        "DELETE",
+        "/api/v1/account/consents/oidc-scopes/example",
+        200,
+        "",
+    )
+    .await;
+    client
+        .privacy()
+        .withdraw_scope_consent("example")
+        .await
+        .expect("privacy.withdraw_scope_consent");
 }
 
 /// Reaches every operation in the `platform` namespace.
