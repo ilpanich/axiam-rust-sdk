@@ -469,6 +469,26 @@ impl AxiamClient {
 
     /// Build the token/introspection/revocation endpoint URL with the
     /// mandatory `?tenant_id=<uuid>` query parameter (§12.1 note 2).
+    ///
+    /// **Replaces rather than appends.** Since contract 1.42 the discovery
+    /// document publishes the tenant *inside* the endpoint URLs it
+    /// advertises — every endpoint that authenticates a client gets
+    /// `?tenant_id=<uuid>` server-side, whenever the discovery request named
+    /// a tenant or the deployment configures a default one. Appending a
+    /// second `tenant_id` to such a URL produces
+    /// `?tenant_id=A&tenant_id=B`, which is not a parameter the server can
+    /// deserialise into one `Uuid`.
+    ///
+    /// Every *other* query parameter the endpoint carries is preserved:
+    /// RFC 6749 §3.1 and §3.2 both require a client adding parameters of its
+    /// own to retain the endpoint's existing query component, and that is the
+    /// mechanism this whole arrangement relies on.
+    ///
+    /// The resolved tenant wins when the two disagree. It is the one the
+    /// caller or the current session actually authenticated against, and a
+    /// deterministic answer is worth more here than a silent mismatch
+    /// between the tenant in the URL and the tenant in the `X-Tenant-ID`
+    /// header that accompanies it.
     pub(crate) fn oidc_endpoint_url(
         &self,
         endpoint: &str,
@@ -478,8 +498,31 @@ impl AxiamClient {
             message: format!("invalid endpoint URL in discovery document: {e}"),
             source: None,
         })?;
-        url.query_pairs_mut()
-            .append_pair("tenant_id", &tenant_id.to_string());
+
+        // Rebuild the query only when there is a `tenant_id` to displace.
+        // Appending to an untouched query keeps it byte-for-byte as the
+        // server wrote it; round-tripping every pair through
+        // `append_pair` would re-encode it, and an endpoint's own query is
+        // not this SDK's to normalise.
+        let has_tenant = url.query_pairs().any(|(k, _)| k == "tenant_id");
+        if has_tenant {
+            // Collected first: `query_pairs_mut` borrows the URL mutably
+            // and cannot run while `query_pairs` is still reading it.
+            let retained: Vec<(String, String)> = url
+                .query_pairs()
+                .filter(|(k, _)| k != "tenant_id")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            url.set_query(None);
+            let mut pairs = url.query_pairs_mut();
+            for (k, v) in &retained {
+                pairs.append_pair(k, v);
+            }
+            pairs.append_pair("tenant_id", &tenant_id.to_string());
+        } else {
+            url.query_pairs_mut()
+                .append_pair("tenant_id", &tenant_id.to_string());
+        }
         Ok(url)
     }
 
