@@ -70,15 +70,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     carries and preserves every other query parameter, as RFC 6749 §3.1/§3.2
     require of a client adding parameters of its own;
   - `oidc_par` **cleared the query outright** when building the redirect
-    target, discarding the tenant the server had just published. The
-    authorization endpoint reads `tenant_id` to route a browser with no
-    session — which is every browser arriving on a PAR redirect — so the
-    result was a `401`. It now carries that one parameter through. §26.2
-    rule 2 is unaffected: `tenant_id` is AXIAM's tenant routing parameter,
-    never part of the pushed body, so no query-string copy can contradict a
-    pushed one. Every other pre-existing query parameter is still dropped.
+    target, so the browser arrived at `/oauth2/authorize` with no tenant at
+    all. That endpoint reads `tenant_id` for a request carrying no
+    authenticated principal — which is every browser on a PAR redirect,
+    since logging in is what the redirect is for — and answers `401`
+    without it. The redirect now always carries the tenant the push was made
+    under.
 
-  A bare (non-tenant-scoped) document behaves exactly as before.
+    Sent unconditionally rather than copied from the advertised endpoint:
+    `oidc_discover` fetches `/.well-known/openid-configuration` with no
+    tenant of its own, so a multi-tenant deployment configuring no
+    `oauth2_default_tenant_id` serves a document with no tenant in it, and
+    copying only what the document published would have left exactly that
+    deployment at the same `401`.
+
+    §26.2 rule 2 is unaffected: `tenant_id` is AXIAM's tenant routing
+    parameter, never part of the pushed body, so no query-string copy can
+    contradict a pushed one. Every other pre-existing query parameter is
+    still dropped.
+
+  Both `/oauth2/*` back-channel calls and the PAR redirect are covered by
+  tests verified to fail without the fix.
 
 - **Generated `///` doc comments no longer reflow Markdown lists into invalid
   Markdown.** `tools/gen_management.py` collapsed each paragraph wholesale,

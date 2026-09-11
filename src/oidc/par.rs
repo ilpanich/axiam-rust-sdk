@@ -35,17 +35,21 @@ use crate::rest::auth::CsrfHeaderExt;
 pub struct PushedAuthorizationRequest {
     /// Where to redirect the user agent.
     ///
-    /// Carries **exactly** `client_id` and `request_uri`, plus the `tenant_id`
-    /// the discovery document's own `authorization_endpoint` already carried
-    /// (contract 1.42). Not `response_type`, not `redirect_uri`, not `scope`,
-    /// not `state` — the server refuses a request that mixes a `request_uri`
-    /// with inline authorization parameters rather than merging them, because
-    /// merging is where parameter confusion lives (§26.2 rule 2).
+    /// Carries **exactly** `client_id`, `request_uri` and the `tenant_id` this
+    /// push was made under. Not `response_type`, not `redirect_uri`, not
+    /// `scope`, not `state` — the server refuses a request that mixes a
+    /// `request_uri` with inline authorization parameters rather than merging
+    /// them, because merging is where parameter confusion lives (§26.2
+    /// rule 2).
     ///
     /// `tenant_id` is not one of those parameters: it is AXIAM's tenant
-    /// routing parameter, never part of the pushed body, and `/oauth2/authorize`
-    /// needs it to route a browser that has no session yet. See
-    /// [`AxiamClient::oidc_par`]'s implementation for the full argument.
+    /// routing parameter, never part of the pushed body, and
+    /// `/oauth2/authorize` reads it to route a browser that has no session yet
+    /// — which is every browser arriving here. It is sent unconditionally
+    /// rather than copied from the advertised endpoint, because a multi-tenant
+    /// deployment that configures no default tenant serves a discovery
+    /// document with no tenant in it at all. See [`AxiamClient::oidc_par`]'s
+    /// implementation for the full argument.
     pub url: String,
     /// The opaque, single-use handle.
     ///
@@ -249,49 +253,57 @@ impl AxiamClient {
         // whichever check reads the other one. Re-adding them "for
         // compatibility" restores the attack.
         //
-        // `tenant_id` is the one thing carried over from the advertised
-        // endpoint, and it is not an exception to that rule — it is outside
-        // it. Since contract 1.42 the discovery document publishes
-        // `authorization_endpoint` already carrying `?tenant_id=<uuid>`
-        // whenever it describes one tenant, because `/oauth2/authorize` reads
-        // that parameter to route a browser that has no session yet — which is
-        // every browser arriving on a PAR redirect. Wiping the query, as this
-        // code did, hands the user a URL the server answers `401` to.
+        // `tenant_id` is the one parameter that accompanies them, and it is
+        // not an exception to that rule — it is outside it. `/oauth2/authorize`
+        // reads `tenant_id` **only** for a request that carries no
+        // authenticated principal, which is every browser arriving on a PAR
+        // redirect: it has not logged in yet, that is what the redirect is
+        // for. Without it the server cannot look up the client whose
+        // `browser_sso` registration decides how to answer, and replies `401`
+        // instead of a sign-in page.
         //
-        // It cannot produce the confusion rule 2 exists to prevent: `tenant_id`
-        // is AXIAM's tenant routing parameter, not an OAuth2 authorization
-        // request parameter, it is never part of the pushed body (§12.1 note 2
-        // makes it a query parameter on the push itself), so there is no pushed
-        // copy for a query-string copy to contradict — and the value here is
-        // the authorization server's own, read from a document fetched over
-        // TLS, not the browser's.
+        // It is sent from the tenant this push was made under, NOT copied from
+        // the advertised endpoint. Contract 1.42 publishes
+        // `authorization_endpoint` already scoped as `…?tenant_id=<uuid>`, but
+        // only when the discovery document describes one tenant — and
+        // `oidc_discover` fetches `/.well-known/openid-configuration` with no
+        // tenant of its own, so a multi-tenant deployment that configures no
+        // `oauth2_default_tenant_id` serves a BARE document. Carrying over only
+        // what the document happened to publish fixes the scoped case and
+        // leaves that one at the same `401`. The tenant resolved above is
+        // authoritative for both: it is a `Uuid` (§12.3 rule 4 refused
+        // anything else, client-side, before any wire call) and it is the
+        // tenant whose `request_uri` this redirect is about to present.
         //
-        // Everything else the endpoint's query might carry is still dropped.
-        // Rule 2 caps what may accompany a `request_uri`, and "the server sent
-        // it to us" is not a reason to widen that cap past the one parameter
-        // the server demonstrably needs.
+        // This cannot produce the confusion rule 2 exists to prevent.
+        // `tenant_id` is AXIAM's tenant routing parameter, not an OAuth2
+        // authorization request parameter, and it is never part of the pushed
+        // body — §12.1 note 2 makes it a query parameter on the push itself —
+        // so there is no pushed copy for a query-string copy to contradict.
+        // Sending it to a non-AXIAM OP is harmless and already this SDK's
+        // posture: `oidc_endpoint_url` appends `tenant_id` unconditionally to
+        // every `/oauth2/*` endpoint the document advertises, and RFC 6749
+        // §3.1 requires an authorization server to ignore a parameter it does
+        // not recognise.
+        //
+        // Everything else the endpoint's query might carry is still dropped,
+        // including a `tenant_id` that disagrees: rule 2 caps what may
+        // accompany a `request_uri`, and the resolved tenant is the one this
+        // request was actually made under.
         let advertised = url::Url::parse(&configuration.authorization_endpoint).map_err(|e| {
             AxiamError::Network {
                 message: format!("invalid authorization_endpoint in discovery document: {e}"),
                 source: None,
             }
         })?;
-        let advertised_tenant: Option<String> = advertised
-            .query_pairs()
-            .find(|(k, _)| k == "tenant_id")
-            .map(|(_, v)| v.into_owned());
 
         let mut target = advertised;
         target.set_query(None);
-        {
-            let mut pairs = target.query_pairs_mut();
-            if let Some(tenant) = advertised_tenant.as_deref() {
-                pairs.append_pair("tenant_id", tenant);
-            }
-            pairs
-                .append_pair("client_id", &client_id)
-                .append_pair("request_uri", &wire.request_uri);
-        }
+        target
+            .query_pairs_mut()
+            .append_pair("tenant_id", &tenant_id.to_string())
+            .append_pair("client_id", &client_id)
+            .append_pair("request_uri", &wire.request_uri);
 
         Ok(PushedAuthorizationRequest {
             url: target.to_string(),
