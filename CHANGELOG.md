@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta13] - 2026-09-12
+
 ### Added
+
+- Read the two RFC 8414 discovery members contract 1.42 added
+
+- Prefer RFC 8705 §5 mtls_endpoint_aliases on mTLS calls
 
 - **SDK contract 1.42 — the two RFC 8414 discovery members the first OpenID
   Foundation conformance run found missing (CONTRACT.md §21.5).**
@@ -53,7 +59,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   §12.4 rule 3 still compares a token's `iss` against it by exact string —
   including for a token minted at an alias endpoint.
 
+### Changed
+
+- Record the contract 1.42 sync, its one break, and the stale op count
+
+- Pin the contract 1.42 behaviour, and adopt dpop_jkt at every call site
+
+- Re-vendor CONTRACT.md, openapi.json, management-registry.json at 1.42
+
+- Bump taiki-e/install-action from 2.87.0 to 2.87.5
+
+- Re-vendored `CONTRACT.md`, `openapi.json` and `management-registry.json` from
+  `ilpanich/axiam` at SDK contract **1.42** (upstream `cdedf33`). This repo was
+  vendored at 1.40, so the sync absorbs **two** revisions.
+
+  The registry grows from 155 to **158 operations across 24 namespaces** — the
+  `privacy` namespace gains `list_consents`, `grant_scope_consent` and
+  `withdraw_scope_consent` — and the generated §27 surface is regenerated
+  accordingly. `openapi.json` adds the `Address`, `AuthnRequestParamsMode`,
+  `ConsentView`, `GrantScopeConsent`, `OidcPolicy` and `UserInfoPostForm`
+  schemas, `client_secret_basic` to `ClientAuthMethod`, and optional members to
+  nine existing schemas. `proto/` is byte-identical upstream, so the gRPC and
+  AMQP surfaces are untouched.
+
+  Everything above is additive on the wire. The one source-level break is
+  listed below.
+
 ### Fixed
+
+- Always send the tenant on the PAR redirect, not only when advertised
+
+- Stop doubling and stop dropping a tenant the document already scoped
+
+- Wrap generated doc lists as lists, and regenerate at 158 ops
 
 - **The tenant is no longer doubled on, or stripped from, an endpoint URL the
   discovery document already scoped (contract 1.42).** Since the conformance
@@ -100,24 +138,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continuation line, failing a `-D warnings` build of code nobody had edited.
   List items are now wrapped individually with their continuations indented.
   No pre-existing doc comment changed.
-
-### Changed
-
-- Re-vendored `CONTRACT.md`, `openapi.json` and `management-registry.json` from
-  `ilpanich/axiam` at SDK contract **1.42** (upstream `cdedf33`). This repo was
-  vendored at 1.40, so the sync absorbs **two** revisions.
-
-  The registry grows from 155 to **158 operations across 24 namespaces** — the
-  `privacy` namespace gains `list_consents`, `grant_scope_consent` and
-  `withdraw_scope_consent` — and the generated §27 surface is regenerated
-  accordingly. `openapi.json` adds the `Address`, `AuthnRequestParamsMode`,
-  `ConsentView`, `GrantScopeConsent`, `OidcPolicy` and `UserInfoPostForm`
-  schemas, `client_secret_basic` to `ClientAuthMethod`, and optional members to
-  nine existing schemas. `proto/` is byte-identical upstream, so the gRPC and
-  AMQP surfaces are untouched.
-
-  Everything above is additive on the wire. The one source-level break is
-  listed below.
 
 ### Breaking
 
