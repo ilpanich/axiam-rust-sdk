@@ -189,7 +189,7 @@ impl AxiamClient {
                 configuration
                     .pushed_authorization_request_endpoint
                     .as_deref(),
-            )
+            )?
             .ok_or_else(|| {
                 AxiamError::auth(
                     "the authorization server's discovery document advertises no \

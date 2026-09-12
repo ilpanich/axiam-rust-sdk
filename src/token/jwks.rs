@@ -75,6 +75,18 @@ pub struct Claims {
     /// Unique token ID / session id.
     #[serde(default)]
     pub jti: Option<String>,
+    /// The AXIAM session this token descends from (AXIAM T-249).
+    ///
+    /// Present on tokens minted by the authorization-code and refresh grants;
+    /// absent on a client-credentials token, an RPT or a token exchange, which
+    /// have no session behind them.
+    ///
+    /// Read **only** by the §10.4 revocation feed, and deliberately with no
+    /// fallback to [`Self::jti`]: a token with no `sid` names no session, and
+    /// hashing its `jti` instead would match nothing while looking like it
+    /// worked.
+    #[serde(default)]
+    pub sid: Option<String>,
     /// Token audience — `"axiam:user"` or `"axiam:m2m"`.
     #[serde(default)]
     pub aud: Option<String>,
@@ -454,6 +466,13 @@ pub struct JwksVerifier {
     expected_issuer: Option<String>,
     /// §10.1 rule 6: expected `aud`. `None` means the check is not performed.
     expected_audience: Option<String>,
+    /// §10.4 (contract 1.44): the optional revocation feed.
+    ///
+    /// `None` — the default — means the guard behaves exactly as it did before
+    /// contract 1.44: a revoked session's access token verifies locally until
+    /// it expires, which is the §10.2 posture this narrows rather than
+    /// replaces.
+    revocation_feed: Option<crate::token::revocation::RevocationFeed>,
 }
 
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -473,6 +492,7 @@ impl JwksVerifier {
             expected_tenant_id: None,
             expected_issuer: None,
             expected_audience: None,
+            revocation_feed: None,
         })
     }
 
@@ -546,6 +566,7 @@ impl JwksVerifier {
             expected_tenant_id: None,
             expected_issuer: None,
             expected_audience: None,
+            revocation_feed: None,
         }
     }
 
@@ -676,7 +697,49 @@ impl JwksVerifier {
     pub async fn verify(&self, token: &str) -> Result<Claims, AxiamError> {
         let claims = self.verify_claims(token).await?;
         self.assert_tenant(&claims)?;
+        self.assert_not_revoked(&claims).await?;
         Ok(claims)
+    }
+
+    /// Attach a §10.4 revocation feed (contract 1.44).
+    ///
+    /// Off by default and opt-in per caller. With one attached, a token whose
+    /// `sid` the feed lists is rejected within one poll interval instead of
+    /// within one access-token lifetime.
+    ///
+    /// It never makes this verifier stricter in any other way. Every §10.1
+    /// rule runs first and still decides; the feed can only turn an accept
+    /// into a reject, and a feed that cannot be read turns nothing at all —
+    /// see [`crate::token::revocation`] for why that is a rule and not a
+    /// convenience.
+    #[must_use]
+    pub fn with_revocation_feed(mut self, feed: crate::token::revocation::RevocationFeed) -> Self {
+        self.revocation_feed = Some(feed);
+        self
+    }
+
+    /// §10.4 rules 4 and 6.
+    ///
+    /// A token with no `sid` is never matched against the feed: there is no
+    /// session behind it. Everything else is a lookup in a cached set — no
+    /// network work on this path, ever.
+    async fn assert_not_revoked(&self, claims: &Claims) -> Result<(), AxiamError> {
+        let Some(feed) = &self.revocation_feed else {
+            return Ok(());
+        };
+        let Some(sid) = claims.sid.as_deref() else {
+            return Ok(());
+        };
+        if feed.is_revoked(sid).await {
+            return Err(AxiamError::Auth {
+                message: "the session behind this access token has been revoked \
+                          (CONTRACT.md §10.4)"
+                    .into(),
+                oauth: None,
+                reason: None,
+            });
+        }
+        Ok(())
     }
 
     /// [`Self::verify`] plus CONTRACT.md §10.1 **rule 9** — the sender
@@ -1113,6 +1176,7 @@ mod tests {
             iat: None,
             exp: 9_999_999_999,
             jti: None,
+            sid: None,
             aud: None,
             scope: None,
             cnf: None,

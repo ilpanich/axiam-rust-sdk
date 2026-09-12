@@ -420,7 +420,7 @@ impl AxiamClient {
             &configuration,
             |a| a.token_endpoint.as_deref(),
             &configuration.token_endpoint,
-        );
+        )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
         let form = UmaTicketForm {

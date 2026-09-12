@@ -3283,6 +3283,44 @@ pub struct ServiceAccountResponse {
     pub updated_at: String,
 }
 
+/// One of a user's sessions, as an administrator sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionResponse {
+    /// RFC 8176 method references for that authentication.
+    pub amr: Vec<String>,
+    /// X7.2 — when the end user actually authenticated, which is not `created_at`
+    /// on a session produced by refresh rotation.
+    pub authenticated_at: String,
+    /// `created_at`.
+    pub created_at: String,
+    /// `expires_at`.
+    pub expires_at: String,
+    /// `id`.
+    pub id: Uuid,
+    /// `ip_address`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    /// T-254 — when a refresh token of this session was last presented after it
+    /// had already been rotated. `None` if that has never happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_replay_at: Option<String>,
+    /// T-254 — replays accepted under the FAPI 2.0 §5.3.2.1-9 grace window. Only
+    /// ever non-zero for a client registered `profile: fapi2`.
+    pub refresh_replay_grace_accepted: i32,
+    /// T-254 — replays refused because there was no window to accept them in.
+    /// Nothing a conformant client does.
+    pub refresh_replay_refused: i32,
+    /// T-254 — the badge: `none`, `fapi_grace_retry` or `refused`.
+    ///
+    /// Derived from the two counters below rather than stored, so it cannot
+    /// disagree with them. A refusal outranks an accepted grace retry however the
+    /// counts compare.
+    pub refresh_replay_verdict: String,
+    /// `user_agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
 /// Body for `PUT .../ca-certificates/{id}/mtls-trust-anchor`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetMtlsTrustAnchor {

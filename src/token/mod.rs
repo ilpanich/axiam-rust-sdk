@@ -11,6 +11,7 @@ pub mod dpop;
 pub mod jwks;
 pub mod manager;
 pub mod refresh_guard;
+pub mod revocation;
 
 pub use jwks::Claims;
 // §10.1 rule 9 (contract 1.15). Ungated alongside `Claims`, because
