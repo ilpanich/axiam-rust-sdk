@@ -249,8 +249,15 @@ async fn login_makes_exactly_one_attempt_against_the_same_503() {
         .mount(&mock_server)
         .await;
 
+    // Minted, not written down. A literal password in a test is
+    // indistinguishable, to a secret scanner, from a real one — CodeQL's
+    // "hard-coded cryptographic value" rule fires on exactly this line shape,
+    // and `contract_135_test.rs::fixture_password` is the convention this
+    // repository already had for it. The assertion below is about the request
+    // COUNT, so the value is irrelevant to what is under test.
+    let password = format!("Fixture-{}-aA1!", Uuid::new_v4());
     let _ = build_client(&mock_server.uri())
-        .login("someone@example.test", "password")
+        .login("someone@example.test", &password)
         .await
         .expect_err("a mutation is never retried, so the 503 reaches the caller");
 
