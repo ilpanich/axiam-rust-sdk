@@ -97,6 +97,26 @@ impl<'c> Certificates<'c> {
         Ok(models::GeneratedCertificate::from(wire))
     }
 
+    /// `POST /api/v1/certificates/sign-csr`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn sign_csr(
+        &self,
+        body: &models::SignCertificateCsrRequest,
+    ) -> Result<models::Certificate, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "certificates.sign_csr",
+            verb: Verb::Post,
+            path_template: "/api/v1/certificates/sign-csr",
+            path: "/api/v1/certificates/sign-csr".to_string(),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, models::Certificate>(call, Some(body))
+            .await
+    }
+
     /// `GET /api/v1/certificates/{id}`
     pub async fn get(&self, id: Uuid) -> Result<models::Certificate, AxiamError> {
         let query: Vec<(&'static str, String)> = Vec::new();

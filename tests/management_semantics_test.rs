@@ -609,6 +609,99 @@ async fn a_bound_certificate_carries_its_service_account_on_the_list_only() {
 }
 
 // ---------------------------------------------------------------------------
+// §27.5 (contract 1.45) — certificates.sign_csr answers `Certificate`, never
+// `GeneratedCertificate`
+// ---------------------------------------------------------------------------
+
+/// `certificates.sign_csr` has no key to return: the subscriber's own key
+/// never crosses the wire, so its response type MUST NOT be
+/// `GeneratedCertificate`, whose `private_key_pem` field is mandatory and
+/// would always be absent here (CONTRACT §27.5). This is a model-level
+/// assertion rather than a wire one: it constructs every field of
+/// `Certificate` — the type the generator actually wired `sign_csr` to — and
+/// proves the serialized form carries nothing that reads as a private key,
+/// so the property holds regardless of what any particular fixture happens
+/// to send.
+#[test]
+fn certificate_the_sign_csr_response_type_has_no_private_key_field() {
+    let cert = models::Certificate {
+        bound_service_account_id: None,
+        cert_type: models::CertificateType::User,
+        created_at: "2026-08-26T00:00:00Z".into(),
+        fingerprint: "ab:cd".into(),
+        id: Uuid::new_v4(),
+        issuer_ca_id: Uuid::new_v4(),
+        key_algorithm: models::KeyAlgorithm::Rsa4096,
+        metadata: json!({}),
+        not_after: "2027-08-26T00:00:00Z".into(),
+        not_before: "2026-08-26T00:00:00Z".into(),
+        public_cert_pem: "-----BEGIN CERTIFICATE-----".into(),
+        status: models::CertificateStatus::Active,
+        subject: "CN=device-1".into(),
+        tenant_id: Uuid::new_v4(),
+    };
+
+    let value = serde_json::to_value(&cert).expect("Certificate serializes");
+    let keys: Vec<&String> = value.as_object().expect("object").keys().collect();
+
+    assert!(
+        keys.iter().all(|k| !k.to_lowercase().contains("private")),
+        "Certificate — the type sign_csr returns — must carry no private-key \
+         field; found keys: {keys:?}"
+    );
+}
+
+/// Round trip `sign_csr` itself against a fixture that (maliciously or by a
+/// server bug) sends a `private_key_pem` alongside the rest: `Certificate`
+/// has nowhere to put it, so it cannot resurface on the decoded value. This
+/// is the wire-level companion to the model assertion above — that one shows
+/// the type has no such field; this one shows an extra field on the wire
+/// cannot smuggle one back in.
+#[tokio::test]
+async fn sign_csr_decodes_as_certificate_and_drops_a_private_key_the_server_sent_anyway() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let ca = example_id();
+
+    mount(
+        &server,
+        "POST",
+        "/api/v1/certificates/sign-csr",
+        201,
+        &format!(
+            r#"{{"cert_type": "User", "created_at": "2026-08-26T00:00:00Z",
+                 "fingerprint": "ab:cd", "id": "{}", "issuer_ca_id": "{ca}",
+                 "key_algorithm": "Rsa4096", "metadata": {{}},
+                 "not_after": "2027-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z",
+                 "public_cert_pem": "-----BEGIN CERTIFICATE-----", "status": "Active",
+                 "subject": "CN=device-1", "tenant_id": "{}",
+                 "private_key_pem": "should-never-survive-decoding"}}"#,
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ),
+    )
+    .await;
+
+    let cert = client
+        .certificates()
+        .sign_csr(&models::SignCertificateCsrRequest {
+            cert_type: models::CertificateType::User,
+            csr_pem: "-----BEGIN CERTIFICATE REQUEST-----".into(),
+            issuer_ca_id: ca,
+            metadata: None,
+            validity_days: 90,
+        })
+        .await
+        .expect("certificates.sign_csr");
+
+    let re_serialized = serde_json::to_string(&cert).expect("re-serializes");
+    assert!(
+        !re_serialized.contains("should-never-survive-decoding"),
+        "a private key the server sent must not survive decoding into Certificate"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // §27.4 rule 5 — sparse updates
 // ---------------------------------------------------------------------------
 

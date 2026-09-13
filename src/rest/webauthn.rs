@@ -2,8 +2,17 @@
 //!
 //! A passkey ceremony is **two exchanges stacked**: one with an
 //! *authenticator*, which needs a platform API, and one with *AXIAM*, which is
-//! four ordinary JSON round trips. The native Rust build has no authenticator,
-//! so this module is the second half.
+//! ordinary JSON round trips. The native Rust build has no authenticator, so
+//! this module is the second half.
+//!
+//! Eight wire operations as of contract 1.45: the original six, plus
+//! `webauthn_setup_register_start` / `webauthn_setup_register_finish` — the
+//! WebAuthn twin of [`AxiamClient::mfa_setup_enroll`] /
+//! [`AxiamClient::mfa_setup_confirm`] (CONTRACT.md §24.1, §25.2). Those two
+//! are the only pair in this module that take **no session at all**: a setup
+//! token from a forced first-login enrolment is the sole credential, and
+//! §24.1 forbids attaching this client's own session credential to them even
+//! when one happens to be configured.
 //!
 //! That is not a consolation prize. A Rust service completing a ceremony that
 //! ran on an Android or iOS handset is the relying party exactly as a browser
@@ -12,7 +21,7 @@
 //! memory is not a second factor.
 //!
 //! `axiam-sdk-wasm` is the one build of this SDK that *does* reach an
-//! authenticator, through `web-sys`; it drives these same six operations.
+//! authenticator, through `web-sys`; it drives the six session-based operations.
 //!
 //! The rule everything below obeys is §24.0: the server chooses every option
 //! and verifies every response, so this carries both through untouched. It does
@@ -27,6 +36,7 @@ use uuid::Uuid;
 use crate::AxiamError;
 use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
+use crate::rest::LoginResult;
 use crate::rest::auth::{CsrfHeaderExt, absorb_session_cookies, deser_err, map_error_response};
 
 const REGISTER_START_PATH: &str = "/api/v1/auth/webauthn/register/start";
@@ -35,6 +45,8 @@ const AUTH_START_PATH: &str = "/api/v1/auth/webauthn/authenticate/start";
 const AUTH_FINISH_PATH: &str = "/api/v1/auth/webauthn/authenticate/finish";
 const DISCOVERABLE_START_PATH: &str = "/api/v1/auth/webauthn/authenticate/discoverable/start";
 const DISCOVERABLE_FINISH_PATH: &str = "/api/v1/auth/webauthn/authenticate/discoverable/finish";
+const SETUP_REGISTER_START_PATH: &str = "/api/v1/auth/webauthn/setup/register/start";
+const SETUP_REGISTER_FINISH_PATH: &str = "/api/v1/auth/webauthn/setup/register/finish";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -151,6 +163,18 @@ struct LoginWire {
     expires_in: u64,
 }
 
+/// The `setup/register/finish` success body — `LoginSuccessResponse`, the
+/// same shape `mfa_setup_confirm` decodes (CONTRACT.md §25.1). Unlike
+/// [`LoginWire`] above, tokens are **not** in this body — they arrive only as
+/// the `axiam_access`/`axiam_refresh`/`axiam_csrf` cookie triple (§24.3),
+/// which is why this struct carries neither `access_token` nor
+/// `refresh_token`.
+#[derive(Deserialize)]
+struct SetupLoginSuccessWire {
+    session_id: Uuid,
+    expires_in: u64,
+}
+
 #[derive(Serialize)]
 struct RegisterFinishBody {
     state_token: String,
@@ -188,6 +212,38 @@ struct AuthStartBody {
     challenge_token: String,
 }
 
+#[derive(Serialize)]
+struct SetupRegisterStartBody {
+    setup_token: String,
+}
+
+impl std::fmt::Debug for SetupRegisterStartBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetupRegisterStartBody")
+            .field("setup_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct SetupRegisterFinishBody {
+    setup_token: String,
+    state_token: String,
+    credential_name: String,
+    response: Value,
+}
+
+impl std::fmt::Debug for SetupRegisterFinishBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetupRegisterFinishBody")
+            .field("setup_token", &"[REDACTED]")
+            .field("state_token", &"[REDACTED]")
+            .field("credential_name", &self.credential_name)
+            .field("response", &self.response)
+            .finish()
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 struct DiscoverableStartBody {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,7 +257,7 @@ struct DiscoverableStartBody {
 }
 
 // ---------------------------------------------------------------------------
-// The six operations
+// The eight operations
 // ---------------------------------------------------------------------------
 
 impl AxiamClient {
@@ -332,6 +388,102 @@ impl AxiamClient {
             .await
     }
 
+    /// `POST /api/v1/auth/webauthn/setup/register/start` (CONTRACT.md §24.1,
+    /// §25.1 — contract 1.45).
+    ///
+    /// The WebAuthn twin of [`AxiamClient::mfa_setup_enroll`]: reached when
+    /// [`AxiamClient::login`] answers `mfa_setup_required` and the caller
+    /// chooses a passkey or security key over TOTP as their first factor.
+    ///
+    /// **Takes no session at all.** The setup token is the only credential —
+    /// there is no session yet, because this is the account's *first* factor
+    /// — and this call MUST NOT and does not attach this client's own session
+    /// credential, even when one happens to be configured (§24.1). See
+    /// [`Self::webauthn_setup_register_finish`] for why that matters and how
+    /// it is enforced.
+    ///
+    /// `400` means the account already has a factor — the same answer
+    /// [`AxiamClient::mfa_setup_enroll`] gives for the same reason: a setup
+    /// token adds a first factor, never a second.
+    pub async fn webauthn_setup_register_start(
+        &self,
+        setup_token: &Sensitive<String>,
+    ) -> Result<WebauthnChallenge, AxiamError> {
+        self.ensure_open()?;
+        let body = SetupRegisterStartBody {
+            setup_token: setup_token.expose().clone(),
+        };
+        let response = self
+            .webauthn_post_no_session(SETUP_REGISTER_START_PATH, &body)
+            .await?;
+        match response.status().as_u16() {
+            200 => {
+                let wire: ChallengeWire = response.json().await.map_err(deser_err)?;
+                Ok(WebauthnChallenge {
+                    challenge: wire.challenge,
+                    state_token: Sensitive::new(wire.state_token),
+                })
+            }
+            status => Err(map_error_response(status, response).await),
+        }
+    }
+
+    /// `POST /api/v1/auth/webauthn/setup/register/finish` (CONTRACT.md §24.1,
+    /// §25.1, §25.2 rule 2 — contract 1.45).
+    ///
+    /// **Adopts credentials exactly as [`AxiamClient::mfa_setup_confirm`]
+    /// does** (§25.2 rule 2): both are completions of the same interrupted
+    /// login and both answer `LoginSuccessResponse`, so this mirrors that
+    /// function's tail rather than [`Self::webauthn_finish`]'s — the
+    /// response carries no `access_token`/`refresh_token` in the body (they
+    /// arrive only via the cookie triple, §24.3 rule 2), and there is no
+    /// `WebauthnLoginResult` to build. §24.3's five adoption rules apply
+    /// verbatim, including clearing the §17 decision memo: an SDK that
+    /// adopted on one completion and not the other would leave a caller
+    /// authenticated or not depending on which factor the user happened to
+    /// choose.
+    ///
+    /// Like [`Self::webauthn_setup_register_start`], this takes no session:
+    /// the setup token is the only credential, and neither call sends this
+    /// client's own session cookie or CSRF header even when a session is
+    /// configured — `webauthn_post_no_session` is what enforces that, by
+    /// skipping [`CsrfHeaderExt::maybe_csrf_header`] and by pre-empting
+    /// `reqwest`'s cookie jar with an explicit empty `Cookie` header (the jar
+    /// only auto-populates one when the request does not already carry it).
+    pub async fn webauthn_setup_register_finish(
+        &self,
+        setup_token: &Sensitive<String>,
+        state_token: &Sensitive<String>,
+        credential_name: &str,
+        response: Value,
+    ) -> Result<LoginResult, AxiamError> {
+        self.ensure_open()?;
+        // §17.1 rule 9 / §24.3 rule 4 / §25.2 rule 2: this completes a login,
+        // and the subject is about to change.
+        self.decision_memo().clear();
+
+        let body = SetupRegisterFinishBody {
+            setup_token: setup_token.expose().clone(),
+            state_token: state_token.expose().clone(),
+            credential_name: credential_name.to_string(),
+            response,
+        };
+        let http_response = self
+            .webauthn_post_no_session(SETUP_REGISTER_FINISH_PATH, &body)
+            .await?;
+
+        match http_response.status().as_u16() {
+            200 => {
+                let wire: SetupLoginSuccessWire = http_response.json().await.map_err(deser_err)?;
+                // Same triple, same call as `mfa_setup_confirm` and every
+                // other login completion (§24.3 rule 2).
+                absorb_session_cookies(self).await?;
+                Ok(LoginResult::success(wire.session_id, wire.expires_in))
+            }
+            status => Err(map_error_response(status, http_response).await),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------------
@@ -394,10 +546,10 @@ impl AxiamClient {
     /// POST a JSON body.
     ///
     /// Deliberately not routed through §16's retry helper, and that is true for
-    /// the whole section: five of the six operations are ceremony steps that
-    /// consume server-side state, and the sixth (`register/start`) carries the
-    /// `503` §24.4 rule 2 forbids retrying. There is nothing here a bounded
-    /// retry could help.
+    /// the whole section: most of these operations are ceremony steps that
+    /// consume server-side state, and `register/start` carries the `503`
+    /// §24.4 rule 2 forbids retrying. There is nothing here a bounded retry
+    /// could help.
     async fn webauthn_post<B: Serialize>(
         &self,
         path: &str,
@@ -406,6 +558,43 @@ impl AxiamClient {
         self.http()
             .post(self.url(path))
             .maybe_csrf_header(self)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| AxiamError::Network {
+                message: format!("webauthn request failed: {e}"),
+                source: Some(Box::new(e)),
+            })
+    }
+
+    /// POST a JSON body for the two `setup/register/*` operations, which take
+    /// **no session** (§24.1, contract 1.45) — deliberately not shared with
+    /// [`Self::webauthn_post`] above, because that function attaches this
+    /// client's stored CSRF token, and the whole point here is to attach
+    /// nothing this client has from a prior session:
+    ///
+    /// * No [`CsrfHeaderExt::maybe_csrf_header`] call — the setup token is the
+    ///   only credential; a CSRF token echoed alongside it would be a second,
+    ///   unasked-for one.
+    /// * An explicit, empty `Cookie` header. `reqwest`'s cookie jar only
+    ///   auto-populates the `Cookie` header when the outgoing request does
+    ///   not already carry one — setting it here (even to nothing) pre-empts
+    ///   that, so a session cookie held by this client's jar from an
+    ///   unrelated prior login never rides along. The **response's**
+    ///   `Set-Cookie` headers are unaffected by this and still populate the
+    ///   jar normally, which is what lets `webauthn_setup_register_finish`
+    ///   adopt the new session afterwards exactly as `mfa_setup_confirm` does.
+    ///
+    /// §24.8 requires a test asserting both, on the transport, with a session
+    /// configured.
+    async fn webauthn_post_no_session<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<reqwest::Response, AxiamError> {
+        self.http()
+            .post(self.url(path))
+            .header(reqwest::header::COOKIE, "")
             .json(body)
             .send()
             .await

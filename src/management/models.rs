@@ -3443,6 +3443,28 @@ pub struct SignAuditBatchRequest {
     pub entry_ids: Vec<Uuid>,
 }
 
+/// Body of `POST /api/v1/certificates/sign-csr`.
+///
+/// No `subject` and no `key_algorithm`: both are read out of the CSR, which
+/// is the only place they can be stated without the row and the certificate
+/// being able to disagree. No key is returned, so there is no key field
+/// anywhere on this exchange.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignCertificateCsrRequest {
+    /// `cert_type`.
+    pub cert_type: CertificateType,
+    /// PEM-encoded PKCS#10 request — a `BEGIN CERTIFICATE REQUEST` block. The
+    /// legacy OpenSSL `BEGIN NEW CERTIFICATE REQUEST` header is not accepted.
+    pub csr_pem: String,
+    /// `issuer_ca_id`.
+    pub issuer_ca_id: Uuid,
+    /// `metadata`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// Validity duration in days.
+    pub validity_days: i32,
+}
+
 /// Body of `POST .../tenants/{tenant_id}/signing-cas/sign-csr`.
 ///
 /// Deliberately carries no key algorithm: it is the CSR's, read out of the
