@@ -701,10 +701,17 @@ async fn secrets_never_render() {
         .expect("finish");
 
     let rendered = format!("{challenge:?}{challenge:#?}{login:?}{login:#?}");
-    for secret in [STATE_TOKEN, ACCESS_TOKEN_FIXTURE, REFRESH_TOKEN_FIXTURE] {
+    for (name, secret) in [
+        ("the state token", STATE_TOKEN),
+        ("the access token", ACCESS_TOKEN_FIXTURE),
+        ("the refresh token", REFRESH_TOKEN_FIXTURE),
+    ] {
+        // The failure message names the secret, it does not print it: a test
+        // asserting that secrets stay out of renderings must not put one in
+        // the test log on its way to reporting that they did not.
         assert!(
             !rendered.contains(secret),
-            "{secret} leaked into a Debug rendering"
+            "{name} leaked into a Debug rendering"
         );
     }
 }
@@ -1039,10 +1046,14 @@ async fn setup_token_and_state_token_never_render() {
         .expect("finish");
 
     let rendered = format!("{challenge:?}{challenge:#?}{login:?}{login:#?}");
-    for secret in [SETUP_TOKEN, STATE_TOKEN] {
+    for (name, secret) in [
+        ("the setup token", SETUP_TOKEN),
+        ("the state token", STATE_TOKEN),
+    ] {
+        // Named, not printed — see the §24.3 twin of this assertion above.
         assert!(
             !rendered.contains(secret),
-            "{secret} leaked into a Debug rendering"
+            "{name} leaked into a Debug rendering"
         );
     }
 }

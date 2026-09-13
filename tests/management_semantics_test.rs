@@ -969,7 +969,9 @@ async fn a_returned_secret_is_redacted_in_debug_output() {
     let rendered = format!("{token:?}");
     assert!(
         !rendered.contains(secret),
-        "§7: the secret leaked into Debug output: {rendered}"
+        // Not `{rendered}`: when this fires, the rendering is exactly the
+        // thing that contains the secret.
+        "§7: the provisioning token leaked into Debug output"
     );
 }
 
