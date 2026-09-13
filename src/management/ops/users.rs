@@ -237,4 +237,22 @@ impl<'c> Users<'c> {
             .management_send::<_, Vec<models::RoleAssignment>>(call, None::<&()>)
             .await
     }
+
+    /// `GET /api/v1/users/{user_id}/sessions`
+    pub async fn list_sessions(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<models::SessionResponse>, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "users.list_sessions",
+            verb: Verb::Get,
+            path_template: "/api/v1/users/{user_id}/sessions",
+            path: format!("/api/v1/users/{user_id}/sessions"),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Vec<models::SessionResponse>>(call, None::<&()>)
+            .await
+    }
 }

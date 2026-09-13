@@ -235,7 +235,7 @@ impl AxiamClient {
                 &configuration,
                 |a| a.device_authorization_endpoint.as_deref(),
                 configuration.device_authorization_endpoint.as_deref(),
-            )
+            )?
             .ok_or_else(|| {
             AxiamError::Auth {
                 message:
@@ -314,7 +314,7 @@ impl AxiamClient {
             &configuration,
             |a| a.token_endpoint.as_deref(),
             &configuration.token_endpoint,
-        );
+        )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
         let form = DeviceTokenForm {

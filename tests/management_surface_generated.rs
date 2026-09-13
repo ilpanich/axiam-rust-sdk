@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 158] = [
+const EXERCISED: [&str; 159] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -53,6 +53,7 @@ const EXERCISED: [&str; 158] = [
     "users.reset_mfa",
     "users.unlock",
     "users.list_roles",
+    "users.list_sessions",
     "groups.list",
     "groups.create",
     "groups.get",
@@ -433,6 +434,14 @@ async fn users_surface() {
         .list_roles(example_id())
         .await
         .expect("users.list_roles");
+
+    // users.list_sessions
+    mount(&server, "GET", &format!("/api/v1/users/{EXAMPLE_ID}/sessions"), 200, r#"[{"amr": [], "authenticated_at": "example", "created_at": "example", "expires_at": "example", "id": "11111111-1111-4111-8111-111111111111", "refresh_replay_grace_accepted": 1, "refresh_replay_refused": 1, "refresh_replay_verdict": "example"}]"#).await;
+    client
+        .users()
+        .list_sessions(example_id())
+        .await
+        .expect("users.list_sessions");
 }
 
 /// Reaches every operation in the `groups` namespace.

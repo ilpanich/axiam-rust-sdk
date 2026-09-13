@@ -167,3 +167,104 @@ async fn can_returns_the_allowed_bool_directly() {
         .expect("can() should succeed");
     assert!(!allowed);
 }
+
+// ── T-262 / CONTRACT §16.3 — a contended write answers 503 + Retry-After ────
+//
+// The server changed on 2026-09-12: a write that loses an optimistic-
+// concurrency race in the datastore, and stays lost after every retry the
+// server spends on it, now answers `503 write_contention` with
+// `Retry-After: 1` instead of `500 internal_error`.
+//
+// No SDK behaviour changes. §16.3 already retries `5xx` on an eligible
+// operation and §16.1 already honours `Retry-After` as a floor. These two
+// tests exist because a policy nobody asserts through the public surface is
+// exactly the failure §16.7 was written about — two SDKs had a tested retry
+// helper that no production path called, and both suites were green.
+
+/// The eligible half. `check_access` is side-effect-free, so the new answer is
+/// retried and the caller sees a success rather than an error.
+#[tokio::test]
+async fn check_access_retries_a_503_carrying_retry_after() {
+    let mock_server = MockServer::start().await;
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&call_count);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/authz/check"))
+        .respond_with(move |_req: &wiremock::Request| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Byte-for-byte what the server now sends for a contended
+                // write: the status, the slug and the header.
+                ResponseTemplate::new(503)
+                    .insert_header("Retry-After", "1")
+                    .set_body_json(json!({
+                        "error": "write_contention",
+                        "message": "the datastore is busy; retry this request",
+                    }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "allowed": true,
+                    "reason": "granted",
+                }))
+            }
+        })
+        .mount(&mock_server)
+        .await;
+
+    let decision = build_client(&mock_server.uri())
+        .check_access("users:get", Uuid::new_v4(), None)
+        .await
+        .expect("a 503 with Retry-After is transient and is retried");
+
+    assert!(decision.allowed);
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "one failure, one retry — asserted on the wire, not against the helper"
+    );
+}
+
+/// The non-idempotent half, and the one that catches a retry wired at the
+/// transport layer instead of the operation layer (§16.7). `login` changes
+/// state and consumes a credential, so the same `503` must produce **exactly
+/// one** request — a silent retry would replay a spent credential and turn a
+/// recoverable blip into a hard failure the caller cannot interpret.
+#[tokio::test]
+async fn login_makes_exactly_one_attempt_against_the_same_503() {
+    let mock_server = MockServer::start().await;
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&call_count);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(move |_req: &wiremock::Request| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(503)
+                .insert_header("Retry-After", "1")
+                .set_body_json(json!({
+                    "error": "write_contention",
+                    "message": "the datastore is busy; retry this request",
+                }))
+        })
+        .mount(&mock_server)
+        .await;
+
+    // Minted, not written down. A literal password in a test is
+    // indistinguishable, to a secret scanner, from a real one — CodeQL's
+    // "hard-coded cryptographic value" rule fires on exactly this line shape,
+    // and `contract_135_test.rs::fixture_password` is the convention this
+    // repository already had for it. The assertion below is about the request
+    // COUNT, so the value is irrelevant to what is under test.
+    let password = format!("Fixture-{}-aA1!", Uuid::new_v4());
+    let _ = build_client(&mock_server.uri())
+        .login("someone@example.test", &password)
+        .await
+        .expect_err("a mutation is never retried, so the 503 reaches the caller");
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "counted on the wire: a retry wired at the transport layer would show up \
+         here as 3 and nowhere else"
+    );
+}

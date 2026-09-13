@@ -566,3 +566,222 @@ async fn an_id_token_claiming_the_alias_host_as_issuer_is_rejected() {
         .expect_err("iss must equal the document's issuer, not the host that minted the token");
     assert!(matches!(err, AxiamError::Auth { .. }), "got {err}");
 }
+
+// ── §21.3.1 vector C — a malformed alias is REFUSED, never fallen back from ──
+//
+// Contract 1.43 publishes three vectors every SDK pins. A and B are covered
+// above (`discovery_document_with_aliases` is A; `an_absent_member_…` and
+// `an_mtls_client_with_no_aliases_…` are B). C is this section, and it is the
+// one where the obvious implementation is the wrong one.
+//
+// Falling back to the top-level endpoint looks like the safe answer and is the
+// dangerous one: the caller asked to authenticate with a certificate, the
+// operator published something that cannot carry one, and quietly presenting
+// the certificate to the front-channel host authenticates nothing while
+// appearing to work. The call must fail and say why.
+
+/// Vector C, first defect: a relative alias. It resolves against nothing a
+/// client holds — and the one base that might seem obvious, the issuer's own
+/// host, is precisely the host the alias exists to name a different one from.
+#[tokio::test]
+async fn a_relative_alias_is_refused_rather_than_fallen_back_from() {
+    let conventional = MockServer::start().await;
+    let mut doc = discovery_document(&conventional.uri());
+    doc.as_object_mut().unwrap().insert(
+        "mtls_endpoint_aliases".into(),
+        json!({ "token_endpoint": "/oauth2/token" }),
+    );
+    mount_discovery(&conventional, doc).await;
+    mount_oauth2_endpoints(&conventional).await;
+    let client = build_mtls_client(&conventional.uri(), true);
+
+    let err = client
+        .oidc_exchange(exchange_params())
+        .await
+        .expect_err("a relative alias must fail the call");
+    let message = err.to_string();
+    assert!(
+        message.contains("mtls_endpoint_aliases"),
+        "the error must name the member so an operator knows what to fix: {message}"
+    );
+
+    // And the proof that it refused rather than fell back: the conventional
+    // token endpoint was never called. A fallback would be a *successful*
+    // exchange here, which is exactly the outcome this vector exists to
+    // prevent.
+    let requests = conventional.received_requests().await.unwrap_or_default();
+    assert!(
+        !requests.iter().any(|r| r.url.path() == "/oauth2/token"),
+        "refusing means not calling the front-channel host with a certificate"
+    );
+}
+
+/// Vector C, second defect: a scheme **weaker than the endpoint the alias
+/// replaces**. An alias substitutes for exactly one top-level endpoint, so
+/// that is what it is compared against.
+///
+/// The test is deliberately not "the alias must be `https`", and not "weaker
+/// than the `issuer`" either. Both were tried and both failed correct tests:
+/// AXIAM's own `build_mtls_aliases` accepts `http` for local development, this
+/// file's harness is a wiremock server speaking plain HTTP, and the fixture
+/// pairs a realistic `https` issuer string with loopback endpoints — exactly
+/// as a deployment behind a TLS-terminating proxy may. Comparing like with
+/// like is the only rule true in all three.
+#[tokio::test]
+async fn an_alias_weaker_than_the_endpoint_it_replaces_is_refused() {
+    let conventional = MockServer::start().await;
+    let mut doc = discovery_document(&conventional.uri());
+    doc.as_object_mut().unwrap().insert(
+        "token_endpoint".into(),
+        json!("https://iam.example.test/oauth2/token"),
+    );
+    doc.as_object_mut().unwrap().insert(
+        "mtls_endpoint_aliases".into(),
+        json!({ "token_endpoint": "http://mtls.example.test/oauth2/token" }),
+    );
+    mount_discovery(&conventional, doc).await;
+    mount_oauth2_endpoints(&conventional).await;
+    let client = build_mtls_client(&conventional.uri(), true);
+
+    let message = client
+        .oidc_exchange(exchange_params())
+        .await
+        .expect_err("a downgrade alias must fail the call")
+        .to_string();
+    assert!(message.contains("downgrade"), "{message}");
+}
+
+/// The other side of the same rule, and the one that keeps the dev topologies
+/// working: an `http` alias for an `http` endpoint is not a downgrade. A
+/// deployment that is plaintext throughout is a development deployment rather
+/// than a misconfiguration, and the whole of this file's harness is one.
+#[tokio::test]
+async fn an_alias_matching_a_plaintext_endpoint_is_accepted() {
+    let conventional = MockServer::start().await;
+    let mtls = MockServer::start().await;
+    mount_discovery(
+        &conventional,
+        discovery_document_with_aliases(&conventional.uri(), &mtls.uri()),
+    )
+    .await;
+    mount_oauth2_endpoints(&conventional).await;
+    mount_oauth2_endpoints(&mtls).await;
+    let client = build_mtls_client(&conventional.uri(), true);
+
+    client
+        .oidc_exchange(exchange_params())
+        .await
+        .expect("an http alias under an http issuer is not a downgrade");
+    assert_eq!(
+        receiving_origin(&conventional, &mtls, "/oauth2/token").await,
+        mtls.uri()
+    );
+}
+
+/// The non-regression that makes vector C safe to enforce: a client with **no
+/// certificate configured** does not read the member at all — not even to
+/// validate it. A deployment whose aliases are malformed must not break the
+/// clients that never use them, and this is the assertion that proves the
+/// validation sits at the point of use rather than at decode.
+#[tokio::test]
+async fn a_malformed_alias_does_not_break_a_client_with_no_certificate() {
+    let conventional = MockServer::start().await;
+    let mut doc = discovery_document(&conventional.uri());
+    doc.as_object_mut().unwrap().insert(
+        "mtls_endpoint_aliases".into(),
+        json!({ "token_endpoint": "/oauth2/token" }),
+    );
+    mount_discovery(&conventional, doc).await;
+    mount_oauth2_endpoints(&conventional).await;
+    let client = build_client(&conventional.uri(), true);
+
+    client
+        .oidc_exchange(exchange_params())
+        .await
+        .expect("a client with no certificate never reads the aliases");
+
+    let requests = conventional
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert!(
+        requests.iter().any(|r| r.url.path() == "/oauth2/token"),
+        "the call went to the top-level endpoint, as it does when the document \
+         publishes no aliases at all"
+    );
+}
+
+// ── §21.3 rule 2 clause 4 — the query component ────────────────────────────
+//
+// AXIAM's aliases carry the tenant as a query component. Clause 4 forbids two
+// things and permits a third that is easy to mistake for one of them:
+//
+//   * appending — `?tenant_id=A&tenant_id=B`, which the server cannot resolve
+//     to one tenant;
+//   * stripping — rebuilding the URL from host and path, dropping whatever
+//     else the deployment put there;
+//   * displacing the `tenant_id` value with the caller's own is CORRECT, and
+//     is what a multi-tenant deployment requires, since its document names no
+//     tenant at all.
+
+/// The alias's other query parameters survive, and its `tenant_id` is
+/// displaced rather than duplicated.
+#[tokio::test]
+async fn an_alias_query_component_is_displaced_and_never_duplicated() {
+    let conventional = MockServer::start().await;
+    let mtls = MockServer::start().await;
+
+    let published_tenant = "00000000-0000-4000-8000-00000000dead";
+    let mut doc = discovery_document(&conventional.uri());
+    doc.as_object_mut().unwrap().insert(
+        "mtls_endpoint_aliases".into(),
+        json!({
+            "token_endpoint": format!(
+                "{}/oauth2/token?tenant_id={published_tenant}&deployment=eu-west",
+                mtls.uri()
+            ),
+        }),
+    );
+    mount_discovery(&conventional, doc).await;
+    mount_oauth2_endpoints(&conventional).await;
+    mount_oauth2_endpoints(&mtls).await;
+    let client = build_mtls_client(&conventional.uri(), true);
+
+    client
+        .oidc_exchange(exchange_params())
+        .await
+        .expect("exchange succeeds against the alias");
+
+    let requests = mtls.received_requests().await.expect("requests recorded");
+    let call = requests
+        .iter()
+        .find(|r| r.url.path() == "/oauth2/token")
+        .expect("the alias host received the call");
+
+    let tenants: Vec<String> = call
+        .url
+        .query_pairs()
+        .filter(|(k, _)| k == "tenant_id")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    assert_eq!(
+        tenants.len(),
+        1,
+        "exactly one tenant_id — appending a second gives the server a value \
+         it cannot resolve to one tenant: {}",
+        call.url
+    );
+    assert_ne!(
+        tenants[0], published_tenant,
+        "the caller's own tenant displaces the published one"
+    );
+
+    // And nothing else the deployment put in the query was dropped.
+    assert!(
+        call.url
+            .query_pairs()
+            .any(|(k, v)| k == "deployment" && v == "eu-west"),
+        "every other parameter must survive as the server wrote it: {}",
+        call.url
+    );
+}

@@ -353,6 +353,56 @@ pub(crate) fn network_err(context: &str, e: reqwest::Error) -> AxiamError {
     }
 }
 
+/// Refuse an `mtls_endpoint_aliases` entry that cannot carry a client
+/// certificate (CONTRACT.md §21.3.1 vector C).
+///
+/// Two defects, and each is a refusal on its own:
+///
+/// * **Not absolute.** A relative alias resolves against nothing a client
+///   holds. There is no sensible base — the issuer's host is precisely the host
+///   the alias exists to name a different one from.
+/// * **A scheme weaker than the endpoint it replaces.** An alias substitutes
+///   for exactly one top-level endpoint, so that is what it is compared
+///   against: an `http` alias for an `https` `token_endpoint` is a downgrade,
+///   and mutual TLS over cleartext is a contradiction rather than a weaker
+///   option.
+///
+/// Comparing like with like is the only test that is true in every topology,
+/// and the two obvious alternatives both fail. "The alias must be `https`"
+/// refuses the dev and test stacks AXIAM ships — `build_mtls_aliases` accepts
+/// `http` for local development, and this crate's own suite runs against a
+/// mock server that speaks plain HTTP. "Weaker than the `issuer`" refuses them
+/// too, because a fixture pairs a realistic issuer string with loopback
+/// endpoints, exactly as a deployment behind a TLS-terminating proxy may.
+///
+/// Called only from [`AxiamClient::mtls_alias`], and therefore only when this
+/// call actually presents a certificate: a client configured without one must
+/// not be broken by a member it never reads.
+fn validate_mtls_alias(alias: &str, replaces: &str) -> Result<(), AxiamError> {
+    let url = url::Url::parse(alias).map_err(|e| AxiamError::Network {
+        message: format!(
+            "mtls_endpoint_aliases publishes {alias:?}, which is not an absolute URL ({e}). \
+             Refusing rather than falling back to the top-level endpoint: this call presents a \
+             client certificate, and sending it to the front-channel host would authenticate \
+             nothing while appearing to work."
+        ),
+        source: None,
+    })?;
+    let replaced_is_tls = url::Url::parse(replaces).is_ok_and(|e| e.scheme() == "https");
+    if replaced_is_tls && url.scheme() != "https" {
+        return Err(AxiamError::Network {
+            message: format!(
+                "mtls_endpoint_aliases publishes {alias:?}, whose scheme is {:?}, in place of \
+                 an https endpoint. That is a downgrade, and mutual TLS over cleartext is a \
+                 contradiction; refusing rather than falling back to the top-level endpoint.",
+                url.scheme()
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 impl AxiamClient {
     /// The configured §12 `client_id`, or a client-side [`AxiamError::Auth`]
     /// (no wire call) when none was configured.
@@ -435,24 +485,42 @@ impl AxiamClient {
         configuration: &'a OidcConfiguration,
         select: impl Fn(&'a MtlsEndpointAliases) -> Option<&'a str>,
         top_level: &'a str,
-    ) -> &'a str {
-        self.mtls_alias(configuration, select).unwrap_or(top_level)
+    ) -> Result<&'a str, AxiamError> {
+        Ok(self
+            .mtls_alias(configuration, select, Some(top_level))?
+            .unwrap_or(top_level))
     }
 
     /// The alias itself, or `None` when this call is not going over mTLS, the
     /// document publishes no aliases, or it publishes none for this endpoint.
+    ///
+    /// An alias that is present and **unusable** is an error, never a fallback
+    /// (CONTRACT.md §21.3.1 vector C, contract 1.43). Falling back is the
+    /// dangerous answer and not the safe one: the caller asked to authenticate
+    /// with a certificate, the operator published something that cannot carry
+    /// one, and quietly presenting the certificate to the front-channel host
+    /// authenticates nothing while appearing to work.
     fn mtls_alias<'a>(
         &self,
         configuration: &'a OidcConfiguration,
         select: impl Fn(&'a MtlsEndpointAliases) -> Option<&'a str>,
-    ) -> Option<&'a str> {
+        replaces: Option<&str>,
+    ) -> Result<Option<&'a str>, AxiamError> {
         if !self.presents_client_certificate() {
-            return None;
+            // A client with no certificate does not read the member at all —
+            // not even to validate it. A deployment whose aliases are
+            // malformed must not break the clients that never use them.
+            return Ok(None);
         }
-        configuration
+        let Some(alias) = configuration
             .mtls_endpoint_aliases
             .as_ref()
             .and_then(select)
+        else {
+            return Ok(None);
+        };
+        validate_mtls_alias(alias, replaces.unwrap_or(""))?;
+        Ok(Some(alias))
     }
 
     /// The same preference for a conditionally-advertised endpoint. `None`
@@ -463,8 +531,10 @@ impl AxiamClient {
         configuration: &'a OidcConfiguration,
         select: impl Fn(&'a MtlsEndpointAliases) -> Option<&'a str>,
         top_level: Option<&'a str>,
-    ) -> Option<&'a str> {
-        self.mtls_alias(configuration, select).or(top_level)
+    ) -> Result<Option<&'a str>, AxiamError> {
+        Ok(self
+            .mtls_alias(configuration, select, top_level)?
+            .or(top_level))
     }
 
     /// Build the token/introspection/revocation endpoint URL with the
@@ -536,7 +606,7 @@ impl AxiamClient {
             configuration,
             |a| a.token_endpoint.as_deref(),
             &configuration.token_endpoint,
-        );
+        )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let response = self
             .http()
@@ -781,7 +851,7 @@ impl AxiamClient {
             &configuration,
             |a| a.introspection_endpoint.as_deref(),
             &configuration.introspection_endpoint,
-        );
+        )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let form = IntrospectOrRevokeForm {
             token: params.token.expose().as_str(),
@@ -844,7 +914,7 @@ impl AxiamClient {
             &configuration,
             |a| a.revocation_endpoint.as_deref(),
             &configuration.revocation_endpoint,
-        );
+        )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let form = IntrospectOrRevokeForm {
             token: params.token.expose().as_str(),
