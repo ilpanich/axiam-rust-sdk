@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 159] = [
+const EXERCISED: [&str; 160] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -111,6 +111,7 @@ const EXERCISED: [&str; 159] = [
     "service_accounts.list_groups",
     "certificates.list",
     "certificates.generate",
+    "certificates.sign_csr",
     "certificates.get",
     "certificates.revoke",
     "ca_certificates.list",
@@ -1198,6 +1199,20 @@ async fn certificates_surface() {
         })
         .await
         .expect("certificates.generate");
+
+    // certificates.sign_csr
+    mount(&server, "POST", "/api/v1/certificates/sign-csr", 201, r#"{"cert_type": "User", "created_at": "2026-08-26T00:00:00Z", "fingerprint": "example", "id": "11111111-1111-4111-8111-111111111111", "issuer_ca_id": "11111111-1111-4111-8111-111111111111", "key_algorithm": "Rsa4096", "metadata": {}, "not_after": "2026-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z", "public_cert_pem": "example", "status": "Active", "subject": "example", "tenant_id": "11111111-1111-4111-8111-111111111111"}"#).await;
+    client
+        .certificates()
+        .sign_csr(&models::SignCertificateCsrRequest {
+            cert_type: models::CertificateType::User,
+            csr_pem: "example".to_string(),
+            issuer_ca_id: example_id(),
+            metadata: None,
+            validity_days: 1,
+        })
+        .await
+        .expect("certificates.sign_csr");
 
     // certificates.get
     mount(&server, "GET", &format!("/api/v1/certificates/{EXAMPLE_ID}"), 200, r#"{"cert_type": "User", "created_at": "2026-08-26T00:00:00Z", "fingerprint": "example", "id": "11111111-1111-4111-8111-111111111111", "issuer_ca_id": "11111111-1111-4111-8111-111111111111", "key_algorithm": "Rsa4096", "metadata": {}, "not_after": "2026-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z", "public_cert_pem": "example", "status": "Active", "subject": "example", "tenant_id": "11111111-1111-4111-8111-111111111111"}"#).await;

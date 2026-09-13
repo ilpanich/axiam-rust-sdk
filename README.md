@@ -65,7 +65,7 @@ including the four public "Sign in with X" entry points, on the same host object
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§27 is implemented **in full**, both halves: the 158-operation imperative surface *and*
+§27 is implemented **in full**, both halves: the 160-operation imperative surface *and*
 the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
 that ships only one half to say which; this one ships both.
 
@@ -1109,6 +1109,36 @@ struct with flags rather than a discriminated enum — so nothing that reads
 `AxiamError::Authz`: the branch is matched on the body's discriminant, not the
 `403` alone.
 
+#### A passkey or security key instead of TOTP (contract 1.45)
+
+`webauthn_setup_register_start` / `webauthn_setup_register_finish` are the
+WebAuthn twin of `mfa_setup_enroll` / `mfa_setup_confirm` — a tenant that
+requires MFA no longer limits a new user's first factor to TOTP:
+
+```rust
+let result = client.login(email, password).await?;
+if result.mfa_setup_required {
+    let setup_token = result.setup_token.as_ref().expect("populated by §25.2 rule 1");
+    let challenge = client.webauthn_setup_register_start(setup_token).await?;
+    let response_json = your_device_channel(&challenge.request_json())?;
+    client
+        .webauthn_setup_register_finish(
+            setup_token,
+            &challenge.state_token,
+            "My laptop",
+            webauthn_response_from_json(&response_json)?,
+        )
+        .await?; // completes the login
+}
+```
+
+Both take **no session at all** — the setup token is the only credential,
+exactly as it is for the TOTP pair, and neither call attaches this client's own
+session credential even when one happens to be configured (CONTRACT.md §24.1).
+`webauthn_setup_register_finish` adopts credentials exactly as
+`mfa_setup_confirm` does (§25.2 rule 2): the client is authenticated
+afterwards, the same way, whichever factor the user chose.
+
 ### Organization-level principals (§5.2)
 
 A completed login also reports whether the account is an **organization-level** principal
@@ -1364,7 +1394,7 @@ why the ~870 lines of group arithmetic the SRP implementation needed are gone.
 Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
 about a resource, `verify_webhook` checks a delivery signature — and none of them can
 create the user, declare the resource or register the webhook. `client.management` is the
-part that can: **158 operations across 24 namespaces**, generated from
+part that can: **160 operations across 24 namespaces**, generated from
 `management-registry.json`, which is the whole server API minus what other contract
 sections own and minus organization creation and deletion (§27.0 keeps those out of reach
 of a client library on purpose).
@@ -1472,7 +1502,7 @@ the whole `list` — taking down every record on the page over one field of one 
 
 ### Declarative manifests (§27.6, §27.7)
 
-Calling 158 operations one at a time is rarely what an application wants. What it does at
+Calling 160 operations one at a time is rarely what an application wants. What it does at
 start-up, in a migration, or in a test fixture is assert a shape:
 
 ```rust

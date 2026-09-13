@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`certificates.sign_csr` — an end-entity certificate for a key AXIAM never
+  sees (CONTRACT.md §27.1, §27.5, contract 1.45).**
+  `client.management().certificates().sign_csr(...)`, generated from
+  `management-registry.json` like every other operation (§27.8):
+  `POST /api/v1/certificates/sign-csr`. The management surface moves
+  **159 → 160 operations across the same 24 namespaces**.
+
+  The request, `SignCertificateCsrRequest`, is entirely generator-output —
+  the generator already emits a model for it, so nothing needed hand-writing.
+  It carries no `subject` and no `key_algorithm`: both are read out of the CSR
+  by the server, which is the only place they can be stated without the row
+  and the certificate being able to disagree.
+
+  The response is the **existing** `Certificate`, not `GeneratedCertificate` —
+  CONTRACT.md §27.5 states this explicitly, because `GeneratedCertificate`'s
+  `private_key_pem` field is mandatory and would always be absent here: the
+  subscriber's own key never crosses the wire in either direction. A model
+  round-trip test constructs every field of `Certificate` and asserts the
+  serialized form carries nothing that reads as a private key; a companion
+  test round-trips `sign_csr` itself against a fixture that sends a
+  `private_key_pem` anyway and confirms it cannot resurface on the decoded
+  value — `Certificate` has nowhere to put it.
+
+- **`webauthn_setup_register_start` / `webauthn_setup_register_finish` — a
+  passkey or security key as the first factor at forced setup (CONTRACT.md
+  §24.1, §24.3, §24.5, §24.7, §24.8, §25.1, §25.2, contract 1.45).** The
+  WebAuthn twin of `mfa_setup_enroll` / `mfa_setup_confirm`: a user of a
+  tenant that requires MFA, reached via `login()` answering
+  `mfa_setup_required` with no factor of their own yet, is no longer limited
+  to TOTP for their first factor.
+
+  Both take **no session at all** — the setup token from the interrupted
+  login's `403` is the sole credential and travels in the request body.
+  Neither call attaches this client's own session credential, even when one
+  happens to be configured: a dedicated `webauthn_post_no_session` helper
+  skips the `X-CSRF-Token` forwarding every other `webauthn_*` call does, and
+  pre-empts `reqwest`'s cookie jar with an explicit empty `Cookie` header
+  (the jar only auto-populates one when the outgoing request does not already
+  carry one). §24.8 requires a test asserting this on the transport; one is
+  included, alongside the happy path and the `400` an account that already
+  has a factor gets back.
+
+  `webauthn_setup_register_finish` adopts credentials **exactly as
+  `mfa_setup_confirm` does** (§25.2 rule 2): both are completions of the same
+  interrupted login and both answer `LoginSuccessResponse`, so this mirrors
+  that function's tail — clearing the §17 decision memo, absorbing the
+  `axiam_access`/`axiam_refresh`/`axiam_csrf` cookie triple, and leaving the
+  client authenticated — rather than the authenticate/discoverable pair's,
+  which carries tokens in the body instead. A test asserts the adoption (the
+  client's own resolved state, the captured CSRF token, and a state-changing
+  call made immediately afterwards carrying it) and a second asserts the
+  decision memo is cleared, mirroring `logout_clears_the_memo`.
+
+### Changed
+
+- Re-vendored `CONTRACT.md` (1.45), `openapi.json`, `management-registry.json`
+  and `proto/` from `axiam` at `3d5b279`, and regenerated the §27 management
+  surface (`tools/gen_management.py`) for `certificates.sign_csr`.
+
 ## [1.0.0-beta14] - 2026-09-13
 
 ### Added

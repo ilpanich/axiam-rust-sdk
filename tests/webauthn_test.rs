@@ -29,12 +29,15 @@ const STATE_TOKEN: &str = "state-token-fixture-value-do-not-log";
 const CHALLENGE_TOKEN: &str = "challenge-token-fixture-do-not-log";
 const ACCESS_TOKEN_FIXTURE: &str = "access-token-fixture-do-not-log";
 const REFRESH_TOKEN_FIXTURE: &str = "refresh-token-fixture-do-not-log";
+const SETUP_TOKEN: &str = "setup-token-fixture-do-not-log";
 
 const REGISTER_START: &str = "/api/v1/auth/webauthn/register/start";
 const REGISTER_FINISH: &str = "/api/v1/auth/webauthn/register/finish";
 const AUTH_START: &str = "/api/v1/auth/webauthn/authenticate/start";
 const AUTH_FINISH: &str = "/api/v1/auth/webauthn/authenticate/finish";
 const DISCOVERABLE_START: &str = "/api/v1/auth/webauthn/authenticate/discoverable/start";
+const SETUP_REGISTER_START: &str = "/api/v1/auth/webauthn/setup/register/start";
+const SETUP_REGISTER_FINISH: &str = "/api/v1/auth/webauthn/setup/register/finish";
 const DISCOVERABLE_FINISH: &str = "/api/v1/auth/webauthn/authenticate/discoverable/finish";
 
 const TEST_ED25519_SEED: [u8; 32] = [
@@ -698,10 +701,359 @@ async fn secrets_never_render() {
         .expect("finish");
 
     let rendered = format!("{challenge:?}{challenge:#?}{login:?}{login:#?}");
-    for secret in [STATE_TOKEN, ACCESS_TOKEN_FIXTURE, REFRESH_TOKEN_FIXTURE] {
+    for (name, secret) in [
+        ("the state token", STATE_TOKEN),
+        ("the access token", ACCESS_TOKEN_FIXTURE),
+        ("the refresh token", REFRESH_TOKEN_FIXTURE),
+    ] {
+        // The failure message names the secret, it does not print it: a test
+        // asserting that secrets stay out of renderings must not put one in
+        // the test log on its way to reporting that they did not.
         assert!(
             !rendered.contains(secret),
-            "{secret} leaked into a Debug rendering"
+            "{name} leaked into a Debug rendering"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §24.1, §24.3, §24.8, §25.2 rule 2 (contract 1.45) — `setup/register/*`
+// ---------------------------------------------------------------------------
+
+/// A `200` carrying the `LoginSuccessResponse` shape `setup/register/finish`
+/// answers — `user`/`session_id`/`expires_in` in the body and the cookie
+/// triple, exactly as `mfa_setup_confirm` answers. Unlike [`login_response`],
+/// there is no `access_token`/`refresh_token` in the body at all (§24.3
+/// rule 2): the tokens arrive only via `Set-Cookie`.
+fn setup_login_response(tenant_id: Uuid, org_id: Uuid, csrf: &str) -> ResponseTemplate {
+    let access = access_token(tenant_id, org_id);
+    ResponseTemplate::new(200)
+        .set_body_json(json!({
+            "user": { "id": Uuid::new_v4(), "username": "alice", "email": "a@example.com" },
+            "session_id": Uuid::new_v4(),
+            "expires_in": 900,
+        }))
+        .append_header(
+            "Set-Cookie",
+            format!("axiam_access={access}; Path=/; HttpOnly").as_str(),
+        )
+        .append_header(
+            "Set-Cookie",
+            "axiam_refresh=refresh-cookie; Path=/; HttpOnly",
+        )
+        .append_header("Set-Cookie", format!("axiam_csrf={csrf}; Path=/").as_str())
+}
+
+#[tokio::test]
+async fn setup_register_start_returns_the_challenge() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_START))
+        .respond_with(challenge_body(creation_challenge()))
+        .mount(&server)
+        .await;
+
+    // Deliberately built with NO prior login: the whole point of the setup
+    // pair is that it works with no session at all.
+    let client = build_client(&server.uri());
+    let challenge = client
+        .webauthn_setup_register_start(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect("start");
+
+    assert_eq!(challenge.state_token.expose(), STATE_TOKEN);
+    assert_eq!(challenge.challenge, creation_challenge());
+}
+
+/// §25.1 rule 2 / §24.1: the same `400` `mfa_setup_enroll` gives for an
+/// account that already has a factor — a setup token adds a first factor,
+/// never a second.
+#[tokio::test]
+async fn setup_register_start_refuses_an_account_that_already_has_a_factor() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_START))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"message": "this account already has an MFA factor"})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri());
+    let err = client
+        .webauthn_setup_register_start(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect_err("400");
+    // §2's status table has no dedicated variant for `400`; it falls to the
+    // `Network` catch-all exactly as `mfa_setup_enroll`'s own `400` does.
+    match err {
+        AxiamError::Network { ref message, .. } => {
+            assert!(
+                message.contains("already has an MFA factor"),
+                "the refusal's message was lost: {message}"
+            );
+        }
+        other => panic!("expected Network (the §2 mapping of 400), got {other:?}"),
+    }
+}
+
+/// §25.2 rule 2 / §24.8: `setup/register/finish` adopts credentials **exactly
+/// as `mfa_setup_confirm` does** — the client is authenticated afterwards
+/// (asserted on its own state, not merely that a `LoginResult` came back),
+/// the captured CSRF token is the one the response set, and a state-changing
+/// call made immediately afterwards (`refresh()`) carries it. The two
+/// completions of a forced first-login enrolment must leave the client in the
+/// same state, or a caller's next request succeeds or fails depending on
+/// which factor the user happened to choose.
+#[tokio::test]
+async fn setup_register_finish_adopts_credentials_exactly_as_mfa_setup_confirm_does() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_FINISH))
+        .respond_with(setup_login_response(tenant_id, org_id, "setup-csrf-tok"))
+        .mount(&server)
+        .await;
+
+    // The follow-on §1 refresh, capturing the CSRF header it carries.
+    let refresh_csrf: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let csrf_for = Arc::clone(&refresh_csrf);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(move |req: &Request| {
+            if let Some(value) = req.headers.get("X-CSRF-Token") {
+                csrf_for
+                    .lock()
+                    .unwrap()
+                    .push(value.to_str().unwrap_or_default().to_string());
+            }
+            ResponseTemplate::new(200).set_body_json(json!({ "expires_in": 900 }))
+        })
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri());
+    let result = client
+        .webauthn_setup_register_finish(
+            &Sensitive::new(SETUP_TOKEN.into()),
+            &Sensitive::new(STATE_TOKEN.into()),
+            "Alice's laptop",
+            registration_response(),
+        )
+        .await
+        .expect("finish");
+
+    // The client's own state, as §24.3 rule 1 requires — not merely that a
+    // `LoginResult` came back.
+    assert_eq!(client.resolved_tenant_id().await, Some(tenant_id));
+    assert!(result.session_id.is_some());
+    assert_eq!(result.expires_in, Some(900));
+    assert!(!result.mfa_required);
+    assert!(!result.mfa_setup_required);
+
+    // A cookie-jar SDK additionally captures the CSRF token and a
+    // state-changing call afterwards carries it (§24.3 rule 2).
+    client
+        .refresh()
+        .await
+        .expect("refresh uses the adopted session");
+    assert_eq!(
+        refresh_csrf.lock().unwrap().as_slice(),
+        ["setup-csrf-tok"],
+        "the CSRF token captured at setup/register/finish must be forwarded"
+    );
+}
+
+/// §24.8: with a session already configured *and* a setup token supplied,
+/// neither `setup/register/start` nor `setup/register/finish` may send this
+/// client's own session credential — the setup token is the only one either
+/// call carries. Asserted on the transport: the captured request headers on
+/// both calls carry no `Authorization` header and no session cookie.
+#[tokio::test]
+async fn setup_register_carries_no_session_credential_even_with_a_session_configured() {
+    let server = MockServer::start().await;
+    // A client with an established session — the thing that must NOT ride
+    // along on the setup calls below.
+    let client = signed_in_client(&server).await;
+
+    let start_requests: Arc<std::sync::Mutex<Vec<Request>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let start_sink = Arc::clone(&start_requests);
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_START))
+        .respond_with(move |req: &Request| {
+            start_sink.lock().unwrap().push(req.clone());
+            challenge_body(creation_challenge())
+        })
+        .mount(&server)
+        .await;
+
+    let finish_requests: Arc<std::sync::Mutex<Vec<Request>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let finish_sink = Arc::clone(&finish_requests);
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_FINISH))
+        .respond_with(move |req: &Request| {
+            finish_sink.lock().unwrap().push(req.clone());
+            setup_login_response(Uuid::new_v4(), Uuid::new_v4(), "unrelated-csrf")
+        })
+        .mount(&server)
+        .await;
+
+    client
+        .webauthn_setup_register_start(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect("start");
+    client
+        .webauthn_setup_register_finish(
+            &Sensitive::new(SETUP_TOKEN.into()),
+            &Sensitive::new(STATE_TOKEN.into()),
+            "Alice's laptop",
+            registration_response(),
+        )
+        .await
+        .expect("finish");
+
+    for (name, requests) in [
+        ("start", start_requests.lock().unwrap().clone()),
+        ("finish", finish_requests.lock().unwrap().clone()),
+    ] {
+        assert_eq!(
+            requests.len(),
+            1,
+            "{name} must have been called exactly once"
+        );
+        let headers = &requests[0].headers;
+        assert!(
+            headers.get("Authorization").is_none(),
+            "{name} sent an Authorization header, which no session-less call may carry"
+        );
+        let cookie_value = headers
+            .get("Cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            !cookie_value.contains("axiam_access") && !cookie_value.contains("axiam_refresh"),
+            "{name} sent this client's session cookie: {cookie_value:?}"
+        );
+        assert!(
+            headers.get("X-CSRF-Token").is_none(),
+            "{name} sent this client's stored CSRF token, which is a session credential here"
+        );
+    }
+}
+
+/// §24.8: the second completion of a forced first-login enrolment clears the
+/// §17 decision memo exactly as `mfa_setup_confirm` and every other login
+/// completion do (§17.1 rule 9 — entries are keyed by subject, and this call
+/// changes it).
+#[tokio::test]
+async fn setup_register_finish_clears_the_decision_memo() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/authz/check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "allowed": true,
+            "reason_code": "allowed",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_FINISH))
+        .respond_with(setup_login_response(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "csrf-tok",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .org_slug("globex")
+        .decision_memo_ttl(std::time::Duration::from_secs(5))
+        .build()
+        .expect("client builds");
+
+    let resource = Uuid::from_u128(0x5555_5555_5555_5555_5555_5555_5555_5555);
+    client.check_access("read", resource, None).await.unwrap();
+    client.check_access("read", resource, None).await.unwrap();
+
+    client
+        .webauthn_setup_register_finish(
+            &Sensitive::new(SETUP_TOKEN.into()),
+            &Sensitive::new(STATE_TOKEN.into()),
+            "Alice's laptop",
+            registration_response(),
+        )
+        .await
+        .expect("finish");
+    let after_finish = server.received_requests().await.unwrap().len();
+
+    client.check_access("read", resource, None).await.unwrap();
+    let after_check = server.received_requests().await.unwrap().len();
+
+    assert_eq!(
+        after_check,
+        after_finish + 1,
+        "setup/register/finish must drop memoized decisions, exactly as mfa_setup_confirm does"
+    );
+}
+
+/// The setup token is treated as opaque, exactly as `state_token` and
+/// `challenge_token` are (§24.5) — and it must never render.
+#[tokio::test]
+async fn setup_token_and_state_token_never_render() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_START))
+        .respond_with(challenge_body(creation_challenge()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_FINISH))
+        .respond_with(setup_login_response(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "csrf-tok",
+        ))
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri());
+    let challenge = client
+        .webauthn_setup_register_start(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect("start");
+    let login = client
+        .webauthn_setup_register_finish(
+            &Sensitive::new(SETUP_TOKEN.into()),
+            &Sensitive::new(STATE_TOKEN.into()),
+            "Alice's laptop",
+            registration_response(),
+        )
+        .await
+        .expect("finish");
+
+    let rendered = format!("{challenge:?}{challenge:#?}{login:?}{login:#?}");
+    for (name, secret) in [
+        ("the setup token", SETUP_TOKEN),
+        ("the state token", STATE_TOKEN),
+    ] {
+        // Named, not printed — see the §24.3 twin of this assertion above.
+        assert!(
+            !rendered.contains(secret),
+            "{name} leaked into a Debug rendering"
         );
     }
 }
