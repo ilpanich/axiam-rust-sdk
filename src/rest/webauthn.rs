@@ -434,7 +434,7 @@ impl AxiamClient {
     /// **Adopts credentials exactly as [`AxiamClient::mfa_setup_confirm`]
     /// does** (§25.2 rule 2): both are completions of the same interrupted
     /// login and both answer `LoginSuccessResponse`, so this mirrors that
-    /// function's tail rather than [`Self::webauthn_finish`]'s — the
+    /// function's tail rather than `webauthn_finish`'s — the
     /// response carries no `access_token`/`refresh_token` in the body (they
     /// arrive only via the cookie triple, §24.3 rule 2), and there is no
     /// `WebauthnLoginResult` to build. §24.3's five adoption rules apply
@@ -447,7 +447,7 @@ impl AxiamClient {
     /// the setup token is the only credential, and neither call sends this
     /// client's own session cookie or CSRF header even when a session is
     /// configured — `webauthn_post_no_session` is what enforces that, by
-    /// skipping [`CsrfHeaderExt::maybe_csrf_header`] and by pre-empting
+    /// skipping `CsrfHeaderExt::maybe_csrf_header` and by pre-empting
     /// `reqwest`'s cookie jar with an explicit empty `Cookie` header (the jar
     /// only auto-populates one when the request does not already carry it).
     pub async fn webauthn_setup_register_finish(
