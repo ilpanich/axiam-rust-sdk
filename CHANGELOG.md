@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta14] - 2026-09-13
+
 ### Added
+
+- The revocation feed, vector C refusal, and the 503 retry pin (contract 1.44)
 
 - **CONTRACT.md §10.4 — an optional session-revocation feed poller (contract
   1.44).** `token::revocation::RevocationFeed`, attached with
@@ -37,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-vendor the final CONTRACT.md (1.44) from the axiam branch
+
 - **A malformed `mtls_endpoint_aliases` entry now fails the call instead of
   falling back to the top-level endpoint** (CONTRACT.md §21.3.1 vector C,
   contract 1.43).
@@ -58,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `management-registry.json` from `axiam`, and regenerated the §27 management
   surface. The surface gains `SessionResponse`, whose T-254 replay fields were
   published server-side at 1.0.0-beta13.
+
+### Fixed
+
+- Mint the login fixture password instead of writing it down
 
 ## [1.0.0-beta13] - 2026-09-12
 
