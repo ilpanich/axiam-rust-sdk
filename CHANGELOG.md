@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta15] - 2026-09-15
+
 ### Added
+
+- Certificates.sign_csr and the passkey setup pair (contract 1.45) (#105)
 
 - **`certificates.sign_csr` — an end-entity certificate for a key AXIAM never
   sees (CONTRACT.md §27.1, §27.5, contract 1.45).**
@@ -63,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decision memo is cleared, mirroring `logout_clears_the_memo`.
 
 ### Changed
+
+- Re-vendor CONTRACT.md at 1.46
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump taiki-e/install-action from 2.87.5 to 2.87.11
 
 - Re-vendored `CONTRACT.md` (1.45), `openapi.json`, `management-registry.json`
   and `proto/` from `axiam` at `3d5b279`, and regenerated the §27 management
