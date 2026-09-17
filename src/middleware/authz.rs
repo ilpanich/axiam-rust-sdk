@@ -31,6 +31,18 @@
 //!
 //! Deny and error paths never log or echo the token (§11.8): the token never
 //! enters this module — only the already-verified [`AxiamUser`] does.
+//!
+//! ## The `WWW-Authenticate` challenge (§20.3, §28.5)
+//!
+//! A `no_grant` denial on a route that named a scope can carry a
+//! `WWW-Authenticate` header two different ways, and only one is ever
+//! emitted: [`RequireAccess::with_uma_challenge`] (§20.3, a live permission
+//! ticket) takes priority when configured and its mint succeeds;
+//! [`RequireAccess::with_resource_metadata_url`] (CONTRACT.md §28.5 rule 5,
+//! the RFC 6750 `insufficient_scope` hint) is the fallback — used when §20.3
+//! was never configured, or its mint failed. Both land in
+//! [`AuthzGuardError::DeniedWithChallenge`]; the JSON body is unchanged
+//! either way.
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
@@ -53,13 +65,17 @@ pub enum AuthzGuardError {
     Unauthenticated(String),
     /// The authorization check denied the request — 403 `authorization_denied`.
     Denied(String),
-    /// Denied, and a `WWW-Authenticate: UMA` challenge was minted for the
-    /// caller — 403 `authorization_denied` with the §20.3 header attached.
+    /// Denied, with a `WWW-Authenticate` challenge attached — 403
+    /// `authorization_denied` carrying either the §20.3 UMA header or the
+    /// CONTRACT.md §28.5 rule 5 RFC 6750 `insufficient_scope` hint (see the
+    /// [module docs](self) for which one and why only one is ever emitted).
     ///
-    /// Carries `(message, header_value)`. The header is built during the async
-    /// [`RequireAccess::check`], because minting a ticket is a wire call and
-    /// [`actix_web::ResponseError::error_response`] is synchronous; by the time
-    /// this variant exists the ticket is already in hand.
+    /// Carries `(message, header_value)`. The header is built during the
+    /// async [`RequireAccess::check`] — minting a UMA ticket is a wire call,
+    /// and even the §28 form needs the async `deny` path's own
+    /// `reason_code` — while [`actix_web::ResponseError::error_response`]
+    /// is synchronous; by the time this variant exists the value is already
+    /// in hand.
     DeniedWithChallenge(String, String),
     /// The resource id could not be resolved to a UUID — 400 `invalid_request`.
     InvalidResource(String),
@@ -340,6 +356,7 @@ pub struct RequireAccess {
     action: String,
     scope: Option<String>,
     challenger: Option<UmaChallenger>,
+    mcp: Option<crate::middleware::mcp::McpChallenges>,
 }
 
 impl RequireAccess {
@@ -349,6 +366,7 @@ impl RequireAccess {
             action: action.into(),
             scope: None,
             challenger: None,
+            mcp: None,
         }
     }
 
@@ -361,6 +379,26 @@ impl RequireAccess {
     /// when minting fails.
     pub fn with_uma_challenge(mut self, challenger: UmaChallenger) -> Self {
         self.challenger = Some(challenger);
+        self
+    }
+
+    /// On a `no_grant` denial for a route that named a [`Self::scope`],
+    /// attach the CONTRACT.md §28.5 rule 5 `insufficient_scope`
+    /// `WWW-Authenticate` challenge alongside the 403.
+    ///
+    /// Reads the precomputed challenge from `verifier` — the SAME
+    /// `resource_metadata_url`/expected-audience configuration already
+    /// validated by
+    /// [`crate::token::JwksVerifier::with_resource_metadata_url`] (§28.5
+    /// rule 6: "an SDK MUST NOT add a second audience option for §28"). A
+    /// no-op when `verifier` was not itself configured with it — §28 stays
+    /// off. Where [`Self::with_uma_challenge`] is *also* configured, a
+    /// successful UMA mint wins and this challenge is never reached; only a
+    /// failed or absent UMA mint falls back to this one, and exactly one
+    /// `WWW-Authenticate` value is ever emitted.
+    #[must_use]
+    pub fn with_resource_metadata_url(mut self, verifier: &crate::token::JwksVerifier) -> Self {
+        self.mcp = verifier.mcp_challenges().cloned();
         self
     }
 
@@ -395,8 +433,16 @@ impl RequireAccess {
             .await;
         match outcome {
             Ok(decision) if decision.allowed => Ok(()),
-            Ok(_) => Err(self.deny(client, resource_id).await),
-            Err(AxiamError::Authz { .. }) => Err(self.deny(client, resource_id).await),
+            // §28.5 rule 5 reads the decision's own `reason_code` — a
+            // `no_grant` denial on a route that named a scope is the one
+            // case that gains a challenge; every other value (including
+            // `denied_by_rule` and an absent/unrecognised one) gets none.
+            Ok(decision) => Err(self
+                .deny(client, resource_id, decision.reason_code.as_deref())
+                .await),
+            // A server 403 with no structured body carries no reason code at
+            // all — §28.5 rule 5 treats an absent code as ineligible too.
+            Err(AxiamError::Authz { .. }) => Err(self.deny(client, resource_id, None).await),
             Err(AxiamError::Auth { .. }) => Err(AuthzGuardError::unauthenticated(
                 "authentication rejected by the authorization service".to_string(),
             )),
@@ -406,36 +452,75 @@ impl RequireAccess {
         }
     }
 
-    /// Build the denial, minting a §20.3 challenge when one was configured.
+    /// Build the denial, minting a §20.3 challenge when one was configured,
+    /// falling back to the CONTRACT.md §28.5 rule 5 challenge when §20.3 was
+    /// not configured or its mint failed.
     ///
-    /// Only ever called on a path that has already decided to refuse, so the
-    /// mint cannot change the outcome — at worst it fails and the caller gets
-    /// the plain 403 they would have got anyway.
-    async fn deny(&self, client: &AxiamClient, resource_id: Uuid) -> AuthzGuardError {
+    /// Only ever called on a path that has already decided to refuse, so
+    /// neither challenge can change the outcome — at worst either fails and
+    /// the caller gets the plain 403 they would have got anyway.
+    async fn deny(
+        &self,
+        client: &AxiamClient,
+        resource_id: Uuid,
+        reason_code: Option<&str>,
+    ) -> AuthzGuardError {
         let message = format!("access denied for action '{}'", self.action);
-        let Some(challenger) = self.challenger.as_ref() else {
-            return AuthzGuardError::denied(message);
-        };
 
-        // §20.2: the UMA scope is the AXIAM *action*, which is what makes the
-        // ticket ask for exactly the authority this check just refused.
-        let permission = crate::uma::RequestedPermission {
-            resource_id,
-            resource_scopes: vec![self.action.clone()],
-        };
-        match client
-            .uma_request_ticket(&challenger.pat, std::slice::from_ref(&permission))
-            .await
-        {
-            Ok(ticket) => AuthzGuardError::denied_with_challenge(
-                message,
-                crate::uma::uma_challenge_header(&challenger.realm, &challenger.as_uri, &ticket),
-            ),
-            // Deliberately swallowed: see UmaChallenger's "failure is not
-            // escalation" note. The reason is not logged here either, because
-            // this module never writes the token or the ticket anywhere (§11.8).
-            Err(_) => AuthzGuardError::denied(message),
+        if let Some(challenger) = self.challenger.as_ref() {
+            // §20.2: the UMA scope is the AXIAM *action*, which is what makes
+            // the ticket ask for exactly the authority this check just
+            // refused.
+            let permission = crate::uma::RequestedPermission {
+                resource_id,
+                resource_scopes: vec![self.action.clone()],
+            };
+            // A minting failure (Protection API outage, expired PAT, ...) is
+            // deliberately swallowed here: see UmaChallenger's "failure is
+            // not escalation" note. The reason is not logged either, because
+            // this module never writes the token or the ticket anywhere
+            // (§11.8). Falls through to the §28.5 challenge, if one applies —
+            // a Protection API outage should not also cost the caller the
+            // RFC 6750 hint.
+            if let Ok(ticket) = client
+                .uma_request_ticket(&challenger.pat, std::slice::from_ref(&permission))
+                .await
+            {
+                return AuthzGuardError::denied_with_challenge(
+                    message,
+                    crate::uma::uma_challenge_header(
+                        &challenger.realm,
+                        &challenger.as_uri,
+                        &ticket,
+                    ),
+                );
+            }
         }
+
+        if let Some(header) = self.mcp_challenge(reason_code) {
+            return AuthzGuardError::denied_with_challenge(message, header);
+        }
+
+        AuthzGuardError::denied(message)
+    }
+
+    /// CONTRACT.md §28.5 rule 5: only a `no_grant` denial on a route that
+    /// named a scope gets a challenge — `denied_by_rule`, an absent or
+    /// unrecognised `reason_code`, and a route with no scope argument all
+    /// carry none. Rule 6: the scope is the route's own, verbatim — never
+    /// synthesised, never derived, never substituted.
+    ///
+    /// A challenge build failure (an operator-chosen scope outside RFC
+    /// 6750's syntax) degrades to no header rather than an error: the caller
+    /// was going to be refused either way, mirroring
+    /// [`UmaChallenger`]'s own "failure is not escalation" rule.
+    fn mcp_challenge(&self, reason_code: Option<&str>) -> Option<String> {
+        let mcp = self.mcp.as_ref()?;
+        let scope = self.scope.as_deref()?;
+        if reason_code != Some(crate::rest::authz::reason_code::NO_GRANT) {
+            return None;
+        }
+        mcp.insufficient_scope_challenge(scope).ok()
     }
 }
 

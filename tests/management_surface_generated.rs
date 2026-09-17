@@ -1517,7 +1517,7 @@ async fn oauth2_clients_surface() {
     let client = logged_in_client(&server).await;
 
     // oauth2_clients.list
-    mount(&server, "GET", "/api/v1/oauth2-clients", 200, r#"{"items": [{"authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    mount(&server, "GET", "/api/v1/oauth2-clients", 200, r#"{"items": [{"allowed_resources": [], "authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "managed_by": "admin", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
     client
         .oauth2_clients()
         .list(PageRequest::first(50))
@@ -1530,10 +1530,11 @@ async fn oauth2_clients_surface() {
         .expect("oauth2_clients.list auto-paging");
 
     // oauth2_clients.create
-    mount(&server, "POST", "/api/v1/oauth2-clients", 201, r#"{"client_id": "example", "client_secret": "example", "created_at": "2026-08-26T00:00:00Z", "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "redirect_uris": [], "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "POST", "/api/v1/oauth2-clients", 201, r#"{"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "redirect_uris": [], "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .oauth2_clients()
         .create(&models::CreateOAuth2ClientRequest {
+            allowed_resources: None,
             authn_request_params: None,
             backchannel_logout_uri: None,
             browser_sso: None,
@@ -1559,7 +1560,7 @@ async fn oauth2_clients_surface() {
         .expect("oauth2_clients.create");
 
     // oauth2_clients.get
-    mount(&server, "GET", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "GET", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"allowed_resources": [], "authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "managed_by": "admin", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .oauth2_clients()
         .get(example_id())
@@ -1567,7 +1568,7 @@ async fn oauth2_clients_surface() {
         .expect("oauth2_clients.get");
 
     // oauth2_clients.update
-    mount(&server, "PUT", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/oauth2-clients/{EXAMPLE_ID}"), 200, r#"{"allowed_resources": [], "authn_request_params": "ignore", "browser_sso": true, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "dpop_bound_access_tokens": true, "dpop_require_nonce": true, "grant_types": [], "id": "11111111-1111-4111-8111-111111111111", "managed_by": "admin", "name": "example", "profile": "standard", "redirect_uris": [], "require_par": true, "scopes": [], "self_signed_tls_client_auth_thumbprints": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "tls_client_certificate_bound_access_tokens": true, "token_endpoint_auth_method": "client_secret_post", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .oauth2_clients()
         .update(example_id(), &models::UpdateOAuth2ClientRequest::default())
@@ -1939,11 +1940,17 @@ async fn settings_surface() {
         .set_org(&models::SetOrgSettings {
             access_token_lifetime_secs: 1,
             admin_notifications_enabled: true,
+            dcr_allowed_redirect_hosts: None,
+            dcr_allowed_scopes: None,
+            dcr_max_clients: None,
+            dcr_unused_client_ttl_days: None,
             default_cert_validity_days: 1,
             default_locale: None,
             deletion_grace_period_days: None,
+            dynamic_registration: None,
             email_verification_grace_period_hours: 1,
             email_verification_required: true,
+            external_client_allowed_resources: None,
             hibp_check_enabled: true,
             lockout_backoff_multiplier: 1.0,
             lockout_duration_secs: 1,
