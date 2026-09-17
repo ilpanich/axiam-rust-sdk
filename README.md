@@ -56,10 +56,10 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.38**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
-§21, §22, §23, §24, §25, §26, §27 (including §6.1 mTLS, the §10.1 minimum local-verification
-set — **including rule 9, sender-constrained tokens** — and §13 webhook signature
-verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
+This SDK conforms to **contract 1.48**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+§21, §22, §23, §24, §25, §26, §27, §28 (including §6.1 mTLS, the §10.1 minimum
+local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
+signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
 including the four public "Sign in with X" entry points, on the same host object
 ([`AxiamClient`]) as the nine that preceded them.
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
