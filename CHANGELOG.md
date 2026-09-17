@@ -158,7 +158,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `external_client_allowed_resources`. All additive, all already normative on
   that branch, and none of it is T21.9's own work — it is recorded here
   because it is real generated-code churn a reviewer will otherwise have to
-  puzzle out the source of.
+  puzzle out the source of. **Superseded in part by F-28-01 below**: re-syncing
+  from a phase branch is what contract 1.49 now forbids, and both artefacts are
+  re-synced once, from `main`, after Phase 21 lands.
+
+### Changed
+
+- **Contract conformance statement corrected** (CONTRACT.md Closing Notes,
+  §28.11 row R-3, T21.9 T9d). The README claimed *contract 1.38* and did not
+  name §28, while the vendored `CONTRACT.md` was already at 1.48 and this
+  SDK's §28 support shipped with it. The contract's own rule is that the
+  statement follows the code; it now reads *contract 1.48* and names §28.
+
+### Deferred
+
+- **F-28-01 — the vendored `openapi.json` and `CONTRACT.md` re-sync.** This
+  repository's copies were re-synced above from a **phase branch**, which kept
+  moving afterwards; they match neither `ilpanich/axiam`'s current tree nor the
+  four SDK repositories that declined the `openapi.json` re-sync. Across the
+  eleven SDKs the T21.9 T9d cross-SDK review found five distinct byte-states of
+  `CONTRACT.md` and two of `openapi.json`, all calling themselves contract 1.48
+  (CONTRACT.md §28.11 row R-1). Contract **1.49** states the rule that was
+  missing: a vendored artefact is re-synced from a **merged** `main`, never a
+  phase branch. Both artefacts are therefore re-synced here **once**, as
+  F-28-01, after AXIAM Phase 21 lands on `main`, together with a regeneration
+  of the §27 management surface in the same commit. F-28-01 is recorded
+  identically in all eleven SDK repositories so that it cannot be lost.
 
 ## [1.0.0-beta15] - 2026-09-15
 
