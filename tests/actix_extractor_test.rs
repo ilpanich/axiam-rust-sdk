@@ -637,7 +637,7 @@ async fn cookie_auth_state_changing_with_csrf_header_but_no_csrf_cookie_yields_4
 /// `ResponseError` JSON body, never `format!("{}", ...)` the error itself).
 #[test]
 fn axiam_extractor_error_display_delegates_to_inner_error() {
-    let err = AxiamExtractorError(AxiamError::auth("custom auth failure"));
+    let err = AxiamExtractorError::from(AxiamError::auth("custom auth failure"));
     assert!(format!("{err}").contains("custom auth failure"));
 }
 
@@ -649,7 +649,7 @@ fn axiam_extractor_error_display_delegates_to_inner_error() {
 async fn axiam_extractor_error_network_variant_maps_to_401() {
     use actix_web::ResponseError;
 
-    let err = AxiamExtractorError(AxiamError::network("transport failed"));
+    let err = AxiamExtractorError::from(AxiamError::network("transport failed"));
     assert_eq!(err.status_code(), actix_web::http::StatusCode::UNAUTHORIZED);
 
     let resp = err.error_response();

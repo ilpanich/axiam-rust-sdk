@@ -558,11 +558,16 @@ pub enum CertificationLevel {
 /// How a client proves its identity at the token endpoint (RFC 8705 §2, OIDC
 /// Core §9 naming).
 ///
-/// Only the methods AXIAM actually implements are representable. There is
-/// deliberately no `none` variant: every AXIAM client is confidential today
-/// (see `handle_authorization_code`), and adding a public-client value here
-/// before the rest of the server understands one would let an operator
-/// register a client whose authentication is silently skipped.
+/// Only the methods AXIAM actually implements are representable. `None` — the
+/// public-client value — was deliberately absent until T21.2: adding it
+/// before the rest of the server understood one would have let an operator
+/// register a client whose authentication is silently skipped. The server
+/// understands one now (`token.rs`'s `authenticate_client_credential` has an
+/// arm that accepts *no* credential and refuses a presented one, the
+/// authorization endpoint derives its PKCE requirement from this enum, and
+/// the admin API refuses the method alongside any grant or binding that
+/// contradicts it), so the variant exists — and only that arm may ever treat
+/// a missing credential as success.
 /// An **open** enum. A value this SDK does not know decodes to
 /// \[`ClientAuthMethod::Unknown`\] carrying the string, rather than failing the
 /// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
@@ -589,6 +594,9 @@ pub enum ClientAuthMethod {
     /// `private_key_jwt`
     #[serde(rename = "private_key_jwt")]
     PrivateKeyJwt,
+    /// `none`
+    #[serde(rename = "none")]
+    None,
     /// A value not in this SDK's copy of the spec, kept verbatim.
     ///
     /// Reachable only by decoding; nothing in this SDK constructs it. Re-
@@ -919,6 +927,21 @@ pub struct CreateNotificationRuleRequest {
 /// `CreateOAuth2ClientRequest` (generated from openapi.json).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateOAuth2ClientRequest {
+    /// T21.3 / RFC 8707 — the target services this client may name in a
+    /// `resource` parameter, at `/oauth2/authorize`, `/oauth2/par`,
+    /// `/oauth2/device_authorization` and `/oauth2/token`.
+    ///
+    /// Each entry must be an absolute URI without a fragment (RFC 8707 §2).
+    /// Entries are stored in their RFC 3986 §6.2.2 normalised form, which is what
+    /// the read-back shows and what every comparison uses; matching is by
+    /// equivalence and **never by prefix**.
+    ///
+    /// Empty (the default) means the client may name no resource, so every token
+    /// it obtains carries `axiam:user` or `axiam:m2m` exactly as before RFC 8707
+    /// support existed. This is also the list the RFC 8693 token exchange
+    /// consults for its `audience`/`resource` target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_resources: Option<Vec<String>>,
     /// X7.1 — whether this client's authorization requests may carry the OpenID
     /// Connect authentication-request parameters (`prompt`, `max_age`,
     /// `acr_values`, `claims`, `id_token_hint`, `login_hint`, `display`,
@@ -990,10 +1013,14 @@ pub struct CreateOAuth2ClientRequest {
     /// `dpop_bound_access_tokens`). See the FAPI operator guide.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ClientProfile>,
-    /// Allowed redirect URIs (must be HTTPS, except localhost for dev). SEC-089:
-    /// this list doubles as the token-exchange audience allow-list — adding a URI
-    /// here also authorises it as a token audience for this client, so review
-    /// additions on exchange-capable clients with that in mind (see
+    /// Allowed redirect URIs (must be HTTPS, except localhost for dev).
+    ///
+    /// SEC-089 / T21.3: this list **also** authorises token-exchange audiences,
+    /// and that coupling is now deprecated — `allowed_resources` is the field
+    /// that means "audiences this client may address". The redirect-URI branch
+    /// survives one release so that no deployment's working exchange breaks on
+    /// upgrade, and it logs a deprecation warning when it is the branch that
+    /// matched. Register exchange targets in `allowed_resources` (see
     /// `docs/api/token-exchange.md#audience`).
     pub redirect_uris: Vec<String>,
     /// B5 — require this client to push its authorization parameters to
@@ -2001,6 +2028,56 @@ pub struct LockoutPolicy {
     pub max_lockout_duration_secs: i64,
 }
 
+/// Who created a client registration (D5, T21.4).
+///
+/// The discriminator that separates a registration an administrator made from
+/// one that arrived over an open endpoint. Three things read it and each
+/// would otherwise have to infer provenance from something that is not
+/// provenance:
+///
+/// * `axiam_oauth2::fapi` refuses a FAPI profile on anything but
+///   \[`Admin`\](Self::Admin) (I5) — a client nobody vetted cannot be
+///   financial-grade;
+/// * the authorization endpoint forces a consent hop for every other value
+///   (D4) — an unrelated party gets a question put to the end user, whatever
+///   scopes it asked for;
+/// * the T21.4 sweeper deletes only \[`Dcr`\](Self::Dcr) rows, so an
+///   administrator's client is never swept however long it sits unused.
+///
+/// \[`Admin`\](Self::Admin) is the serde default and therefore what every row
+/// written before T21.4 decodes to, which is the truth: they were all created
+/// through `POST /oauth2-clients` by somebody holding
+/// `oauth2_clients:create`.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`ManagedBy::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum ManagedBy {
+    /// `admin`
+    #[serde(rename = "admin")]
+    Admin,
+    /// `dcr`
+    #[serde(rename = "dcr")]
+    Dcr,
+    /// `cimd`
+    #[serde(rename = "cimd")]
+    Cimd,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
 /// `POST /api/v1/mds/refresh` response — the outcome of one ingestion attempt
 /// (mirrors `axiam_db::mds_ingest::MdsIngestOutcome`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2260,11 +2337,19 @@ pub struct NotificationRuleResponse {
 pub struct OAuth2ClientCreatedResponse {
     /// `client_id`.
     pub client_id: String,
-    /// `client_secret`.
+    /// The plaintext client secret, shown exactly once.
+    ///
+    /// T21.2 — **absent** for a client registered with
+    /// `token_endpoint_auth_method: none`. A public client is created with no
+    /// secret, so there is nothing to show; the member is omitted rather than
+    /// sent as `""`, which an operator (or an SDK) would reasonably read as a
+    /// secret that happens to be empty. Every confidential registration — that
+    /// is, every registration that existed before T21.2 — carries it exactly as
+    /// before.
     ///
     /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
     /// to read it.
-    pub client_secret: Sensitive<String>,
+    pub client_secret: Option<Sensitive<String>>,
     /// `created_at`.
     pub created_at: String,
     /// `grant_types`.
@@ -2287,7 +2372,8 @@ pub struct OAuth2ClientCreatedResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OAuth2ClientCreatedResponseWire {
     pub(crate) client_id: String,
-    pub(crate) client_secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_secret: Option<String>,
     pub(crate) created_at: String,
     pub(crate) grant_types: Vec<String>,
     pub(crate) id: Uuid,
@@ -2302,7 +2388,9 @@ impl From<OAuth2ClientCreatedResponseWire> for OAuth2ClientCreatedResponse {
     fn from(w: OAuth2ClientCreatedResponseWire) -> Self {
         Self {
             client_id: w.client_id,
-            client_secret: crate::management::error::wrap_from_wire(w.client_secret),
+            client_secret: w
+                .client_secret
+                .map(crate::management::error::wrap_from_wire),
             created_at: w.created_at,
             grant_types: w.grant_types,
             id: w.id,
@@ -2318,6 +2406,10 @@ impl From<OAuth2ClientCreatedResponseWire> for OAuth2ClientCreatedResponse {
 /// OAuth2 client response -- omits client_secret_hash.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuth2ClientResponse {
+    /// T21.3 — echoed in its stored, normalised form, so an operator auditing
+    /// which audiences a client may mint tokens for reads the strings the server
+    /// actually compares rather than the ones they typed.
+    pub allowed_resources: Vec<String>,
     /// X7.1 — echoed so an operator can audit which clients act on the OIDC
     /// authentication-request parameters, from this endpoint rather than from the
     /// database.
@@ -2344,6 +2436,27 @@ pub struct OAuth2ClientResponse {
     /// `jwks_uri`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_uri: Option<String>,
+    /// T21.4 — when this client was last issued an authorization code, for the
+    /// sweeper that deletes self-registered clients nobody uses.
+    ///
+    /// Always absent for an `admin` client: the stamp is written only for a
+    /// non-`admin` one, so that an administrator's client takes exactly the path
+    /// it took before T21.4 (I1). `null` on a self-registered client means it has
+    /// never been authorized, and the sweeper reads `created_at` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_authorized_at: Option<String>,
+    /// T21.4 / D5 — who created this registration: `admin`, `dcr` or `cimd`.
+    ///
+    /// Echoed because an operator auditing a tenant needs to answer "which of
+    /// these did we create?" from this endpoint rather than from the database,
+    /// and because three behaviours hang off it: a non-`admin` client may never
+    /// carry the FAPI profile, is always consent-gated, and is the only kind the
+    /// unused-client sweeper touches.
+    ///
+    /// Read-only. There is no corresponding member on the update DTO: a
+    /// registration's provenance is a fact about how it came to exist, and a
+    /// field that could be edited to `admin` would be a field that launders one.
+    pub managed_by: ManagedBy,
     /// `name`.
     pub name: String,
     /// X5.1 — the registered posture and mTLS credentials. Read-back matters: an
@@ -2428,26 +2541,76 @@ pub struct OidcCallbackResponse {
     pub user_id: Uuid,
 }
 
-/// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8).
+/// OpenID Connect surface controls (X7 G8, plan §4.6/§4.8; T21.4).
 ///
-/// Two settings that are not password rules, and are here because this is the
-/// org-baseline-plus-tenant-override surface every other per-tenant control
-/// lives on. They are also the two settings in this model that are *not* of
-/// the same kind as each other, so it is worth saying which is which:
+/// Settings that are not password rules, here because this is the org-
+/// baseline-plus-tenant-override surface every other per-tenant control lives
+/// on. They are not all of the same kind as each other, and which is which is
+/// the whole of what \[`validate_tenant_override`\] and
+/// \[`clamp_overrides_to_org`\] read, so it is set out rather than inferred.
 ///
-/// * \[`Self::sensitive_scopes_enabled`\] **is** ordered. Releasing personal
-///   data is the less-restrictive direction, so it is validated disable-only
-///   — the mirror image of `mfa_enforced` — and a tenant can turn its
-///   organization's decision off but never on.
-/// * \[`Self::default_locale`\] is **not** ordered, and no ordering is invented
-///   for it. A language is a presentation preference; there is no sense in
-///   which Italian is stricter than French. \[`validate_tenant_override`\]
-///   therefore does not check it and \[`clamp_overrides_to_org`\] never clears
-///   it. The model's rule is "a tenant may only be more restrictive", which
-///   binds every field that *has* a restrictiveness; a field that has none
-///   cannot violate it.
+/// **Ordered** — a tenant may be stricter than its organization and never
+/// more permissive:
+///
+/// * \[`Self::sensitive_scopes_enabled`\], validated **disable-only** — the
+///   mirror image of `mfa_enforced`, because releasing personal data is the
+///   less-restrictive direction, so a tenant can turn its organization's
+///   decision off but never on.
+/// * \[`Self::dynamic_registration`\], on the ladder `disabled` →
+///   `initial_access_token` → `anonymous`: a tenant may move down it and
+///   never up.
+/// * \[`Self::dcr_max_clients`\] and \[`Self::dcr_unused_client_ttl_days`\], on
+///   the ordinary `tenant <= org` rule — with the wrinkle that `0` on the
+///   second means *never sweep*, which is the longest window of all and is
+///   handled by \[`dcr_ttl_strictness`\].
+///
+/// **Not ordered**, therefore never validated against the baseline and never
+/// clamped:
+///
+/// * \[`Self::default_locale`\]. A language is a presentation preference; there
+///   is no sense in which Italian is stricter than French.
+/// * \[`Self::dcr_allowed_scopes`\], \[`Self::dcr_allowed_redirect_hosts`\] and
+///   \[`Self::external_client_allowed_resources`\]. Each names per-tenant
+///   resources — *this* tenant's MCP servers, *this* tenant's callback hosts
+///   — and there is no sense in which one such list is stricter than another.
+///   A subset rule would force an organization to enumerate every tenant's
+///   resource servers in its own baseline before any tenant could name one.
+///
+/// The model's rule is "a tenant may only be more restrictive", which binds
+/// every field that *has* a restrictiveness; a field that has none cannot
+/// violate it.
+///
+/// One cross-field interlock spans both groups and is checked on the resolved
+/// policy rather than on either input: see \[`validate_dcr_policy`\].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OidcPolicy {
+    /// T21.4 — hosts a self-registered client's `redirect_uris` may point at, as
+    /// globs (`*.example.com`, or `*` for any). The loopback hosts (`127.0.0.1`,
+    /// `\[::1\]`, `localhost`) are always allowed whatever this says, because RFC
+    /// 8252 §7.3 is how every desktop MCP client receives its callback and a
+    /// tenant that forbade them would have turned registration on for nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_allowed_redirect_hosts: Option<Vec<String>>,
+    /// T21.4 — the scopes a self-registered client may ask for. A `scope` a
+    /// registration names that is not on this list is `invalid_client_metadata`;
+    /// an empty list means a self-registered client gets no scopes at all, which
+    /// is the honest default for a tenant that has turned registration on without
+    /// deciding what it grants.
+    ///
+    /// May not contain `address` or `phone` — see this module's
+    /// \[`sensitive_scope_in_dcr_list`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_allowed_scopes: Option<Vec<String>>,
+    /// T21.4 — how many `managed_by: dcr` clients this tenant may hold. See
+    /// \[`DEFAULT_DCR_MAX_CLIENTS`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_max_clients: Option<i32>,
+    /// T21.4 — how long a `managed_by: dcr` client survives without being
+    /// authorized. See \[`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`\]. `0` disables the
+    /// sweep for this tenant, which an operator who prunes out of band may
+    /// legitimately want.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_unused_client_ttl_days: Option<i32>,
     /// The BCP 47 tag the sign-in page falls back to when the relying party's
     /// `ui_locales` selects nothing (W5's chain, plan §4.6).
     ///
@@ -2462,6 +2625,27 @@ pub struct OidcPolicy {
     /// layering points inward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_locale: Option<String>,
+    /// T21.4 — whether a client may register itself (RFC 7591), and on what
+    /// terms. `disabled` unless somebody says otherwise (I1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_registration: Option<String>,
+    /// **D3** — the audiences an externally registered client may address.
+    ///
+    /// The single most important field on this policy, and the reason the
+    /// settings handler refuses `dynamic_registration: anonymous` while it is
+    /// empty. A client an unrelated party registered cannot declare its own
+    /// `allowed_resources`; it inherits this list verbatim, so what a stranger
+    /// can mint a token *for* is a decision the tenant took in advance rather
+    /// than one the registration request makes.
+    ///
+    /// Empty means an externally registered client can obtain only today's
+    /// `axiam:user` tokens — which AXIAM's own APIs accept. That is why the
+    /// interlock exists: the empty list is not a safe default for an *open*
+    /// registration endpoint, it is the most dangerous one.
+    ///
+    /// Shared with T5 (CIMD), which inherits the same list for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_client_allowed_resources: Option<Vec<String>>,
     /// Whether `address` and `phone` may be registered on a client, requested at
     /// the authorization endpoint, and released at UserInfo (X7 G8).
     ///
@@ -3351,6 +3535,18 @@ pub struct SetOrgSettings {
     pub access_token_lifetime_secs: i64,
     /// `admin_notifications_enabled`.
     pub admin_notifications_enabled: bool,
+    /// `dcr_allowed_redirect_hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_allowed_redirect_hosts: Option<Vec<String>>,
+    /// `dcr_allowed_scopes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_allowed_scopes: Option<Vec<String>>,
+    /// `dcr_max_clients`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_max_clients: Option<i32>,
+    /// `dcr_unused_client_ttl_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_unused_client_ttl_days: Option<i32>,
     /// `default_cert_validity_days`.
     pub default_cert_validity_days: i32,
     /// `default_locale`.
@@ -3359,10 +3555,16 @@ pub struct SetOrgSettings {
     /// `deletion_grace_period_days`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_grace_period_days: Option<i32>,
+    /// `dynamic_registration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_registration: Option<String>,
     /// `email_verification_grace_period_hours`.
     pub email_verification_grace_period_hours: i32,
     /// `email_verification_required`.
     pub email_verification_required: bool,
+    /// `external_client_allowed_resources`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_client_allowed_resources: Option<Vec<String>>,
     /// `hibp_check_enabled`.
     pub hibp_check_enabled: bool,
     /// `lockout_backoff_multiplier`.
@@ -3595,6 +3797,18 @@ pub struct TenantSettingsOverride {
     /// `admin_notifications_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_notifications_enabled: Option<bool>,
+    /// `dcr_allowed_redirect_hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_allowed_redirect_hosts: Option<Vec<String>>,
+    /// `dcr_allowed_scopes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_allowed_scopes: Option<Vec<String>>,
+    /// `dcr_max_clients`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_max_clients: Option<i32>,
+    /// `dcr_unused_client_ttl_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dcr_unused_client_ttl_days: Option<i32>,
     /// `default_cert_validity_days`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_cert_validity_days: Option<i32>,
@@ -3605,12 +3819,18 @@ pub struct TenantSettingsOverride {
     /// `deletion_grace_period_days`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_grace_period_days: Option<i32>,
+    /// `dynamic_registration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_registration: Option<String>,
     /// `email_verification_grace_period_hours`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_verification_grace_period_hours: Option<i32>,
     /// `email_verification_required`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_verification_required: Option<bool>,
+    /// `external_client_allowed_resources`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_client_allowed_resources: Option<Vec<String>>,
     /// `hibp_check_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibp_check_enabled: Option<bool>,
@@ -3978,6 +4198,10 @@ pub struct UpdateNotificationRuleRequest {
 /// `..Default::default()`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct UpdateOAuth2ClientRequest {
+    /// T21.3 — see \[`CreateOAuth2ClientRequest::allowed_resources`\]. A whole-list
+    /// replacement; `\[\]` withdraws every target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_resources: Option<Vec<String>>,
     /// `authn_request_params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authn_request_params: Option<AuthnRequestParamsMode>,

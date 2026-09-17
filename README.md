@@ -928,6 +928,252 @@ The rest of the surface — `uma_register_resource`, the other four `rreg` opera
 retried, the RPT is never adopted, an update replaces the scope list rather than merging it)
 is documented on the [`uma`](https://docs.rs/axiam-sdk/latest/axiam_sdk/uma/) module.
 
+### MCP resource-server helpers (`actix`, CONTRACT.md §28)
+
+The resource-server half of the Model Context Protocol authorization handshake: publish the
+RFC 9728 document that tells an MCP client which authorization server guards this resource,
+and put the RFC 6750 `WWW-Authenticate` challenge on the 401 that starts its discovery.
+
+**AXIAM is the authorization server and implements none of this.** Your MCP server is the
+resource server, and this is its side. Nothing here talks to AXIAM, performs any network I/O,
+or touches the SDK client's own session — all three operations are pure local computation,
+like `oidc_begin` and `uma_parse_challenge`. The *client* half — parsing a challenge, fetching
+a document, deciding whether to trust the authorization server it names — is deliberately not
+in the SDK: a helper that read a 401 and acted on it would send a credential to whatever host
+the 401 asked it to.
+
+**It is opt-in and off by default.** With `resource_metadata_url` unset, every guard behaves
+byte-for-byte as it did before §28 existed: no header on any response, no status changed, no
+body changed.
+
+**The whole integration:**
+
+```rust,no_run
+use actix_web::{App, HttpServer, web};
+use axiam_sdk::middleware::{ProtectedResourceMetadataOptions, protected_resource_metadata, serve_protected_resource_metadata};
+use axiam_sdk::token::JwksVerifier;
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+// 1. Describe the resource server. Validated here, at construction — before any
+//    route exists and before any request is served.
+let metadata = protected_resource_metadata(
+    ProtectedResourceMetadataOptions::new(
+        "https://mcp.example.com/mcp",
+        vec!["https://axiam.example.com".to_string()],
+    )
+    .scopes_supported(vec!["mcp:read".to_string(), "mcp:tools".to_string()]),
+)?;
+
+// 2. Configure the verifier FROM that value rather than by retyping the strings —
+//    retyping is how the guard and the document come to disagree. `expect_audience`
+//    MUST be called before `with_resource_metadata_url`; the latter refuses otherwise.
+let http = reqwest::Client::new();
+let base = url::Url::parse("https://axiam.example.com")?;
+let verifier = web::Data::new(
+    JwksVerifier::new(http, &base)?
+        .expect_tenant_id(uuid::Uuid::nil()) // your tenant
+        .expect_audience(metadata.document.resource.clone())
+        .with_resource_metadata_url(metadata.metadata_url.clone())?,
+);
+
+// 3. Publish the document. Passing `Some(&verifier)` is what lets the SDK check
+//    that the three strings agree; it refuses here if they do not.
+serve_protected_resource_metadata(&metadata, Some(&verifier))?;
+
+// `metadata` and `verifier` (a `web::Data` handle — a cheap `Arc` clone) are
+// captured once and re-registered fresh in each worker's own `App`.
+HttpServer::new(move || {
+    App::new()
+        .app_data(verifier.clone())
+        .service(
+            serve_protected_resource_metadata(&metadata, Some(&verifier))
+                .expect("already validated above"),
+        )
+})
+.bind(("0.0.0.0", 8080))?
+.run()
+.await?;
+# Ok(())
+# }
+```
+
+A request with no credential now gets what it needs to go and get one:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+Content-Type: application/json
+
+{"error":"authentication_failed","message":"..."}
+```
+
+and the document it points at answers without a credential:
+
+```json
+{
+  "resource": "https://mcp.example.com/mcp",
+  "authorization_servers": ["https://axiam.example.com"],
+  "scopes_supported": ["mcp:read", "mcp:tools"],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+**The path is derived from the resource, not chosen.** RFC 9728 §3.1 inserts
+`/.well-known/oauth-protected-resource` between the authority and the path, so
+`https://mcp.example.com/mcp` publishes at `/.well-known/oauth-protected-resource/mcp` and
+`https://mcp.example.com` at the bare well-known path. A trailing slash is carried through
+rather than trimmed — it is part of the identifier the client compares, and two resources
+that differ only by it are two resources. Exactly one route is registered; a deployment
+fronting several resources calls `serve_protected_resource_metadata` once per resource.
+
+**Actix needs no exemption to implement, unlike Express or Fastify.** §28.3 rule 2 requires
+an SDK to exempt the metadata document's path wherever the §10 guard is applied *globally* —
+a requirement written for a middleware that wraps every route. [`AxiamUser`] is a `FromRequest`
+**extractor** a handler opts into by declaring it as a parameter, never a blanket `App::wrap`,
+so the route `serve_protected_resource_metadata` returns is unauthenticated by construction: it
+composes no `AxiamUser` extractor, and there is no global guard for it to be exempted *from*.
+
+### Announcing yourself obliges you to check
+
+**`expect_audience` is mandatory before `with_resource_metadata_url`**, and the latter refuses
+otherwise, naming both. A resource server that publishes *"tokens for me carry this `aud`"* and
+then does not check `aud` has published a claim it does not honour — and a token minted for a
+**different** MCP server opens it. That is the confusion RFC 8707 exists to prevent, so it is
+impossible to configure rather than merely discouraged:
+
+```rust,no_run
+# use axiam_sdk::token::JwksVerifier;
+# fn demo(http: reqwest::Client, base: url::Url) -> Result<(), axiam_sdk::AxiamError> {
+JwksVerifier::new(http, &base)?.with_resource_metadata_url("https://mcp.example.com/.well-known/oauth-protected-resource/mcp")?;
+// ValidationError: resource_metadata_url: requires expect_audience(...) to be called
+// first (CONTRACT.md §28.5 rule 2) — …
+# Ok(())
+# }
+```
+
+With both set, a token carrying `aud: "axiam:user"` — a perfectly valid AXIAM token that
+simply was not minted for this resource — is a 401, exactly like a token minted for
+`https://other.example.com/mcp`.
+
+### The 403 that asks for a scope
+
+One class of 403 carries a challenge, and only one: a [`RequireAccess`] check that **named a
+scope** whose decision came back `allowed: false` with `reason_code: "no_grant"`.
+
+```rust,no_run
+# use axiam_sdk::client::AxiamClient;
+# use axiam_sdk::middleware::{AuthzGuardError, AxiamUser, RequireAccess};
+# use axiam_sdk::token::JwksVerifier;
+# use uuid::Uuid;
+# async fn handler(client: &AxiamClient, user: &AxiamUser, verifier: &JwksVerifier, id: Uuid)
+#     -> Result<(), AuthzGuardError> {
+RequireAccess::new("mcp:invoke")
+    .scope("mcp:tools")
+    .with_resource_metadata_url(verifier)
+    .check(client, user, id)
+    .await?;
+# Ok(())
+# }
+```
+
+```http
+HTTP/1.1 403 Forbidden
+WWW-Authenticate: Bearer error="insufficient_scope", scope="mcp:tools", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+Content-Type: application/json
+
+{"error":"authorization_denied","message":"..."}
+```
+
+`insufficient_scope` is in the header and `authorization_denied` is in the body, and they are
+not two spellings of one thing: the body is the §11 error taxonomy, unchanged, and the header
+is the RFC 6750 hint. The scope named is the one the route asked for, **verbatim** — never
+synthesised, never derived from `action`/`resource`, never substituted from the document's
+`scopes_supported`, because where a deployment's AXIAM resource-scope names and its OAuth
+scope names differ, that mapping is the operator's decision and the SDK cannot see it.
+
+Every other 403 carries no header at all: a `RequireAccess` check with no `scope`, a
+`require_role_check` failure, a §3 CSRF refusal, and — the one that matters — a decision whose
+`reason_code` is `denied_by_rule`. `no_grant` means *ask for more*, which is what a challenge
+invites a client to do; `denied_by_rule` means *an administrator has already decided*, and
+challenging on it would send an MCP client all the way around the authorization loop to arrive
+at the identical 403. An absent or unrecognised `reason_code` is not eligible either.
+
+Where a check also carries a [`UmaChallenger`] via `with_uma_challenge` (§20.3), a successful
+UMA mint wins: it is per-check opt-in and carries a live ticket for the exact authority just
+refused, where this one is the generic hint. Only when §20.3 was not configured, or its mint
+failed, does this challenge take over — exactly one `WWW-Authenticate` value is ever emitted.
+
+### The challenge says only what RFC 6750 can say
+
+Expired, not yet valid, wrong tenant, wrong audience, bad signature, an unsatisfiable `cnf`, a
+`sid` in the §10.4 revocation feed — all of them are `invalid_token`, indistinguishably. The
+SDK's own guard never emits an `error_description`, and adds nothing to the response that tells
+them apart. It is a 401 to an unauthenticated stranger: every distinction it draws is an oracle.
+
+`bearer_challenge` exists for the challenge you build yourself, for your own 400, and it takes
+`error_description` for that reason alone. It **refuses rather than escapes**: RFC 6750
+restricts every parameter to a character set that cannot contain `"` or `\`, so a value needing
+an escape is a value that does not belong in a challenge.
+
+```rust
+use axiam_sdk::middleware::{BearerChallengeError, BearerChallengeOptions, bearer_challenge};
+
+let url = "https://mcp.example.com/.well-known/oauth-protected-resource/mcp";
+let challenge = bearer_challenge(
+    BearerChallengeOptions::new(url)
+        .error(BearerChallengeError::InvalidRequest)
+        .error_description("The access token is malformed")
+        .scope("mcp:read mcp:tools"),
+)
+.unwrap();
+// Bearer error="invalid_request", error_description="The access token is malformed",
+//   scope="mcp:read mcp:tools", resource_metadata="https://mcp.example.com/.well-known/…/mcp"
+
+assert!(
+    bearer_challenge(BearerChallengeOptions::new(url).error_description("he said \"no\""))
+        .is_err() // never a challenge containing \"
+);
+```
+
+### Validation refuses; it never repairs
+
+Every §28.2 rule is checked by `protected_resource_metadata` itself, and a violation returns
+`AxiamError::Network` carrying a `ValidationError` source (§2's taxonomy, unchanged — §28 adds
+no new error type). Nothing is normalised, trimmed, lowercased or re-encoded to make it pass:
+that would publish a document describing a resource server that does not exist. The rules, in
+one list:
+
+| Member | Rule |
+|---|---|
+| `resource` | absolute URI with a scheme and an authority, **no query and no fragment**; a trailing slash is significant |
+| any URL | `https`, except on `127.0.0.1`, `[::1]` or `localhost` — there is no flag, env var or debug build that widens this |
+| `authorization_servers` | at least one entry, each an issuer **verbatim** (no `?tenant_id=`), no query, no fragment, no duplicates |
+| `scopes_supported` | RFC 6749 `NQCHAR` tokens, order preserved, no duplicates; an empty list **omits the member** |
+| `bearer_methods_supported` | exactly `["header"]` — this SDK's guard reads a bearer credential from the `Authorization` header alone |
+| `resource_documentation` | an absolute URL, query and fragment permitted; omitted when absent, never `null` |
+
+**Nothing in the document may come from a request.** `resource` and `authorization_servers` are
+configuration, and this SDK offers no option to build either from the `Host` header, the
+`Forwarded`/`X-Forwarded-*` family or the request URL. A document assembled from the request is
+a document an attacker can point at an authorization server of their choosing — the whole
+handshake redirected with one header.
+
+### No gRPC or AMQP guard to extend
+
+§28.5 rule 8 lets an SDK "whose guard also covers gRPC" attach the same challenge as
+`www-authenticate` metadata on an `UNAUTHENTICATED` status, and forbids inventing an AMQP
+equivalent outright. This SDK's `grpc` module is an outbound **client** speaking to AXIAM's own
+`check_access`/`user_info` RPCs, and its `amqp` module is a Reactor **consumer** subscribing to
+AXIAM's hook events — neither is a resource-server guard protecting a service *this SDK's
+consumer* builds, the way [`AxiamUser`] protects one on the REST/Actix surface. There is
+therefore no transport-appropriate equivalent to extend on either transport in this SDK today;
+see `CHANGELOG.md` for this recorded as a structural fact about the crate's surface rather than
+an omission from this port.
+
+[`AxiamUser`]: https://docs.rs/axiam-sdk/latest/axiam_sdk/middleware/struct.AxiamUser.html
+[`RequireAccess`]: https://docs.rs/axiam-sdk/latest/axiam_sdk/middleware/struct.RequireAccess.html
+[`UmaChallenger`]: https://docs.rs/axiam-sdk/latest/axiam_sdk/middleware/struct.UmaChallenger.html
+
 ### Webhook signature verification (`rest` or `amqp`)
 
 AXIAM signs every webhook delivery with a Stripe-style signed timestamp:

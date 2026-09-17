@@ -473,6 +473,18 @@ pub struct JwksVerifier {
     /// it expires, which is the §10.2 posture this narrows rather than
     /// replaces.
     revocation_feed: Option<crate::token::revocation::RevocationFeed>,
+    /// §28.5: the MCP resource-server metadata URL, when configured via
+    /// [`Self::with_resource_metadata_url`]. `None` — the default — means
+    /// §28 is off: [`crate::middleware::AxiamUser`] behaves byte-for-byte as
+    /// it did before §28 existed (§28.5 rule 1).
+    #[cfg(feature = "actix")]
+    resource_metadata_url: Option<String>,
+    /// The §28.4 challenge values precomputed by
+    /// [`Self::with_resource_metadata_url`] — built once, at construction,
+    /// so an invalid configuration is a startup failure rather than a
+    /// surprise on the 401 path.
+    #[cfg(feature = "actix")]
+    mcp_challenges: Option<crate::middleware::mcp::McpChallenges>,
 }
 
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -493,6 +505,10 @@ impl JwksVerifier {
             expected_issuer: None,
             expected_audience: None,
             revocation_feed: None,
+            #[cfg(feature = "actix")]
+            resource_metadata_url: None,
+            #[cfg(feature = "actix")]
+            mcp_challenges: None,
         })
     }
 
@@ -543,6 +559,78 @@ impl JwksVerifier {
         self
     }
 
+    /// The expected `aud` claim configured via [`Self::expect_audience`], if
+    /// any.
+    pub fn expected_audience(&self) -> Option<&str> {
+        self.expected_audience.as_deref()
+    }
+
+    /// Turn on the CONTRACT.md §28 MCP resource-server challenge: every
+    /// `WWW-Authenticate`-bearing 401 [`crate::middleware::AxiamUser`] emits
+    /// (and, via
+    /// [`crate::middleware::RequireAccess::with_resource_metadata_url`], the
+    /// one class of 403 §28.5 rule 5 names) carries the RFC 6750 challenge
+    /// pointing at `url`. Off by default; with this unset, every guard built
+    /// from this verifier behaves byte-for-byte as it did before §28
+    /// existed (§28.5 rule 1) — no `WWW-Authenticate` header on any
+    /// response, no status changed, no body changed.
+    ///
+    /// **Call [`Self::expect_audience`] first.** §28.5 rule 2: a resource
+    /// server that publishes "tokens for me carry this `aud`" and then does
+    /// not check `aud` has published a claim it does not honour, and a
+    /// token minted for a *different* resource server opens it — so this
+    /// call refuses rather than merely warns when no expected audience is
+    /// already configured. §28.5 rule 6: this is the *only* audience option
+    /// §28 reads; there is no second one to set.
+    ///
+    /// `url` is ordinarily
+    /// [`ProtectedResourceMetadata::metadata_url`](crate::middleware::ProtectedResourceMetadata::metadata_url),
+    /// fed from the same
+    /// [`protected_resource_metadata`](crate::middleware::protected_resource_metadata)
+    /// call that builds the document this verifier's audience must match —
+    /// [`crate::middleware::serve_protected_resource_metadata`] cross-checks
+    /// the two when given this verifier.
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Network`] (carrying a
+    /// [`ValidationError`](crate::management::ValidationError) source,
+    /// CONTRACT.md §2 — §28 adds no new error type) naming both
+    /// `resource_metadata_url` and `expect_audience` when no expected
+    /// audience is configured yet, or when `url` is not a syntactically
+    /// valid `WWW-Authenticate` `resource_metadata` value (CONTRACT.md
+    /// §28.2 rules 1–2, §28.4).
+    #[cfg(feature = "actix")]
+    pub fn with_resource_metadata_url(
+        mut self,
+        url: impl Into<String>,
+    ) -> Result<Self, AxiamError> {
+        let url = url.into();
+        if self.expected_audience.is_none() {
+            return Err(crate::middleware::mcp::refuse(
+                "with_resource_metadata_url",
+                "resource_metadata_url",
+                "requires expect_audience(...) to be called first (CONTRACT.md §28.5 rule 2) — announcing a resource identifier obliges this server to check that an inbound token's `aud` is that identifier, and a resource server that announces itself without checking is opened by a token minted for somebody else",
+            ));
+        }
+        let challenges = crate::middleware::mcp::McpChallenges::build(&url)?;
+        self.resource_metadata_url = Some(url);
+        self.mcp_challenges = Some(challenges);
+        Ok(self)
+    }
+
+    /// The URL configured via [`Self::with_resource_metadata_url`], if any.
+    #[cfg(feature = "actix")]
+    pub fn resource_metadata_url(&self) -> Option<&str> {
+        self.resource_metadata_url.as_deref()
+    }
+
+    /// The precomputed §28.4 challenge values, when §28 is configured.
+    #[cfg(feature = "actix")]
+    pub(crate) fn mcp_challenges(&self) -> Option<&crate::middleware::mcp::McpChallenges> {
+        self.mcp_challenges.as_ref()
+    }
+
     /// Construct a verifier against an **already-absolute** JWKS URL
     /// (CONTRACT.md §12.3 rule 6: "SDKs MUST read `jwks_uri` from the
     /// document rather than hardcoding `/oauth2/jwks`"). Used by
@@ -567,6 +655,10 @@ impl JwksVerifier {
             expected_issuer: None,
             expected_audience: None,
             revocation_feed: None,
+            #[cfg(feature = "actix")]
+            resource_metadata_url: None,
+            #[cfg(feature = "actix")]
+            mcp_challenges: None,
         }
     }
 

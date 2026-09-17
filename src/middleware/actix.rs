@@ -98,12 +98,27 @@ pub struct AxiamUser {
 /// The SDK's extractor-local error type, mapping to the standardized JSON
 /// error body + HTTP status per CONTRACT.md §10's closing requirement
 /// (`AuthError` -> 401, `AuthzError` -> 403).
+///
+/// Also carries the CONTRACT.md §28.4 `WWW-Authenticate` challenge value to
+/// attach to this failure's response, precomputed by
+/// [`crate::token::JwksVerifier::with_resource_metadata_url`] and threaded
+/// through at construction — `error_response`'s `&self` has no access to the
+/// original request, so the value must travel with the error rather than be
+/// computed while rendering it. `None` whenever §28 is off, or (§28.5 rule
+/// 5) this particular failure is one no challenge is ever attached to (the
+/// §3 CSRF refusal).
 #[derive(Debug)]
-pub struct AxiamExtractorError(pub AxiamError);
+pub struct AxiamExtractorError {
+    error: AxiamError,
+    challenge: Option<String>,
+}
 
 impl From<AxiamError> for AxiamExtractorError {
     fn from(err: AxiamError) -> Self {
-        Self(err)
+        Self {
+            error: err,
+            challenge: None,
+        }
     }
 }
 
@@ -111,7 +126,7 @@ impl std::fmt::Display for AxiamExtractorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Delegate to the inner AxiamError's redacting Display — never emits
         // a raw token value (§7, §10 "standardized JSON error body").
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.error)
     }
 }
 
@@ -123,7 +138,7 @@ struct ErrorBody {
 
 impl actix_web::ResponseError for AxiamExtractorError {
     fn status_code(&self) -> actix_web::http::StatusCode {
-        match &self.0 {
+        match &self.error {
             AxiamError::Auth { .. } => actix_web::http::StatusCode::UNAUTHORIZED,
             AxiamError::Authz { .. } => actix_web::http::StatusCode::FORBIDDEN,
             AxiamError::Network { .. } => actix_web::http::StatusCode::UNAUTHORIZED,
@@ -131,12 +146,23 @@ impl actix_web::ResponseError for AxiamExtractorError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let (error, message) = match &self.0 {
+        let (error, message) = match &self.error {
             AxiamError::Auth { message, .. } => ("authentication_failed", message.clone()),
             AxiamError::Authz { message, .. } => ("authorization_denied", message.clone()),
             AxiamError::Network { message, .. } => ("authentication_failed", message.clone()),
         };
-        HttpResponse::build(self.status_code()).json(ErrorBody {
+        let mut builder = HttpResponse::build(self.status_code());
+        if let Some(challenge) = &self.challenge {
+            // §28.4/§28.5 rule 4: tell the caller where to discover the
+            // authorization server. Additive — the JSON body below is the
+            // unchanged §10 shape, so a client that does not speak §28 sees
+            // exactly the 401 it saw before.
+            builder.insert_header((
+                actix_web::http::header::WWW_AUTHENTICATE,
+                challenge.as_str(),
+            ));
+        }
+        builder.json(ErrorBody {
             error: error.into(),
             message,
         })
@@ -144,36 +170,39 @@ impl actix_web::ResponseError for AxiamExtractorError {
 }
 
 impl AxiamExtractorError {
-    fn missing_credentials() -> Self {
-        Self(AxiamError::Auth {
-            message: "missing authentication credentials".into(),
-            oauth: None,
-            reason: None,
-        })
+    /// The wrapped [`AxiamError`] this failure carries.
+    pub fn error(&self) -> &AxiamError {
+        &self.error
     }
 
-    fn invalid_scheme() -> Self {
-        Self(AxiamError::Auth {
-            message: "invalid Authorization scheme, expected Bearer".into(),
-            oauth: None,
-            reason: None,
-        })
+    fn auth(message: impl Into<String>, challenge: Option<String>) -> Self {
+        Self {
+            error: AxiamError::Auth {
+                message: message.into(),
+                oauth: None,
+                reason: None,
+            },
+            challenge,
+        }
     }
 
-    fn misconfigured() -> Self {
-        Self(AxiamError::Auth {
-            message: "missing JwksVerifier app_data — extractor misconfigured".into(),
-            oauth: None,
-            reason: None,
-        })
+    fn missing_credentials(challenge: Option<String>) -> Self {
+        Self::auth("missing authentication credentials", challenge)
     }
 
-    fn invalid_claim(name: &str) -> Self {
-        Self(AxiamError::Auth {
-            message: format!("invalid {name} claim"),
-            oauth: None,
-            reason: None,
-        })
+    fn invalid_scheme(challenge: Option<String>) -> Self {
+        Self::auth("invalid Authorization scheme, expected Bearer", challenge)
+    }
+
+    fn misconfigured(challenge: Option<String>) -> Self {
+        Self::auth(
+            "missing JwksVerifier app_data — extractor misconfigured",
+            challenge,
+        )
+    }
+
+    fn invalid_claim(name: &str, challenge: Option<String>) -> Self {
+        Self::auth(format!("invalid {name} claim"), challenge)
     }
 
     /// CSRF double-submit check failed (§3): a cookie-sourced credential on
@@ -182,13 +211,19 @@ impl AxiamExtractorError {
     /// as HTTP 403 with the same `"authorization_denied"` standardized
     /// error body shape used elsewhere in this extractor — token
     /// verification is never reached in this case.
+    ///
+    /// Carries no §28 challenge: CONTRACT.md §28.5 rule 5 lists a CSRF
+    /// refusal among the 403s that gain no `WWW-Authenticate` header.
     fn csrf_validation_failed() -> Self {
-        Self(AxiamError::Authz {
-            kind: crate::error::AuthzKind::Denied,
-            message: "CSRF validation failed: missing or mismatched X-CSRF-Token header".into(),
-            action: None,
-            resource_id: None,
-        })
+        Self {
+            error: AxiamError::Authz {
+                kind: crate::error::AuthzKind::Denied,
+                message: "CSRF validation failed: missing or mismatched X-CSRF-Token header".into(),
+                action: None,
+                resource_id: None,
+            },
+            challenge: None,
+        }
     }
 }
 
@@ -252,7 +287,18 @@ enum CredentialSource {
 /// the analog file reference). Also reports which source the credential
 /// came from, so the caller can apply the §3 CSRF gate to cookie-sourced
 /// requests only.
-fn extract_token(req: &HttpRequest) -> Result<(String, CredentialSource), AxiamExtractorError> {
+///
+/// `no_credential_challenge` is CONTRACT.md §28.4 vector 1 — precomputed by
+/// the caller from `app_data`, since building it needs the registered
+/// `JwksVerifier` this free function does not have access to — attached to
+/// either failure below: a request carrying no `Authorization` header at
+/// all, and one carrying a non-Bearer scheme, are both "no authentication
+/// information" under RFC 6750 §3 (mirrors the TypeScript reference port's
+/// `extractCredential`, which returns nothing for either case alike).
+fn extract_token(
+    req: &HttpRequest,
+    no_credential_challenge: Option<String>,
+) -> Result<(String, CredentialSource), AxiamExtractorError> {
     if let Some(cookie) = req.cookie("axiam_access") {
         return Ok((cookie.value().to_owned(), CredentialSource::Cookie));
     }
@@ -261,7 +307,7 @@ fn extract_token(req: &HttpRequest) -> Result<(String, CredentialSource), AxiamE
         .headers()
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(AxiamExtractorError::missing_credentials)?;
+        .ok_or_else(|| AxiamExtractorError::missing_credentials(no_credential_challenge.clone()))?;
 
     let header = header.trim();
     let mut parts = header.splitn(2, char::is_whitespace);
@@ -269,7 +315,7 @@ fn extract_token(req: &HttpRequest) -> Result<(String, CredentialSource), AxiamE
     let credentials = parts.next().unwrap_or("").trim();
 
     if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
-        return Err(AxiamExtractorError::invalid_scheme());
+        return Err(AxiamExtractorError::invalid_scheme(no_credential_challenge));
     }
 
     Ok((
@@ -283,17 +329,27 @@ impl actix_web::FromRequest for AxiamUser {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let verifier = req.app_data::<web::Data<JwksVerifier>>().cloned();
+        // §28.5: `None` whenever `resource_metadata_url` is unset on the
+        // registered verifier — which is what keeps a guard without §28
+        // byte-for-byte identical to one from before §28 existed. Cloned
+        // (cheap: a handful of `String`s) up front so both challenge values
+        // are available inside the `async move` block below without
+        // borrowing `verifier` after it is moved into it.
+        let mcp = verifier.as_ref().and_then(|v| v.mcp_challenges().cloned());
+        let no_credential_challenge = mcp.as_ref().map(|c| c.no_credential().to_string());
+        let invalid_token_challenge = mcp.as_ref().map(|c| c.invalid_token().to_string());
+
         // Clone/compute what we need synchronously so the returned future
         // is `'static` and does not borrow `req` (matches the server-side
         // extractor's FromRequest shape — see the module doc comment).
-        let token_result = extract_token(req);
+        let token_result = extract_token(req, no_credential_challenge);
         // §3 CSRF gate inputs: only relevant for a cookie-sourced
         // credential on a state-changing request, but cheap enough to
         // compute unconditionally here (both are constant-time reads off
         // `req`, no I/O).
         let method_is_state_changing = is_state_changing(req.method());
         let csrf_ok = csrf_valid(req);
-        let verifier = req.app_data::<web::Data<JwksVerifier>>().cloned();
 
         Box::pin(async move {
             let (token, source) = token_result?;
@@ -301,21 +357,35 @@ impl actix_web::FromRequest for AxiamUser {
             // §3: a cookie-sourced credential is not CSRF-immune the way a
             // Bearer header is — reject before any verification work if
             // the double-submit check fails. Bearer-header requests always
-            // skip this branch.
+            // skip this branch. No §28 challenge: §28.5 rule 5 lists a CSRF
+            // refusal among the 403s that carry none.
             if source == CredentialSource::Cookie && method_is_state_changing && !csrf_ok {
                 return Err(AxiamExtractorError::csrf_validation_failed());
             }
 
             // §10.2: verify locally against the cached JWKS — no
-            // AXIAM-server round-trip.
-            let verifier = verifier.ok_or_else(AxiamExtractorError::misconfigured)?;
-            let claims = verifier.verify(&token).await?;
+            // AXIAM-server round-trip. A credential WAS presented by this
+            // point (`token_result` above already succeeded), so every
+            // failure from here carries §28.4 vector 2 (`invalid_token`)
+            // rather than vector 1.
+            let verifier = verifier.ok_or_else(|| {
+                AxiamExtractorError::misconfigured(invalid_token_challenge.clone())
+            })?;
+            let claims = verifier
+                .verify(&token)
+                .await
+                .map_err(|e| AxiamExtractorError {
+                    error: e,
+                    challenge: invalid_token_challenge.clone(),
+                })?;
 
             // §10.3: build and inject the authenticated identity.
-            let user_id = Uuid::parse_str(&claims.sub)
-                .map_err(|_| AxiamExtractorError::invalid_claim("sub"))?;
-            let tenant_id = Uuid::parse_str(&claims.tenant_id)
-                .map_err(|_| AxiamExtractorError::invalid_claim("tenant_id"))?;
+            let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
+                AxiamExtractorError::invalid_claim("sub", invalid_token_challenge.clone())
+            })?;
+            let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| {
+                AxiamExtractorError::invalid_claim("tenant_id", invalid_token_challenge.clone())
+            })?;
             let roles = claims
                 .scope
                 .as_deref()

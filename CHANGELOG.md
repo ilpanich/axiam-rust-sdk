@@ -7,6 +7,159 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MCP resource-server helpers (CONTRACT.md §28, contract 1.48)
+
+- **The resource-server half of the Model Context Protocol authorization
+  handshake, on the Actix-Web surface.** Three free functions on
+  `axiam_sdk::middleware` — `protected_resource_metadata`,
+  `serve_protected_resource_metadata`, `bearer_challenge` — plus one new
+  `JwksVerifier` builder method, `with_resource_metadata_url`. AXIAM is the
+  authorization server and implements none of this; your MCP server is the
+  resource server, and this is its side.
+
+  ```rust,ignore
+  let metadata = protected_resource_metadata(
+      ProtectedResourceMetadataOptions::new(
+          "https://mcp.example.com/mcp",
+          vec!["https://axiam.example.com".to_string()],
+      )
+      .scopes_supported(vec!["mcp:read".to_string(), "mcp:tools".to_string()]),
+  )?;
+  let verifier = web::Data::new(
+      JwksVerifier::new(http, &base)?
+          .expect_tenant_id(tenant_id)
+          .expect_audience(metadata.document.resource.clone())
+          .with_resource_metadata_url(metadata.metadata_url.clone())?,
+  );
+  serve_protected_resource_metadata(&metadata, Some(&verifier))?;
+  ```
+
+  **No operation performs network I/O**, so §16's retry policy and §9's
+  single-flight refresh do not apply and nothing here touches the SDK
+  client's own session. The client half of the handshake is deliberately not
+  shipped: a helper that read a 401 and acted on it would send a credential
+  to whatever host the 401 asked it to.
+
+- **Opt-in and off by default, and the regression proves it.** With
+  `resource_metadata_url` unset, `AxiamUser` and `RequireAccess` behave
+  byte-for-byte as they did before: no `WWW-Authenticate` on any response, no
+  status changed, no body changed.
+
+- **`expect_audience` is now required before `with_resource_metadata_url`**,
+  which refuses (`ValidationError`, naming both) otherwise. A resource server
+  that publishes "tokens for me carry this `aud`" and then does not check
+  `aud` has published a claim it does not honour, and a token minted for a
+  *different* MCP server opens it — that is the confusion RFC 8707 exists to
+  prevent, so it is impossible to configure rather than merely discouraged.
+  Centralized on `JwksVerifier` rather than duplicated on every guard:
+  `AxiamUser` and `RequireAccess` both read the one precomputed challenge set
+  a verifier carries, so there is exactly one place this can go wrong rather
+  than one per guard factory (a deliberate divergence from the TypeScript
+  reference port's per-factory revalidation — see below).
+
+- **The document's path is derived from the resource, not chosen**, and
+  `serve_protected_resource_metadata` registers exactly one `web::resource`
+  — RFC 9728 §3.1's insertion between the authority and the path, with a
+  trailing slash carried through rather than trimmed. It answers `200
+  application/json` with `Cache-Control: public, max-age=3600` and
+  `Access-Control-Allow-Origin: *` (never `Access-Control-Allow-Credentials`),
+  and needs **no exemption to serve it unauthenticated**: `AxiamUser` is a
+  `FromRequest` extractor a handler opts into by declaring it as a parameter,
+  never a blanket `App::wrap`, so the registered resource composes no such
+  extractor and is unauthenticated by construction. This is a structural
+  divergence from the TypeScript reference port, which needs an explicit
+  `isMetadataDocumentRequest` path exemption because Express/Fastify apply
+  their guard as global middleware in front of every route, the document's
+  own included — Actix-Web has no such global-middleware guard to exempt the
+  route *from*, so this SDK ships no equivalent function.
+
+- **One class of 403 gains a header, and only one.** A `RequireAccess` check
+  that named a `scope` (via `.with_resource_metadata_url(verifier)`) whose
+  decision came back `allowed: false` with `reason_code: "no_grant"` now
+  carries `error="insufficient_scope", scope="…"`. The JSON body does not
+  change — still `authorization_denied`, and `insufficient_scope` appears
+  only in the header. A `denied_by_rule` decision, an absent or unrecognised
+  `reason_code`, a denial with no `.scope(...)` call, a `require_role_check`
+  failure and a §3 CSRF refusal all carry no header. Where a check also
+  carries a §20.3 `with_uma_challenge`, a successful UMA mint wins and
+  exactly one `WWW-Authenticate` value is emitted; only an unconfigured or
+  failed UMA mint falls back to the §28 challenge.
+
+- **The challenge never says why.** Expired, not yet valid, wrong tenant,
+  wrong audience, bad signature, an unsatisfiable `cnf`, a revoked `sid` —
+  all of them are `invalid_token`, indistinguishably, and the guard adds no
+  `error_description`, no header and no body field that tells them apart. A
+  request that carried *no* credential gets a challenge with no `error`
+  parameter at all, which is a different answer and deliberately so.
+  `bearer_challenge` **refuses rather than escapes** any value outside RFC
+  6750's character sets, returning `AxiamError::Network` (a `ValidationError`
+  source) rather than emitting `\"`. `BearerChallengeError` is a closed
+  three-variant enum rather than a validated string — RFC 6750 §3.1 fixes
+  the vocabulary at exactly `invalid_request`/`invalid_token`/
+  `insufficient_scope` with no escape hatch, so a fourth value (e.g.
+  `invalid_grant`) cannot be constructed at all, a stronger guarantee than
+  the reference port's runtime refusal of it.
+
+- **Validation refuses; it never repairs.** `protected_resource_metadata`
+  applies every §28.2 rule at construction — absolute URI with no query and
+  no fragment, `https` except on `127.0.0.1`/`[::1]`/`localhost`, at least
+  one issuer with no duplicates and no query, `NQCHAR` scope tokens in the
+  caller's order, `bearer_methods_supported` exactly `["header"]` — and
+  returns `AxiamError::Network` (carrying a `ValidationError` source, §2's
+  taxonomy unchanged; §28 adds no new error type) rather than normalising,
+  trimming, lowercasing or re-encoding anything to make it pass. An empty
+  `scopes_supported` and an absent `resource_documentation` omit their
+  members rather than emitting `null`. Nothing in the document may come from
+  a request, and there is no option that would let it.
+
+- **Tests**: §28.9's five required tests, on the fixture §28.9 names, across
+  two files — `tests/mcp_contract_test.rs` for the two framework-independent
+  ones (document shape and validation negatives; challenge quoting and its
+  refusals) and `tests/mcp_actix_test.rs` for the three that need Actix (401
+  with the challenge; 403 `insufficient_scope`; a token whose `aud` is not
+  the resource), plus the off-by-default regression. A handful of the
+  TypeScript port's sub-assertions have no Rust equivalent because the type
+  system rules the scenario out entirely (a non-string `authorization_servers`
+  entry, an out-of-vocabulary `BearerChallengeError`) rather than merely
+  rejecting it at runtime.
+
+- **No gRPC or AMQP guard to extend.** §28.5 rule 8 permits an SDK "whose
+  guard also covers gRPC" to attach the challenge as `www-authenticate`
+  metadata on an `UNAUTHENTICATED` status, and forbids an AMQP equivalent
+  outright. This crate's `grpc` module is an outbound client speaking to
+  AXIAM's own `check_access`/`user_info` RPCs and its `amqp` module is a
+  Reactor consumer subscribing to AXIAM's hook events — neither is a
+  resource-server guard protecting a service this SDK's consumer builds, the
+  way `AxiamUser` protects one on the REST/Actix surface. There is therefore
+  no transport-appropriate equivalent to extend on either transport in this
+  SDK today; this is a structural fact about the crate's existing surface,
+  not a gap left by this port.
+
+- **Contract**: the vendored `CONTRACT.md` is re-synced from
+  `ilpanich/axiam`'s `claude_dev/mcp-authorization-server-plan.md` branch
+  (`claude/t21-2a-public-clients`) to **1.48** (§28). That branch is ahead of
+  `axiam` `main` until the phase lands; `openapi.json` and `proto/` are
+  re-synced from the same branch in the same change. No existing SDK
+  operation changes signature or behaviour either way.
+
+  **The re-synced `openapi.json` also carries other, already-landed phases'
+  schema changes** — the branch is ahead of `main` on more than §28 alone.
+  `tools/gen_management.py`'s own drift gate caught the resulting staleness
+  in the generated §27 management surface, and regenerating it (mechanically,
+  per the tool's own instructions — nothing hand-edited) is what the rest of
+  this diff in `src/management/models.rs` and
+  `tests/management_surface_generated.rs` is: `CreateOAuth2ClientRequest`
+  gains `allowed_resources` (RFC 8707) and `OAuth2ClientResponse` gains
+  `managed_by` (the new `ManagedBy` enum) and drops the now-optional
+  `client_secret` on a `token_endpoint_auth_method: none` registration;
+  `SetOrgSettings` gains four `dcr_*` fields, `dynamic_registration` and
+  `external_client_allowed_resources`. All additive, all already normative on
+  that branch, and none of it is T21.9's own work — it is recorded here
+  because it is real generated-code churn a reviewer will otherwise have to
+  puzzle out the source of.
+
 ## [1.0.0-beta15] - 2026-09-15
 
 ### Added
