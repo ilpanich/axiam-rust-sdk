@@ -170,20 +170,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SDK's §28 support shipped with it. The contract's own rule is that the
   statement follows the code; it now reads *contract 1.48* and names §28.
 
-### Deferred
+- **F-28-01 — `CONTRACT.md` (1.49), `openapi.json` and
+  `management-registry.json` re-synced from a merged `main`** (CONTRACT.md
+  §28.11 row R-1, contract 1.49's vendoring rule). The phase-branch re-sync
+  above left this repository matching neither `ilpanich/axiam`'s tree nor the
+  other ten SDKs. All three artefacts are now byte-copies of
+  `ilpanich/axiam` `main` @ `e4c62180e`, after Phase 21 landed there:
 
-- **F-28-01 — the vendored `openapi.json` and `CONTRACT.md` re-sync.** This
-  repository's copies were re-synced above from a **phase branch**, which kept
-  moving afterwards; they match neither `ilpanich/axiam`'s current tree nor the
-  four SDK repositories that declined the `openapi.json` re-sync. Across the
-  eleven SDKs the T21.9 T9d cross-SDK review found five distinct byte-states of
-  `CONTRACT.md` and two of `openapi.json`, all calling themselves contract 1.48
-  (CONTRACT.md §28.11 row R-1). Contract **1.49** states the rule that was
-  missing: a vendored artefact is re-synced from a **merged** `main`, never a
-  phase branch. Both artefacts are therefore re-synced here **once**, as
-  F-28-01, after AXIAM Phase 21 lands on `main`, together with a regeneration
-  of the §27 management surface in the same commit. F-28-01 is recorded
-  identically in all eleven SDK repositories so that it cannot be lost.
+  | Artefact | Git blob |
+  |----------|----------|
+  | `CONTRACT.md` (contract 1.49) | `2493348c32852fd1972696d3c1672021cb8f878c` |
+  | `openapi.json` | `b75e30eaa3597d2e1063bb50e7c0e469634ba60b` |
+  | `management-registry.json` | `4619f441aac0b1f4ed18da7ad45178ca14a3f449` |
+
+  `proto/` is unchanged (byte-identical to `main`). The §27 management
+  surface is regenerated in the same commit with `tools/gen_management.py`,
+  nothing hand-edited: **160 → 162 operations across the same 24
+  namespaces**. `oauth2_clients()` gains `create_registration_token`
+  (`POST /api/v1/oauth2-clients/registration-tokens`) and
+  `list_registration_tokens` (`GET` on the same path) — the T21.4
+  initial-access tokens for RFC 7591 dynamic client registration. New models:
+  `CreateRegistrationTokenRequest`, `CreateRegistrationTokenResponse` (carries
+  the one-time `initial_access_token`), `RegistrationTokenResponse`, and
+  `CimdPolicy` (T21.5 client ID metadata documents), which appears as an
+  optional `cimd` field on `OidcPolicy`, `SetOrgSettings` and
+  `TenantSettingsOverride`. The `dcr_*` field docs now say "externally
+  registered" and record T21.8's per-mechanism counting. Every change is
+  additive; no existing field or signature moves. The README's conformance
+  statement now reads *contract 1.49*, and its operation counts read 162.
 
 ## [1.0.0-beta15] - 2026-09-15
 

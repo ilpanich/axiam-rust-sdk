@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 160] = [
+const EXERCISED: [&str; 162] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -140,6 +140,8 @@ const EXERCISED: [&str; 160] = [
     "oauth2_clients.get",
     "oauth2_clients.update",
     "oauth2_clients.delete",
+    "oauth2_clients.create_registration_token",
+    "oauth2_clients.list_registration_tokens",
     "federation.list_configs",
     "federation.create_config",
     "federation.get_config",
@@ -1589,6 +1591,25 @@ async fn oauth2_clients_surface() {
         .delete(example_id())
         .await
         .expect("oauth2_clients.delete");
+
+    // oauth2_clients.create_registration_token
+    mount(&server, "POST", "/api/v1/oauth2-clients/registration-tokens", 201, r#"{"initial_access_token": "example", "token": {"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "expires_at": "2026-08-26T00:00:00Z", "id": "11111111-1111-4111-8111-111111111111", "name": "example", "tenant_id": "11111111-1111-4111-8111-111111111111"}}"#).await;
+    client
+        .oauth2_clients()
+        .create_registration_token(&models::CreateRegistrationTokenRequest {
+            expires_in_hours: None,
+            name: "example".to_string(),
+        })
+        .await
+        .expect("oauth2_clients.create_registration_token");
+
+    // oauth2_clients.list_registration_tokens
+    mount(&server, "GET", "/api/v1/oauth2-clients/registration-tokens", 200, r#"[{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "expires_at": "2026-08-26T00:00:00Z", "id": "11111111-1111-4111-8111-111111111111", "name": "example", "tenant_id": "11111111-1111-4111-8111-111111111111"}]"#).await;
+    client
+        .oauth2_clients()
+        .list_registration_tokens()
+        .await
+        .expect("oauth2_clients.list_registration_tokens");
 }
 
 /// Reaches every operation in the `federation` namespace.
@@ -1940,6 +1961,7 @@ async fn settings_surface() {
         .set_org(&models::SetOrgSettings {
             access_token_lifetime_secs: 1,
             admin_notifications_enabled: true,
+            cimd: None,
             dcr_allowed_redirect_hosts: None,
             dcr_allowed_scopes: None,
             dcr_max_clients: None,

@@ -56,7 +56,7 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.48**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.49**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28 (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
 signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
@@ -65,7 +65,7 @@ including the four public "Sign in with X" entry points, on the same host object
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§27 is implemented **in full**, both halves: the 160-operation imperative surface *and*
+§27 is implemented **in full**, both halves: the 162-operation imperative surface *and*
 the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
 that ships only one half to say which; this one ships both.
 
@@ -1640,7 +1640,7 @@ why the ~870 lines of group arithmetic the SRP implementation needed are gone.
 Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
 about a resource, `verify_webhook` checks a delivery signature — and none of them can
 create the user, declare the resource or register the webhook. `client.management` is the
-part that can: **160 operations across 24 namespaces**, generated from
+part that can: **162 operations across 24 namespaces**, generated from
 `management-registry.json`, which is the whole server API minus what other contract
 sections own and minus organization creation and deletion (§27.0 keeps those out of reach
 of a client library on purpose).
@@ -1748,7 +1748,7 @@ the whole `list` — taking down every record on the page over one field of one 
 
 ### Declarative manifests (§27.6, §27.7)
 
-Calling 160 operations one at a time is rarely what an application wants. What it does at
+Calling 162 operations one at a time is rarely what an application wants. What it does at
 start-up, in a migration, or in a test fixture is assert a shape:
 
 ```rust

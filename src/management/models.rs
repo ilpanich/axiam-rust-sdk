@@ -555,6 +555,122 @@ pub enum CertificationLevel {
     Unknown(String),
 }
 
+/// Whether, and on what terms, a `client_id` that is a URL is resolved by
+/// fetching the document it names (T21.5, `draft-ietf-oauth-client-id-
+/// metadata-document`).
+///
+/// # Why this is one nested policy rather than nine fields
+///
+/// Every field here is a term of a single decision — *do we fetch a
+/// stranger's URL and make a client out of what comes back* — and none of
+/// them means anything without \[`Self::enabled`\]. A tenant that states a CIMD
+/// posture states all of it; a tenant that states none inherits its
+/// organization's whole posture rather than half of one, which is the only
+/// merge that cannot produce a combination neither party wrote.
+///
+/// # The two fields that can widen, and the seven that cannot
+///
+/// \[`Self::enabled`\] and \[`Self::allow_http`\] are **ordered**: a tenant may
+/// turn either off but never on, exactly as `dynamic_registration` may only
+/// move down its ladder. Everything else names *this tenant's* domains or
+/// *this tenant's* bounds, and there is no sense in which one tenant's list
+/// of trusted publishers is stricter than another's — the same argument
+/// \[`OidcPolicy`\] already makes for `dcr_allowed_redirect_hosts`.
+///
+/// # Every bound here is a security control
+///
+/// \[`Self::max_metadata_bytes`\], \[`Self::min_cache_secs`\] and
+/// \[`Self::max_cache_secs`\] are not tuning knobs. They are, respectively, the
+/// ceiling on a read from an attacker-chosen URL, the floor under how often
+/// that read may be repeated, and the ceiling on how long its result may be
+/// trusted. Each is clamped again in code against the three constants above,
+/// so a settings row written by hand cannot lift them.
+/// Every field is optional, so this is a **sparse** body: what you leave
+/// `None` is left unchanged, and is omitted from the wire request entirely
+/// rather than sent as `null` (§27.4 rule 5). Construct it with
+/// `..Default::default()`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct CimdPolicy {
+    /// Permit an `http://` `client_id` and an `http://` fetch.
+    ///
+    /// **Development only, and it does more than its name says.** AXIAM's shared
+    /// SSRF guard couples the scheme rule to the address rule — the same seam
+    /// that lets an integration test point a fetch at a loopback mock server — so
+    /// a tenant that allows `http` also allows the first hop to resolve to a
+    /// private address. Redirect hops are validated strictly whatever this says,
+    /// and a public deployment that sets it has removed the control that makes
+    /// `169.254.169.254` unreachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_http: Option<bool>,
+    /// Refuse a document whose `token_endpoint_auth_method` is `none`.
+    ///
+    /// Off by default, because `none` is what every MCP desktop client is. A
+    /// tenant that turns it on accepts only `private_key_jwt` documents, which is
+    /// the posture for a deployment whose CIMD clients are servers rather than
+    /// desktops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidential_only: Option<bool>,
+    /// **Off unless somebody turns it on** (I1). With this `false`, a URL-shaped
+    /// `client_id` is exactly today's unknown client: nothing is fetched, nothing
+    /// is materialised, and the ordinary repository lookup answers as it always
+    /// has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The ceiling on a document's cache lifetime, in seconds. Clamped to
+    /// \[`CIMD_MAX_CACHE_CEILING_SECS`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cache_secs: Option<i64>,
+    /// The hard cap on how many bytes of a document are read, before it is
+    /// parsed. Clamped to \[`CIMD_MAX_METADATA_BYTES_CEILING`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_metadata_bytes: Option<i64>,
+    /// The floor under a document's cache lifetime, in seconds. Clamped to
+    /// \[`CIMD_MIN_CACHE_FLOOR_SECS`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cache_secs: Option<i64>,
+    /// Require every `redirect_uris` host in the document to equal the host of
+    /// the `client_id` URL itself.
+    ///
+    /// **On by default**, because the document says who the client is and a
+    /// redirect to somewhere else is the one thing a stolen or mirrored document
+    /// would want to change. It is turned **off** for the desktop MCP clients,
+    /// whose callbacks are on loopback and therefore can never share a host with
+    /// a `https://` `client_id`; `docs/admin/client-id-metadata-documents.md`
+    /// says so and says why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restrict_same_domain: Option<bool>,
+    /// The hosts whose documents this tenant will fetch at all, as globs
+    /// (`mcp.example.com`, or `*.example.com` for every host under one domain).
+    ///
+    /// **An empty list resolves nothing**, and enabling CIMD while it is empty is
+    /// refused — see \[`validate_cimd_policy`\]. That is a deliberate departure
+    /// from "a URL is a client identifier, so any URL will do": the fetch is
+    /// triggered by an unauthenticated request naming the URL, so an unrestricted
+    /// list is a request-forgery primitive offered to strangers, bounded only by
+    /// the SSRF guard's address rules. Naming the publishers a tenant actually
+    /// fronts costs one settings field and removes the class.
+    ///
+    /// **`*` is refused here, and so is a wildcard over a whole top-level
+    /// domain** (`*.com`): both are the posture the empty list is refused for,
+    /// spelled differently, and a control with no second control behind it cannot
+    /// have a one-character bypass and still be the control. It is a floor and
+    /// not a public-suffix check — `*.github.io` passes, and trusting shared
+    /// hosting stays the operator's decision, bounded by the per-tenant quota
+    /// rather than by this field. `*` remains valid in
+    /// \[`CimdPolicy::trusted_redirect_domains`\], whose entries are not fetch
+    /// targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_client_id_domains: Option<Vec<String>>,
+    /// The hosts a document's `redirect_uris` may point at, as globs.
+    ///
+    /// The loopback hosts (`127.0.0.1`, `\[::1\]`, `localhost`) are always allowed,
+    /// because RFC 8252 §7.3 is how every desktop MCP client receives its
+    /// callback — so an empty list is not a refusal of everything, it is
+    /// "loopback only", which is exactly the Claude Code and VS Code profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_redirect_domains: Option<Vec<String>>,
+}
+
 /// How a client proves its identity at the token endpoint (RFC 8705 §2, OIDC
 /// Core §9 naming).
 ///
@@ -1101,6 +1217,28 @@ pub struct CreateReactorRequest {
     /// Omit to take the 500 ms default. Capped at 5 000 ms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<i32>,
+}
+
+/// Request body for \[`create_registration_token`\].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRegistrationTokenRequest {
+    /// Lifetime in hours. Defaults to 24 and is refused above 168 (a week) — see
+    /// `axiam_core::models::oauth2_registration_token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_hours: Option<i32>,
+    /// Operator-facing label, e.g. `"mcp-inspector-demo"`, so a tenant with
+    /// several outstanding tokens can tell them apart.
+    pub name: String,
+}
+
+/// The one response that carries the handle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRegistrationTokenResponse {
+    /// The plaintext handle, shown exactly once. Presented by the registering
+    /// client as `Authorization: Bearer \<this>`.
+    pub initial_access_token: String,
+    /// The token's metadata.
+    pub token: RegistrationTokenResponse,
 }
 
 /// `CreateResourceRequest` (generated from openapi.json).
@@ -2584,6 +2722,15 @@ pub struct OidcCallbackResponse {
 /// policy rather than on either input: see \[`validate_dcr_policy`\].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OidcPolicy {
+    /// T21.5 — whether a URL-shaped `client_id` is resolved by fetching the
+    /// document it names, and on what terms. See \[`CimdPolicy`\]; off unless
+    /// somebody turns it on (I1).
+    ///
+    /// Nested, and therefore inherited or overridden **whole**: the fields are
+    /// terms of one decision, and a half-merged posture is one neither the
+    /// organization nor the tenant wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cimd: Option<CimdPolicy>,
     /// T21.4 — hosts a self-registered client's `redirect_uris` may point at, as
     /// globs (`*.example.com`, or `*` for any). The loopback hosts (`127.0.0.1`,
     /// `\[::1\]`, `localhost`) are always allowed whatever this says, because RFC
@@ -2601,14 +2748,32 @@ pub struct OidcPolicy {
     /// \[`sensitive_scope_in_dcr_list`\].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dcr_allowed_scopes: Option<Vec<String>>,
-    /// T21.4 — how many `managed_by: dcr` clients this tenant may hold. See
+    /// T21.4 — how many externally registered clients this tenant may hold. See
     /// \[`DEFAULT_DCR_MAX_CLIENTS`\].
+    ///
+    /// **Counted once per mechanism, against the same number** (T21.8):
+    /// `managed_by: dcr` rows and `managed_by: cimd` rows each have this many. So
+    /// a tenant running both cannot have shadow rows materialised from documents
+    /// exhaust the allowance for self-registration, or the reverse. The CIMD
+    /// count is checked *before* the document is fetched, so a tenant at its
+    /// ceiling is not an outbound amplifier either. It keeps its `dcr_` name
+    /// because dynamic registration defined it, on the same precedent as
+    /// \[`Self::dcr_allowed_scopes`\].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dcr_max_clients: Option<i32>,
-    /// T21.4 — how long a `managed_by: dcr` client survives without being
-    /// authorized. See \[`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`\]. `0` disables the
-    /// sweep for this tenant, which an operator who prunes out of band may
-    /// legitimately want.
+    /// T21.4 — how long an externally registered client survives without being
+    /// used. See \[`DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS`\]. `0` disables the sweep
+    /// for this tenant, which an operator who prunes out of band may legitimately
+    /// want.
+    ///
+    /// **Two sweeps read it, over different clocks** (T21.8). A `managed_by: dcr`
+    /// row is measured from its last authorization, falling back to when it was
+    /// registered. A `managed_by: cimd` row is measured from the last time its
+    /// document was *presented*, which every authorize, token and PAR request
+    /// moves — so a document in daily use is never swept however old its
+    /// registration is, and one nobody has presented since the window is, and re-
+    /// materialises on the next request if it is still published. Like the
+    /// ceiling, it keeps its `dcr_` name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dcr_unused_client_ttl_days: Option<i32>,
     /// The BCP 47 tag the sign-in page falls back to when the relying party's
@@ -3094,6 +3259,32 @@ pub struct ReadyResponse {
     pub status: String,
 }
 
+/// Metadata only. The handle exists in plaintext exactly once, in
+/// \[`CreateRegistrationTokenResponse`\].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegistrationTokenResponse {
+    /// Row creation time.
+    pub created_at: String,
+    /// The administrator who minted it.
+    pub created_by: Uuid,
+    /// When it stops being usable.
+    pub expires_at: String,
+    /// Row identity.
+    pub id: Uuid,
+    /// The operator-facing label.
+    pub name: String,
+    /// The tenant a registration on this token lands in.
+    pub tenant_id: Uuid,
+    /// When it was spent, if it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<String>,
+    /// Reserved; always absent in this build. See `axiam_core::models::oauth2_reg
+    /// istration_token::OAuth2RegistrationToken::used_by_client_id` — the
+    /// registration a token produced is recorded in the audit log, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_by_client_id: Option<String>,
+}
+
 /// A permission grant with its scopes resolved.
 ///
 /// A superset of \[`PermissionGrant`\]: `scope_ids` is still present and still
@@ -3535,6 +3726,11 @@ pub struct SetOrgSettings {
     pub access_token_lifetime_secs: i64,
     /// `admin_notifications_enabled`.
     pub admin_notifications_enabled: bool,
+    /// T21.5 — defaulted, so an API client written before this task lands on
+    /// `enabled: false`, which is what every deployment did before client ID
+    /// metadata documents existed (I1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cimd: Option<CimdPolicy>,
     /// `dcr_allowed_redirect_hosts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dcr_allowed_redirect_hosts: Option<Vec<String>>,
@@ -3797,6 +3993,9 @@ pub struct TenantSettingsOverride {
     /// `admin_notifications_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_notifications_enabled: Option<bool>,
+    /// `cimd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cimd: Option<CimdPolicy>,
     /// `dcr_allowed_redirect_hosts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dcr_allowed_redirect_hosts: Option<Vec<String>>,

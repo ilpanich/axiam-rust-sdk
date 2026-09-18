@@ -152,4 +152,41 @@ impl<'c> Oauth2Clients<'c> {
             .management_send_no_content(call, None::<&()>)
             .await
     }
+
+    /// `POST /api/v1/oauth2-clients/registration-tokens`
+    /// Not retried on failure (§27.4 rule 8): every write on this surface is
+    /// issued exactly once, including the ones that look idempotent.
+    pub async fn create_registration_token(
+        &self,
+        body: &models::CreateRegistrationTokenRequest,
+    ) -> Result<models::CreateRegistrationTokenResponse, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "oauth2_clients.create_registration_token",
+            verb: Verb::Post,
+            path_template: "/api/v1/oauth2-clients/registration-tokens",
+            path: "/api/v1/oauth2-clients/registration-tokens".to_string(),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, models::CreateRegistrationTokenResponse>(call, Some(body))
+            .await
+    }
+
+    /// `GET /api/v1/oauth2-clients/registration-tokens`
+    pub async fn list_registration_tokens(
+        &self,
+    ) -> Result<Vec<models::RegistrationTokenResponse>, AxiamError> {
+        let query: Vec<(&'static str, String)> = Vec::new();
+        let call = Call {
+            operation: "oauth2_clients.list_registration_tokens",
+            verb: Verb::Get,
+            path_template: "/api/v1/oauth2-clients/registration-tokens",
+            path: "/api/v1/oauth2-clients/registration-tokens".to_string(),
+            query: &query,
+        };
+        self.client
+            .management_send::<_, Vec<models::RegistrationTokenResponse>>(call, None::<&()>)
+            .await
+    }
 }
