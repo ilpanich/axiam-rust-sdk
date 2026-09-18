@@ -154,6 +154,9 @@ impl<'c> Oauth2Clients<'c> {
     }
 
     /// `POST /api/v1/oauth2-clients/registration-tokens`
+    /// **Returns secret material, once.** `initial_access_token` is returned by
+    /// this call and by no other; no later `get` will return it again. Discarding
+    /// the result destroys the credential (§27.5 rule 3).
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn create_registration_token(
@@ -168,9 +171,9 @@ impl<'c> Oauth2Clients<'c> {
             path: "/api/v1/oauth2-clients/registration-tokens".to_string(),
             query: &query,
         };
-        self.client
-            .management_send::<_, models::CreateRegistrationTokenResponse>(call, Some(body))
-            .await
+        let wire: models::CreateRegistrationTokenResponseWire =
+            self.client.management_send(call, Some(body)).await?;
+        Ok(models::CreateRegistrationTokenResponse::from(wire))
     }
 
     /// `GET /api/v1/oauth2-clients/registration-tokens`

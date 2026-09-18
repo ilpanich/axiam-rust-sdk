@@ -1232,13 +1232,36 @@ pub struct CreateRegistrationTokenRequest {
 }
 
 /// The one response that carries the handle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// This type carries secret material (§27.5), so the field is
+/// \[`Sensitive`\](crate::Sensitive) and the type derives neither `Serialize`
+/// nor `Deserialize`. Read the secret with `.expose()`, deliberately, at the
+/// point you need it.
+#[derive(Debug, Clone)]
 pub struct CreateRegistrationTokenResponse {
     /// The plaintext handle, shown exactly once. Presented by the registering
     /// client as `Authorization: Bearer \<this>`.
-    pub initial_access_token: String,
+    ///
+    /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
+    /// to read it.
+    pub initial_access_token: Sensitive<String>,
     /// The token's metadata.
     pub token: RegistrationTokenResponse,
+}
+
+/// Wire twin of [`CreateRegistrationTokenResponse`] -- plain strings, private, never logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CreateRegistrationTokenResponseWire {
+    pub(crate) initial_access_token: String,
+    pub(crate) token: RegistrationTokenResponse,
+}
+
+impl From<CreateRegistrationTokenResponseWire> for CreateRegistrationTokenResponse {
+    fn from(w: CreateRegistrationTokenResponseWire) -> Self {
+        Self {
+            initial_access_token: crate::management::error::wrap_from_wire(w.initial_access_token),
+            token: w.token,
+        }
+    }
 }
 
 /// `CreateResourceRequest` (generated from openapi.json).
