@@ -199,6 +199,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   additive; no existing field or signature moves. The README's conformance
   statement now reads *contract 1.49*, and its operation counts read 162.
 
+### Breaking
+
+- **`CreateRegistrationTokenResponse::initial_access_token` is now
+  `Sensitive<String>`, was `String`** (CONTRACT.md §27.5, contract 1.50, #480).
+  The RFC 7591 §1.2 initial access token is returned exactly once and never
+  retrievable, but it was missing from the registry's curated `(schema, field)`
+  table, so the generator emitted a bare `String` and the credential appeared in
+  the model's `Debug` rendering — the leak §7 rule 1 and §27.5 exist to prevent.
+  `management-registry.json` now publishes
+  `sensitive_response_fields: ["initial_access_token"]` for
+  `oauth2_clients.create_registration_token`, making it the **fifteenth**
+  §27.5 operation, and `tools/gen_management.py` wraps the field like the
+  fourteen before it.
+
+  Migration — read the token through the explicit reveal:
+
+  ```rust,ignore
+  let resp = client.oauth2_clients().create_registration_token(&tenant, body).await?;
+  // before: let token: String = resp.initial_access_token;
+  let token: &String = resp.initial_access_token.expose();
+  ```
+
+  There is deliberately **no** plain-string accessor kept alongside it: the plain
+  accessor is precisely the leak (contract 1.50). `CreateRegistrationTokenResponse`
+  also no longer derives `Serialize`, `Deserialize` or `PartialEq`, matching every
+  other secret-carrying response model; the wire shape is unchanged, so
+  `openapi.json` and `proto/` did not move.
+
+- **`CONTRACT.md` (1.50) and `management-registry.json` re-synced from a merged
+  `main`** — byte-copies of `ilpanich/axiam` `main` @ `da94e1d04`:
+
+  | Artefact | Git blob |
+  |----------|----------|
+  | `CONTRACT.md` (contract 1.50) | `28c163e32d253edca01f3040540e01212c5460f2` |
+  | `management-registry.json` | `aab87fd799101457ebd92223643cb2ad10a6bbe7` |
+
+  `openapi.json` (`b75e30eaa3597d2e1063bb50e7c0e469634ba60b`) and `proto/` are
+  unchanged and were not touched. The §27 surface is regenerated in the same
+  commit with `tools/gen_management.py` — still **162 operations across 24
+  namespaces**, the one field above being the only generated change. The
+  README's conformance statement now reads *contract 1.50*.
+
 ## [1.0.0-beta15] - 2026-09-15
 
 ### Added
