@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta16] - 2026-09-19
+
 ### Added
 
 - MCP resource-server helpers (CONTRACT.md §28, contract 1.48)
@@ -164,6 +166,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- F-28-01 — re-sync CONTRACT.md 1.49, openapi.json and management-registry.json from axiam main @ e4c62180e
+
+- Name §28 in the conformance statement; record F-28-01 (T21.9 T9d)
+
 - **Contract conformance statement corrected** (CONTRACT.md Closing Notes,
   §28.11 row R-3, T21.9 T9d). The README claimed *contract 1.38* and did not
   name §28, while the vendored `CONTRACT.md` was already at 1.48 and this
@@ -198,6 +204,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered" and record T21.8's per-mechanism counting. Every change is
   additive; no existing field or signature moves. The README's conformance
   statement now reads *contract 1.49*, and its operation counts read 162.
+
+### Fixed
+
+- 1.50 — initial_access_token becomes Sensitive<String> (#480)
 
 ### Breaking
 
