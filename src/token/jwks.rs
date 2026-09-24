@@ -318,10 +318,33 @@ impl Claims {
         // The fast path, and the common one. Note it comes first: an unbound
         // token is accepted with no proofs at all, which is the property that
         // keeps existing deployments working.
-        let Some(cnf) = self.cnf.as_ref() else {
-            return Ok(());
-        };
+        match self.cnf.as_ref() {
+            None => Ok(()),
+            Some(cnf) => cnf.verify(proofs),
+        }
+    }
+}
 
+impl CnfClaim {
+    /// CONTRACT.md §10.1 rule 9 for a confirmation that is **present** — the
+    /// table [`Claims::verify_token_binding`] documents, minus its first row.
+    ///
+    /// The one implementation of the rule. [`Claims::verify_token_binding`]
+    /// applies it to a locally verified token, and the `grpc` feature's
+    /// `TokenValidation::verify_possession` to the `cnf` the gRPC
+    /// `TokenService` returned (§10.3 rule 1), so a local-verification caller
+    /// and a gRPC-introspecting one cannot disagree about whether a token is a
+    /// bearer token (§10.1 rule 9 detail 4).
+    ///
+    /// A confirmation naming neither member is refused — over gRPC that is an
+    /// empty `CnfClaim` message, which §10.3 rule 3 says to refuse rather than
+    /// read as unbound.
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Auth`] on any rejecting row.
+    pub fn verify(&self, proofs: PresentedProofs<'_>) -> Result<(), AxiamError> {
+        let cnf = self;
         let auth = |message: &str| AxiamError::Auth {
             message: message.to_owned(),
             oauth: None,

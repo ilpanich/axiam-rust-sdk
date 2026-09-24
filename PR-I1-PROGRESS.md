@@ -17,7 +17,7 @@ step; ticked and pushed the moment a step is done. Deleted in the final commit.
 - [x] 3. Re-vendor from `56fbe44` + regenerate §27; CertificateType decodes openly (+ test) — CONTRACT/openapi/registry byte-match `56fbe44`, proto already identical; generator taught externally-tagged `oneOf` (SubjectAltName was an empty struct) and `inherit` absent→true; `tests/contract_151_models_test.rs` (8); full suite 938/0
 - [x] 4. Acting tenant (§5.2 rule 1) — handle-scoped `with_acting_tenant` / `acting_tenant` / `clear_acting_tenant`; gated on a held login result; memo keyed on it; `tests/acting_tenant_test.rs` (9); suite 947/0
 - [x] 5. `authenticate_device()` (§6.1 rules 6–10) + `examples/device_mtls_login.rs` — runtime gate (AuthError, zero wire) rather than a typestate, reason in the commit; token adopted as a bearer with the jar withheld; 401 never refreshes; `tests/device_auth_test.rs` (8); suite 956/0
-- [ ] 6. gRPC `validate_token` / `introspect_token` (§1.1.1, §10.3)
+- [x] 6. gRPC `validate_token` / `introspect_token` (§1.1.1, §10.3) — `grpc::TokenGrpcClient`; rule-9 table moved onto `CnfClaim::verify` (one implementation for local and gRPC); `tests/grpc_token_test.rs` (8); suite 964/0
 - [ ] 7. JwksVerifier and `cnf` (§10.1 rule 9)
 - [ ] 8. Manifest (§27.6.1, §27.5 rule 5, §27.9 tests)
 - [ ] 9. README conformance, CHANGELOG, full CI suite locally
@@ -44,4 +44,7 @@ Local toolchain: cargo/rustc 1.94.1 present; `protoc`, `buf`, `wasm-pack`, `carg
 
 ## Half-done state / notes
 
-_none_
+- Found, not fixed (pre-existing on `main`, out of scope):
+  `cargo build --no-default-features --features grpc` fails, because
+  `pub mod management` is ungated in `lib.rs` while `client` needs `rest`.
+  CI never builds `grpc` without `rest`.
