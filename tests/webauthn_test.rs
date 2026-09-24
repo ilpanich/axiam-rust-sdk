@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::rest::{WebauthnFailure, WebauthnWorkspace, webauthn_response_from_json};
-use axiam_sdk::{AxiamError, Sensitive};
+use axiam_sdk::{AuthzKind, AxiamError, Sensitive};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -906,6 +906,76 @@ async fn setup_register_finish_adopts_credentials_exactly_as_mfa_setup_confirm_d
         refresh_csrf.lock().unwrap().as_slice(),
         ["setup-csrf-tok"],
         "the CSRF token captured at setup/register/finish must be forwarded"
+    );
+}
+
+/// CONTRACT 1.52 N5.5 (C-12): `webauthn_setup_register_finish` completes a
+/// login and the server's response carries a full user object, so it must
+/// record the §5.2 rule 1 gate from it rather than resetting it to unknown
+/// through `absorb_session_cookies`.
+#[tokio::test]
+async fn setup_register_finish_records_the_acting_tenant_gate() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let reachable = Uuid::new_v4();
+    let unreachable = Uuid::new_v4();
+    let access = access_token(tenant_id, org_id);
+
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_FINISH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "user": {
+                        "id": Uuid::new_v4(), "username": "alice", "email": "a@example.com",
+                        "organization_level": true,
+                        "reachable_tenant_ids": [reachable],
+                    },
+                    "session_id": Uuid::new_v4(),
+                    "expires_in": 900,
+                }))
+                .append_header(
+                    "Set-Cookie",
+                    format!("axiam_access={access}; Path=/; HttpOnly").as_str(),
+                )
+                .append_header(
+                    "Set-Cookie",
+                    "axiam_refresh=refresh-cookie; Path=/; HttpOnly",
+                )
+                .append_header("Set-Cookie", "axiam_csrf=setup-csrf-tok; Path=/"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri());
+    client
+        .webauthn_setup_register_finish(
+            &Sensitive::new(SETUP_TOKEN.into()),
+            &Sensitive::new(STATE_TOKEN.into()),
+            "Alice's laptop",
+            registration_response(),
+        )
+        .await
+        .expect("finish");
+
+    assert!(
+        client.acting_tenant(reachable).is_ok(),
+        "the reported reach must be recorded, not reset to unknown"
+    );
+    let Err(err) = client.acting_tenant(unreachable) else {
+        panic!("outside the reported reach, so the gate must refuse client-side");
+    };
+    assert!(
+        matches!(
+            err,
+            AxiamError::Authz {
+                kind: AuthzKind::Denied,
+                ..
+            }
+        ),
+        "{err:?}"
     );
 }
 

@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::rest::{PasswordResetConfirmation, PasswordResetRequest};
-use axiam_sdk::{AxiamError, Sensitive};
+use axiam_sdk::{AuthzKind, AxiamError, Sensitive};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -330,6 +330,91 @@ async fn the_forced_path_runs_end_to_end() {
     assert!(!done.mfa_required && !done.mfa_setup_required);
     // It IS the completion of a login, so it adopts credentials (§25.2 rule 2).
     assert_eq!(client.resolved_tenant_id().await, Some(tenant_id));
+}
+
+/// CONTRACT 1.52 N5.5 (C-12): `mfa_setup_confirm` completes a login and the
+/// server's response carries a full user object (the same handler builds it
+/// as a password login, `axiam-api-rest/src/handlers/opaque.rs`'s sibling),
+/// so it must record the §5.2 rule 1 gate from it rather than resetting it to
+/// unknown through `absorb_session_cookies`.
+#[tokio::test]
+async fn mfa_setup_confirm_records_the_acting_tenant_gate() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let reachable = Uuid::new_v4();
+    let unreachable = Uuid::new_v4();
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "mfa_setup_required": true,
+            "setup_token": SETUP_TOKEN,
+        })))
+        .mount(&server)
+        .await;
+    mount_capturing(&server, "/api/v1/auth/mfa/setup/enroll", enroll_body()).await;
+
+    let access = access_token(tenant_id, org_id);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/mfa/setup/confirm"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "session_id": Uuid::new_v4(),
+                    "expires_in": 900,
+                    "user": {
+                        "id": Uuid::new_v4(), "username": "alice", "email": "a@example.com",
+                        "organization_level": true,
+                        "reachable_tenant_ids": [reachable],
+                    },
+                }))
+                .append_header(
+                    "Set-Cookie",
+                    format!("axiam_access={access}; Path=/; HttpOnly").as_str(),
+                )
+                .append_header(
+                    "Set-Cookie",
+                    "axiam_refresh=refresh-cookie; Path=/; HttpOnly",
+                )
+                .append_header("Set-Cookie", "axiam_csrf=csrf-tok; Path=/"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri());
+    let login = client
+        .login("alice@example.com", "pw")
+        .await
+        .expect("login");
+    let setup_token = login.setup_token.as_ref().expect("setup token");
+    client
+        .mfa_setup_enroll(setup_token)
+        .await
+        .expect("setup enroll");
+    client
+        .mfa_setup_confirm(setup_token, "123456")
+        .await
+        .expect("setup confirm");
+
+    assert!(
+        client.acting_tenant(reachable).is_ok(),
+        "the reported reach must be recorded, not reset to unknown"
+    );
+    let Err(err) = client.acting_tenant(unreachable) else {
+        panic!("outside the reported reach, so the gate must refuse client-side");
+    };
+    assert!(
+        matches!(
+            err,
+            AxiamError::Authz {
+                kind: AuthzKind::Denied,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

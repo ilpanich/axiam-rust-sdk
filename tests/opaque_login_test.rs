@@ -15,6 +15,7 @@
 #![cfg(feature = "opaque")]
 
 use axiam_opaque::testing;
+use axiam_sdk::AuthzKind;
 use axiam_sdk::AxiamError;
 use axiam_sdk::client::AxiamClient;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -254,6 +255,72 @@ async fn login_start_and_finish_send_the_x_tenant_id_header() {
         .login_opaque("alice", PASSWORD)
         .await
         .expect("§5 rule 2: login/start and login/finish must send X-Tenant-ID");
+}
+
+/// CONTRACT 1.52 N5.5 (C-12): OPAQUE `login/finish` completes a login and
+/// the server's response carries a full user object (the same handler
+/// builds it as a password login, `axiam-api-rest/src/handlers/opaque.rs`),
+/// so it must record the §5.2 rule 1 gate from it rather than resetting it
+/// to unknown through `absorb_session_cookies`.
+#[tokio::test]
+async fn opaque_login_finish_records_the_acting_tenant_gate() {
+    let (server, setup, record) = enrolled().await;
+    mount_jwks(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/login/start"))
+        .respond_with(LoginStart::new(setup, record, None))
+        .mount(&server)
+        .await;
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let jti = Uuid::new_v4();
+    let reachable = Uuid::new_v4();
+    let unreachable = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id, user_id, jti);
+    let mut finish_response = ResponseTemplate::new(200).set_body_json(json!({
+        "session_id": jti,
+        "expires_in": 900,
+        "user": {
+            "id": user_id, "username": "alice", "email": "alice@example.com",
+            "organization_level": true,
+            "reachable_tenant_ids": [reachable],
+        },
+    }));
+    for cookie in [
+        format!("axiam_access={access}; Path=/; HttpOnly"),
+        "axiam_refresh=test-refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=test-csrf-token; Path=/".to_string(),
+    ] {
+        finish_response = finish_response.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/login/finish"))
+        .respond_with(finish_response)
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    client.login_opaque("alice", PASSWORD).await.expect("login");
+
+    assert!(
+        client.acting_tenant(reachable).is_ok(),
+        "the reported reach must be recorded, not reset to unknown"
+    );
+    let Err(err) = client.acting_tenant(unreachable) else {
+        panic!("outside the reported reach, so the gate must refuse client-side");
+    };
+    assert!(
+        matches!(
+            err,
+            AxiamError::Authz {
+                kind: AuthzKind::Denied,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
