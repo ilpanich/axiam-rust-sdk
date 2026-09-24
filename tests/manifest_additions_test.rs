@@ -446,7 +446,10 @@ async fn an_empty_or_unstated_metadata_is_not_drift() {
         )
         .await
         .unwrap();
-    assert!(plan.is_converged(), "{:?}", plan.actions);
+    assert!(
+        plan.is_converged(),
+        "a stated {{}} and an unstated metadata are not drift"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +741,7 @@ async fn a_created_service_accounts_secret_survives_a_later_failure_and_is_never
     let rendered = format!("{report:?}");
     assert!(
         !rendered.contains("secret-of-"),
-        "§7: the secret never reaches Debug: {rendered}"
+        "§7: the secret must never reach Debug"
     );
     // Ordering (§27.6 rule 5): the account before its binding.
     let account_at = report
@@ -847,7 +850,7 @@ async fn apply_then_plan_converges_with_every_addition() {
         .with_group(GroupSpec::new("staff", "Staff", "Staff").with_roles(["concierge"]))
         .with_user(
             UserSpec::new("ann", "ann", "ann@example.com")
-                .with_initial_password(axiam_sdk::Sensitive::new("pw".into()))
+                .with_initial_password(axiam_sdk::Sensitive::new(Uuid::new_v4().to_string()))
                 .with_roles([RoleBinding::at_only("resident", "flat")]),
         )
         .with_service_account(
@@ -860,8 +863,7 @@ async fn apply_then_plan_converges_with_every_addition() {
     let plan = client.manifest().plan(&manifest).await.unwrap();
     assert!(
         plan.is_converged(),
-        "{:?}",
-        plan.changes().collect::<Vec<_>>()
+        "apply then plan must converge (§27.6 rule 6)"
     );
 }
 

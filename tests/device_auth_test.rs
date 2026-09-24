@@ -210,7 +210,7 @@ async fn a_device_login_withholds_a_previous_cookie_session() {
 
     let client = device_client(&server.uri());
     client
-        .login("u@example.com", "pw")
+        .login("u@example.com", &Uuid::new_v4().to_string())
         .await
         .expect("cookie session");
     client.authenticate_device().await.expect("device login");

@@ -823,11 +823,14 @@ async fn a_cnf_naming_both_methods_requires_both() {
         .expect_err("the proof alone is not enough");
 
     // The conjunction holds at the entry point too.
-    for (certificate_thumbprint, dpop_thumbprint, ok) in [
+    for (case, (certificate_thumbprint, dpop_thumbprint, ok)) in [
         (Some(THUMBPRINT), Some(JKT), true),
         (Some(THUMBPRINT), None, false),
         (None, Some(JKT), false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let result = verifier
             .verify_with_proofs(
                 &token,
@@ -837,11 +840,7 @@ async fn a_cnf_naming_both_methods_requires_both() {
                 },
             )
             .await;
-        assert_eq!(
-            result.is_ok(),
-            ok,
-            "{certificate_thumbprint:?} {dpop_thumbprint:?}"
-        );
+        assert_eq!(result.is_ok(), ok, "conjunction case {case}");
     }
 }
 

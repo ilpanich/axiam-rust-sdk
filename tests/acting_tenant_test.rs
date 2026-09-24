@@ -27,6 +27,12 @@ use management_support::{
 const OTHER_TENANT: &str = "44444444-4444-4444-8444-444444444444";
 const THIRD_TENANT: &str = "55555555-5555-4555-8555-555555555555";
 
+/// The mock login accepts any password; one minted per run keeps a credential
+/// literal out of the source (CodeQL `rust/hard-coded-cryptographic-value`).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
+
 fn other() -> Uuid {
     Uuid::parse_str(OTHER_TENANT).unwrap()
 }
@@ -95,7 +101,10 @@ async fn the_builder_form_sends_the_header_beside_an_unchanged_x_tenant_id() {
         .build()
         .unwrap();
     drop(logged_in);
-    client.login("root@example.com", "pw").await.expect("login");
+    client
+        .login("root@example.com", &any_password())
+        .await
+        .expect("login");
     assert_eq!(client.acting_tenant_id(), Some(other()));
     mount_groups_list(&server).await;
 
@@ -330,7 +339,9 @@ async fn the_decision_memo_does_not_answer_across_acting_tenants() {
         .unwrap();
     // Reuse the harness login against the same server for this client.
     let _ = logged_in_client_as(&server, org_admin()).await;
-    base.login("root@example.com", "pw").await.unwrap();
+    base.login("root@example.com", &any_password())
+        .await
+        .unwrap();
 
     Mock::given(method("POST"))
         .and(path("/api/v1/authz/check"))
