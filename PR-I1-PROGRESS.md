@@ -19,7 +19,7 @@ step; ticked and pushed the moment a step is done. Deleted in the final commit.
 - [x] 5. `authenticate_device()` (§6.1 rules 6–10) + `examples/device_mtls_login.rs` — runtime gate (AuthError, zero wire) rather than a typestate, reason in the commit; token adopted as a bearer with the jar withheld; 401 never refreshes; `tests/device_auth_test.rs` (8); suite 956/0
 - [x] 6. gRPC `validate_token` / `introspect_token` (§1.1.1, §10.3) — `grpc::TokenGrpcClient`; rule-9 table moved onto `CnfClaim::verify` (one implementation for local and gRPC); `tests/grpc_token_test.rs` (8); suite 964/0
 - [x] 7. JwksVerifier and `cnf` (§10.1 rule 9) — **bug fixed**: `verify()` (the `AxiamUser` guard) accepted bound tokens as bearer; now refuses them without evidence; `verify_with_proofs`; `middleware::PeerCertificate` via `on_connect`; the test that pinned the defect is inverted, not relaxed; `tests/actix_bound_token_test.rs` (2) + 3 new in `local_verification_set_test`; suite 968/0
-- [ ] 8. Manifest (§27.6.1, §27.5 rule 5, §27.9 tests)
+- [x] 8. Manifest (§27.6.1, §27.5 rule 5, §27.9 tests) — `ResourceSpec.metadata`, `RoleBinding` (two shapes), `ServiceAccountSpec`, `Outcome::{CreatedServiceAccount, BindingUpdateFailed}`, `manifest!` statements; `tests/manifest_additions_test.rs` (13, stateful fake tenant); six mutations caught; suite 982/0
 - [ ] 9. README conformance, CHANGELOG, full CI suite locally
 - [ ] 10. PR opened, subscribed, green
 - [ ] 11. Fan-out row, ambiguities for C-12, prompt for C-2 … C-11
@@ -48,3 +48,5 @@ Local toolchain: cargo/rustc 1.94.1 present; `protoc`, `buf`, `wasm-pack`, `carg
   `cargo build --no-default-features --features grpc` fails, because
   `pub mod management` is ungated in `lib.rs` while `client` needs `rest`.
   CI never builds `grpc` without `rest`.
+- Found, not built (pre-existing): §27.7 lists `#[derive(AxiamSpec)]` for
+  Rust; this SDK has never shipped it (only `manifest!`). Not in C-1's scope.

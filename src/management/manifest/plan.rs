@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use super::spec::ManagementManifest;
+use super::spec::{ManagementManifest, RoleBinding};
 use crate::AxiamError;
 
 /// What reconciling one spec would do.
@@ -45,6 +45,10 @@ pub enum Target {
     UserRole,
     /// A user's membership of a group.
     GroupMember,
+    /// A service account (contract 1.51).
+    ServiceAccount,
+    /// A role assigned to a service account (contract 1.51).
+    ServiceAccountRole,
 }
 
 /// One step of a plan.
@@ -62,9 +66,10 @@ pub struct PlannedAction {
 
 /// The ordered set of actions that would reconcile a manifest.
 ///
-/// Ordering is derived, not incidental: resources (parents before children),
-/// then scopes, permissions, roles, role grants, groups, group bindings,
-/// users, and finally the user bindings that need all of the above to exist.
+/// Ordering is derived, not incidental (§27.6 rule 5): resources (parents
+/// before children), then scopes, permissions, roles, role grants, groups,
+/// group bindings, users and their bindings, and finally service accounts and
+/// theirs.
 /// Two plans over unchanged state are equal, in the same order (§27.6 rule 8)
 /// — a plan that reorders between runs cannot be diffed, and diffing it is
 /// most of the reason it exists.
@@ -100,15 +105,57 @@ impl ManagementPlan {
 pub enum Outcome {
     /// The step ran and the thing now exists.
     Created,
+    /// A service account was created, and this is what the server returned —
+    /// **including its `client_secret`, which no later read returns** (§27.5
+    /// rules 3 and 5). Kept on the report even when a later step fails.
+    CreatedServiceAccount(CreatedServiceAccount),
     /// The step ran and the thing was updated.
     Updated,
     /// A no-op step; nothing was sent.
     Unchanged,
     /// The step failed. Everything before it has already happened.
     Failed(String),
+    /// A role binding's `Update` failed at its re-assignment (§27.6.1 item 2).
+    ///
+    /// The previous assignment had already been removed, so `apply` tried to
+    /// assign it again. `restore` says how that went: `Ok` means the subject
+    /// holds the role exactly as before; `Err` means it holds **no** such role
+    /// now, and says why.
+    BindingUpdateFailed {
+        /// Why the new assignment was refused.
+        error: String,
+        /// Whether the previous assignment was restored.
+        restore: Result<(), String>,
+    },
     /// The step was never attempted, because an earlier one failed.
     NotAttempted,
 }
+
+/// The server's answer to a service-account `Create`, carried on
+/// [`Outcome::CreatedServiceAccount`].
+///
+/// Equality compares the account's identity — `id` and `client_id` — and
+/// **never** the secret: comparing secrets is a constant-time operation with a
+/// different purpose, and `Sensitive` deliberately has no `PartialEq`.
+#[derive(Debug, Clone)]
+pub struct CreatedServiceAccount(pub Box<crate::management::models::ServiceAccountCreatedResponse>);
+
+impl CreatedServiceAccount {
+    /// The created account, `client_secret` included (a
+    /// [`Sensitive`](crate::Sensitive), redacted in every rendering).
+    #[must_use]
+    pub fn account(&self) -> &crate::management::models::ServiceAccountCreatedResponse {
+        &self.0
+    }
+}
+
+impl PartialEq for CreatedServiceAccount {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id && self.0.client_id == other.0.client_id
+    }
+}
+
+impl Eq for CreatedServiceAccount {}
 
 /// The result of applying a manifest.
 ///
@@ -132,6 +179,26 @@ impl ApplyReport {
             .iter()
             .find_map(|(action, outcome)| match outcome {
                 Outcome::Failed(message) => Some((action, message.as_str())),
+                Outcome::BindingUpdateFailed { error, .. } => Some((action, error.as_str())),
+                _ => None,
+            })
+    }
+
+    /// Every service account this apply created, with the one-time secret the
+    /// server returned for it — including those created before a later step
+    /// failed (§27.5 rule 5).
+    pub fn created_service_accounts(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &PlannedAction,
+            &crate::management::models::ServiceAccountCreatedResponse,
+        ),
+    > {
+        self.steps
+            .iter()
+            .filter_map(|(action, outcome)| match outcome {
+                Outcome::CreatedServiceAccount(created) => Some((action, created.account())),
                 _ => None,
             })
     }
@@ -145,7 +212,12 @@ impl ApplyReport {
     pub fn changed(&self) -> usize {
         self.steps
             .iter()
-            .filter(|(_, o)| matches!(o, Outcome::Created | Outcome::Updated))
+            .filter(|(_, o)| {
+                matches!(
+                    o,
+                    Outcome::Created | Outcome::CreatedServiceAccount(_) | Outcome::Updated
+                )
+            })
             .count()
     }
 }
@@ -159,6 +231,7 @@ pub(crate) struct Resolved {
     pub roles: HashMap<String, Uuid>,
     pub groups: HashMap<String, Uuid>,
     pub users: HashMap<String, Uuid>,
+    pub service_accounts: HashMap<String, Uuid>,
 }
 
 /// Reject a manifest that cannot be reconciled, before any request is made.
@@ -238,25 +311,49 @@ pub(crate) fn validate(manifest: &ManagementManifest) -> Result<(), AxiamError> 
             }
         }
     }
-    for group in &manifest.groups {
-        for role in &group.roles {
-            if !role_keys.contains(role.as_str()) {
-                problems.push(format!(
-                    "group {:?} is assigned role {role:?}, which no role declares",
-                    group.key
-                ));
-            }
-        }
+    duplicates(
+        "service account",
+        manifest.service_accounts.iter().map(|a| &a.key),
+        &mut problems,
+    );
+    // A service account's name is its natural key, and the server does not
+    // enforce it: two specs with one name would create two accounts, and the
+    // next plan could no longer tell them apart.
+    duplicates(
+        "service account name",
+        manifest.service_accounts.iter().map(|a| &a.name),
+        &mut problems,
+    );
+
+    let global_roles: HashSet<&str> = manifest
+        .roles
+        .iter()
+        .filter(|r| r.is_global)
+        .map(|r| r.key.as_str())
+        .collect();
+    let subjects = manifest
+        .groups
+        .iter()
+        .map(|g| ("group", &g.key, &g.roles))
+        .chain(manifest.users.iter().map(|u| ("user", &u.key, &u.roles)))
+        .chain(
+            manifest
+                .service_accounts
+                .iter()
+                .map(|a| ("service account", &a.key, &a.roles)),
+        );
+    for (kind, subject, bindings) in subjects {
+        check_bindings(
+            kind,
+            subject,
+            bindings,
+            &role_keys,
+            &resource_keys,
+            &global_roles,
+            &mut problems,
+        );
     }
     for user in &manifest.users {
-        for role in &user.roles {
-            if !role_keys.contains(role.as_str()) {
-                problems.push(format!(
-                    "user {:?} is assigned role {role:?}, which no role declares",
-                    user.key
-                ));
-            }
-        }
         for group in &user.groups {
             if !group_keys.contains(group.as_str()) {
                 problems.push(format!(
@@ -279,6 +376,54 @@ pub(crate) fn validate(manifest: &ManagementManifest) -> Result<(), AxiamError> 
             problems.len(),
             problems.join("; ")
         )))
+    }
+}
+
+/// The §27.6.1 item 2 rules for one subject's role bindings.
+fn check_bindings(
+    kind: &str,
+    subject: &str,
+    bindings: &[RoleBinding],
+    role_keys: &HashSet<&str>,
+    resource_keys: &HashSet<&str>,
+    global_roles: &HashSet<&str>,
+    problems: &mut Vec<String>,
+) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for binding in bindings {
+        let role = binding.role();
+        if !role_keys.contains(role) {
+            problems.push(format!(
+                "{kind} {subject:?} is assigned role {role:?}, which no role declares"
+            ));
+        }
+        if let Some(resource) = binding.resource()
+            && !resource_keys.contains(resource)
+        {
+            problems.push(format!(
+                "{kind} {subject:?} is assigned role {role:?} at resource {resource:?}, which no \
+                 resource declares"
+            ));
+        }
+        // The server keys an assignment on (subject, role) — `has_role` is
+        // UNIQUE(in, out), a repeat is a 409 — so one role bound twice to one
+        // subject is a state it cannot hold, at two resources or once plain and
+        // once scoped alike.
+        if !seen.insert(role) {
+            problems.push(format!(
+                "{kind} {subject:?} binds role {role:?} more than once; a subject holds a role at \
+                 most once, whatever the resource (the server keys assignments on subject and \
+                 role, and answers 409 to a second)"
+            ));
+        }
+        // The server refuses this with 400; §27.6.1 lets an SDK say so first
+        // when the role is in the manifest.
+        if !binding.inherit() && global_roles.contains(role) {
+            problems.push(format!(
+                "{kind} {subject:?} binds global role {role:?} with inherit: false; a global role \
+                 applies everywhere and ignores the resource, so the server refuses the flag"
+            ));
+        }
     }
 }
 
