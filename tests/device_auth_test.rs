@@ -11,6 +11,7 @@
 mod management_support;
 
 use axiam_sdk::AxiamError;
+use axiam_sdk::Sensitive;
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::management::PageRequest;
 use serde_json::json;
@@ -366,4 +367,236 @@ async fn a_later_401_on_the_device_token_does_not_refresh() {
         "§6.1 rule 6: nothing for the guard to spend"
     );
     assert_eq!(requests_to(&server, "/api/v1/groups").await.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// C-12 N4.3 — the self-service builders (`account_post`, `webauthn_post`,
+// `logout`) must present the device credential and withhold a stale cookie,
+// exactly as management/authz already do (`client.rs::session_credential`).
+// ---------------------------------------------------------------------------
+
+/// `mfa_setup_enroll` goes through `account_post` (`src/rest/account.rs`),
+/// one of the self-service builders that predates the §6.1 device credential.
+#[tokio::test]
+async fn account_post_presents_the_device_credential_and_withholds_the_cookie() {
+    let server = MockServer::start().await;
+    let _ = logged_in_client_as(
+        &server,
+        json!({ "id": Uuid::new_v4(), "username": "u", "email": "u@example.com" }),
+    )
+    .await;
+    let token = device_token();
+    mount_device_login(&server, &token).await;
+    mount(
+        &server,
+        "POST",
+        "/api/v1/auth/mfa/setup/enroll",
+        200,
+        r#"{"secret_base32": "JBSWY3DP", "totp_uri": "otpauth://totp/x"}"#,
+    )
+    .await;
+
+    let client = device_client(&server.uri());
+    client
+        .login("u@example.com", &Uuid::new_v4().to_string())
+        .await
+        .expect("cookie session");
+    client.authenticate_device().await.expect("device login");
+    client
+        .mfa_setup_enroll(&Sensitive::new("setup-token".to_string()))
+        .await
+        .expect("enroll");
+
+    let sent = &requests_to(&server, "/api/v1/auth/mfa/setup/enroll").await[0];
+    let cookies = header(sent, "cookie").unwrap_or("");
+    assert!(
+        !cookies.contains("axiam_access"),
+        "the previous session's cookie must be withheld: {cookies:?}"
+    );
+    assert_eq!(
+        header(sent, "authorization"),
+        Some(format!("Bearer {token}").as_str())
+    );
+}
+
+/// The webauthn ceremony starts (`webauthn_post`, `src/rest/webauthn.rs`)
+/// have the same gap.
+#[tokio::test]
+async fn webauthn_post_presents_the_device_credential_and_withholds_the_cookie() {
+    let server = MockServer::start().await;
+    let _ = logged_in_client_as(
+        &server,
+        json!({ "id": Uuid::new_v4(), "username": "u", "email": "u@example.com" }),
+    )
+    .await;
+    let token = device_token();
+    mount_device_login(&server, &token).await;
+    mount(
+        &server,
+        "POST",
+        "/api/v1/auth/webauthn/authenticate/start",
+        200,
+        r#"{"challenge": {}, "state_token": "state-1"}"#,
+    )
+    .await;
+
+    let client = device_client(&server.uri());
+    client
+        .login("u@example.com", &Uuid::new_v4().to_string())
+        .await
+        .expect("cookie session");
+    client.authenticate_device().await.expect("device login");
+    client
+        .webauthn_authenticate_start(&Sensitive::new("challenge-token".to_string()))
+        .await
+        .expect("start");
+
+    let sent = &requests_to(&server, "/api/v1/auth/webauthn/authenticate/start").await[0];
+    let cookies = header(sent, "cookie").unwrap_or("");
+    assert!(
+        !cookies.contains("axiam_access"),
+        "the previous session's cookie must be withheld: {cookies:?}"
+    );
+    assert_eq!(
+        header(sent, "authorization"),
+        Some(format!("Bearer {token}").as_str())
+    );
+}
+
+/// `logout()` itself must not leak the prior session's cookie once a device
+/// credential has been adopted.
+#[tokio::test]
+async fn logout_presents_the_device_credential_and_withholds_the_cookie() {
+    let server = MockServer::start().await;
+    let _ = logged_in_client_as(
+        &server,
+        json!({ "id": Uuid::new_v4(), "username": "u", "email": "u@example.com" }),
+    )
+    .await;
+    let token = device_token();
+    mount_device_login(&server, &token).await;
+    mount(&server, "POST", "/api/v1/auth/logout", 204, "").await;
+
+    let client = device_client(&server.uri());
+    client
+        .login("u@example.com", &Uuid::new_v4().to_string())
+        .await
+        .expect("cookie session");
+    client.authenticate_device().await.expect("device login");
+    client.logout().await.expect("logout");
+
+    let sent = &requests_to(&server, "/api/v1/auth/logout").await[0];
+    let cookies = header(sent, "cookie").unwrap_or("");
+    assert!(
+        !cookies.contains("axiam_access"),
+        "the previous session's cookie must be withheld: {cookies:?}"
+    );
+    assert_eq!(
+        header(sent, "authorization"),
+        Some(format!("Bearer {token}").as_str())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C-12 N4.4 — lifecycle: a later `login()` replaces the device credential,
+// and `logout()` releases it. Regression coverage: code reading shows both
+// directions already correct (`absorb_session_cookies` clears the bearer
+// flag; `logout` calls `token_manager().clear()`), so this pins the already-
+// right behaviour rather than proving a defect.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn login_after_a_device_login_replaces_the_device_credential() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    mount_device_login(&server, &device_token()).await;
+    let access_token = sign_claims(&json!({
+        "sub": Uuid::new_v4().to_string(),
+        "tenant_id": TENANT_ID,
+        "org_id": ORG_ID,
+        "iss": "axiam-test",
+        "iat": 0,
+        "exp": 9_999_999_999i64,
+        "jti": Uuid::new_v4().to_string(),
+    }));
+    let mut response = ResponseTemplate::new(200).set_body_json(json!({
+        "user": { "id": Uuid::new_v4(), "username": "u", "email": "u@example.com" },
+        "session_id": Uuid::new_v4(),
+        "expires_in": 900,
+    }));
+    for cookie in [
+        format!("axiam_access={access_token}; Path=/; HttpOnly"),
+        "axiam_refresh=test-refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=test-csrf-token; Path=/".to_string(),
+    ] {
+        response = response.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    mount(
+        &server,
+        "GET",
+        "/api/v1/groups",
+        200,
+        r#"{"items": [], "total": 0, "offset": 0, "limit": 50}"#,
+    )
+    .await;
+
+    let client = device_client(&server.uri());
+    client.authenticate_device().await.expect("device login");
+    client
+        .login("u@example.com", "correct horse")
+        .await
+        .expect("login");
+    client.groups().list(PageRequest::first(50)).await.unwrap();
+
+    let sent = &requests_to(&server, "/api/v1/groups").await[0];
+    assert!(
+        header(sent, "authorization").is_none(),
+        "a later login must replace the device credential"
+    );
+    assert!(
+        header(sent, "cookie")
+            .unwrap_or("")
+            .contains("axiam_access"),
+        "the new cookie session must be used"
+    );
+}
+
+#[tokio::test]
+async fn logout_after_a_device_login_releases_the_device_credential() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    mount_device_login(&server, &device_token()).await;
+    mount(&server, "POST", "/api/v1/auth/logout", 204, "").await;
+    mount(
+        &server,
+        "GET",
+        "/api/v1/groups",
+        200,
+        r#"{"items": [], "total": 0, "offset": 0, "limit": 50}"#,
+    )
+    .await;
+
+    let client = device_client(&server.uri());
+    client.authenticate_device().await.expect("device login");
+    client.logout().await.expect("logout");
+
+    // No credential of any kind survives `logout()`: neither the device
+    // bearer nor a cookie session, so the management gate refuses
+    // client-side rather than letting the call ride anonymously — the
+    // clearest proof the device credential was actually released.
+    let err = client
+        .groups()
+        .list(PageRequest::first(50))
+        .await
+        .expect_err("no session remains after logout");
+    assert!(matches!(err, AxiamError::Auth { .. }), "{err:?}");
+    assert!(
+        requests_to(&server, "/api/v1/groups").await.is_empty(),
+        "the refusal must be client-side, with no wire call"
+    );
 }

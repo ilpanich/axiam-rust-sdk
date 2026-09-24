@@ -794,6 +794,11 @@ impl AxiamClient {
             .http()
             .post(self.url(LOGOUT_PATH))
             .tenant_headers_of(self)
+            // CONTRACT 1.52 N4.3 (C-12): present the held device credential
+            // and withhold a stale cookie — logout must identify the session
+            // it is closing by the credential actually held, not by whatever
+            // cookie happens to still be in the jar.
+            .session_credential_of(self)
             .maybe_csrf_header(self)
             .json(&body)
             .send()

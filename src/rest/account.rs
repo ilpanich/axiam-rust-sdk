@@ -485,6 +485,11 @@ impl AxiamClient {
         self.http()
             .post(self.url(path))
             .maybe_csrf_header(self)
+            // CONTRACT 1.52 N4.3 (C-12): present the held device credential
+            // and withhold a stale cookie, exactly as management/authz do
+            // (`client.rs::session_credential`) — a self-service call is not
+            // exempt from §6.1 rule 6 just because it predates it.
+            .session_credential_of(self)
             // §5.2.2 rule 4: sent "as normal" on self-service calls too, and
             // the server decides which tenant a call about the caller's own id
             // belongs to. Only when this handle acts on a tenant.
