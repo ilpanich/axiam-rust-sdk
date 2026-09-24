@@ -236,6 +236,47 @@ async fn grpc_check_access() {
     );
 }
 
+/// CONTRACT 1.52 N4.5 (C-12): a device (or otherwise non-refreshable)
+/// credential never refreshes, on gRPC either — a `Code::Unauthenticated`
+/// on it must surface the server's own message, not the refresh guard's
+/// generic "no refresh token available" text, and must never invoke the
+/// refresh closure at all.
+#[tokio::test]
+async fn a_device_shaped_credential_never_refreshes_on_grpc_and_surfaces_the_servers_message() {
+    let (addr, _call_count) = start_test_server().await;
+    let tenant_id = Uuid::new_v4();
+
+    let token_manager = Arc::new(TokenManager::new());
+    token_manager
+        .set_tokens(
+            Sensitive::new("device-access-token".to_string()),
+            None, // no refresh token — the §6.1 device credential shape
+            Some(9_999_999_999),
+            Some(tenant_id),
+        )
+        .await;
+    let channel = build_channel(&format!("http://{addr}"), &GrpcChannelConfig::default())
+        .expect("build shared lazy channel");
+    let refresh_fn: axiam_sdk::grpc::RefreshFn = Arc::new(|_refresh_token: String| {
+        Box::pin(async move {
+            panic!("a device credential must never drive the refresh guard's wire call");
+        })
+    });
+    let client = AuthzGrpcClient::new(channel, token_manager, tenant_id, refresh_fn);
+
+    let err = client
+        .check_access(sample_request("unauthenticated-once", tenant_id))
+        .await
+        .expect_err("UNAUTHENTICATED with no refresh token must be an error");
+
+    assert!(matches!(err, AxiamError::Auth { .. }), "{err:?}");
+    assert!(
+        err.to_string().contains("token expired"),
+        "the server's own message must be surfaced verbatim, not the refresh guard's \
+         \"no refresh token available\": {err}"
+    );
+}
+
 #[tokio::test]
 async fn grpc_batch_check_access_preserves_input_order() {
     let (addr, _call_count) = start_test_server().await;

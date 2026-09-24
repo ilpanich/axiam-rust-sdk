@@ -103,7 +103,7 @@ impl UserInfoGrpcClient {
         match self.try_get_user_info().await {
             Ok(resp) => Ok(resp.into()),
             Err(status) if status.code() == Code::Unauthenticated => self
-                .refresh_and_retry(|| self.try_get_user_info())
+                .refresh_and_retry(status, || self.try_get_user_info())
                 .await
                 .map(Into::into),
             Err(status) => Err(status_to_axiam_error(status)),
@@ -121,11 +121,20 @@ impl UserInfoGrpcClient {
     /// Drive the shared single-flight refresh (§9) then retry `attempt` exactly
     /// once. Mirrors `AuthzGrpcClient::refresh_and_retry` — the interceptor is
     /// synchronous and must never touch the async refresh mutex (Pitfall 3).
-    async fn refresh_and_retry<T, F, Fut>(&self, attempt: F) -> Result<T, AxiamError>
+    async fn refresh_and_retry<T, F, Fut>(
+        &self,
+        original: tonic::Status,
+        attempt: F,
+    ) -> Result<T, AxiamError>
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T, tonic::Status>>,
     {
+        // CONTRACT 1.52 N4.5 (C-12): see `AuthzGrpcClient::refresh_and_retry`.
+        if !self.token_manager.has_refresh_token().await {
+            return Err(status_to_axiam_error(original));
+        }
+
         let observed = self
             .token_manager
             .cached_access_token()

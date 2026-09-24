@@ -226,7 +226,7 @@ impl AuthzGrpcClient {
         match self.try_check_access(wire_request.clone()).await {
             Ok(resp) => Ok(resp.into()),
             Err(status) if status.code() == Code::Unauthenticated => self
-                .refresh_and_retry(|| self.try_check_access(wire_request.clone()))
+                .refresh_and_retry(status, || self.try_check_access(wire_request.clone()))
                 .await
                 .map(Into::into),
             Err(status) => Err(status_to_axiam_error(status)),
@@ -250,7 +250,7 @@ impl AuthzGrpcClient {
         match self.try_batch_check(wire_request.clone()).await {
             Ok(results) => Ok(results.into_iter().map(Into::into).collect()),
             Err(status) if status.code() == Code::Unauthenticated => self
-                .refresh_and_retry(|| self.try_batch_check(wire_request.clone()))
+                .refresh_and_retry(status, || self.try_batch_check(wire_request.clone()))
                 .await
                 .map(|results| results.into_iter().map(Into::into).collect()),
             Err(status) => Err(status_to_axiam_error(status)),
@@ -282,11 +282,24 @@ impl AuthzGrpcClient {
     /// Drive the shared single-flight refresh (§9) then retry `attempt`
     /// exactly once. The interceptor itself never performs this — it is
     /// synchronous and must not touch the async refresh mutex (Pitfall 3).
-    async fn refresh_and_retry<T, F, Fut>(&self, attempt: F) -> Result<T, AxiamError>
+    async fn refresh_and_retry<T, F, Fut>(
+        &self,
+        original: tonic::Status,
+        attempt: F,
+    ) -> Result<T, AxiamError>
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T, tonic::Status>>,
     {
+        // CONTRACT 1.52 N4.5 (C-12): a credential with no refresh token
+        // (the §6.1 device shape) is never refreshed, on either transport.
+        // With nothing to spend, surface the server's own UNAUTHENTICATED
+        // message rather than entering the guard, which would return its
+        // own generic "no refresh token available" text instead.
+        if !self.token_manager.has_refresh_token().await {
+            return Err(status_to_axiam_error(original));
+        }
+
         let observed = self
             .token_manager
             .cached_access_token()
