@@ -18,6 +18,7 @@ const LOGIN_PATH: &str = "/api/v1/auth/login";
 const MFA_VERIFY_PATH: &str = "/api/v1/auth/mfa/verify";
 const REFRESH_PATH: &str = "/api/v1/auth/refresh";
 const LOGOUT_PATH: &str = "/api/v1/auth/logout";
+const DEVICE_PATH: &str = "/api/v1/auth/device";
 
 // ---------------------------------------------------------------------------
 // Request bodies (mirror crates/axiam-api-rest/src/handlers/auth.rs)
@@ -166,6 +167,47 @@ struct MfaRequiredResponseWire {
 #[derive(Debug, Deserialize)]
 struct RefreshSuccessResponseWire {
     expires_in: u64,
+}
+
+/// `200 OK` body from `/api/v1/auth/device` (server `DeviceAuthResponse`).
+///
+/// No `Debug`: it holds the raw token until [`DeviceToken`] wraps it.
+#[derive(Deserialize)]
+struct DeviceAuthResponseWire {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+}
+
+/// The result of [`AxiamClient::authenticate_device`] — CONTRACT.md §6.1
+/// rule 6.
+///
+/// The one place in this SDK a token is handed back in a value rather than
+/// kept only in the cookie jar, because the device login delivers it in the
+/// response body and sets no cookie. It is also adopted as the client's own
+/// credential, so most callers never need to read it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DeviceToken {
+    /// The access token. [`Sensitive`] (§7): redacted in every rendering.
+    ///
+    /// **Certificate-bound** when AXIAM itself terminated the TLS handshake
+    /// (§6.1 rule 9): it carries `cnf: {"x5t#S256": …}` naming the certificate
+    /// that obtained it, and is refused on any connection that does not present
+    /// that certificate. Keep using it through *this* client, which presents
+    /// the certificate on REST and gRPC alike; handing it to a second client
+    /// without the certificate is the theft scenario the binding exists to
+    /// close, and fails with `401`.
+    pub access_token: Sensitive<String>,
+    /// Always `"Bearer"`, bound or not — `token_type` does not say whether a
+    /// token is bound (§1.1.1 rule 5). The `cnf` claim does.
+    pub token_type: String,
+    /// The access-token lifetime in seconds (the server's default is 900).
+    ///
+    /// There is **no refresh token** (§6.1 rule 6). Call
+    /// [`AxiamClient::authenticate_device`] again before this runs out; it
+    /// costs one TLS handshake.
+    pub expires_in: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +485,8 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
     // not inherit the previous principal's reach as a gate on
     // `acting_tenant` (CONTRACT.md §5.2 rule 1).
     client.set_principal_scope(None);
+    // A cookie session again: requests carry the jar, not a bearer header.
+    client.set_bearer_credential(false);
 
     Ok(claims)
 }
@@ -765,7 +809,138 @@ impl AxiamClient {
 
         self.token_manager().clear().await;
         self.set_principal_scope(None);
+        self.set_bearer_credential(false);
         Ok(())
+    }
+
+    /// `POST /api/v1/auth/device` — log in as the service account bound to
+    /// this client's certificate (CONTRACT.md §6.1 rules 6–10, contract 1.51).
+    ///
+    /// The certificate is the credential: the request has no body, and the
+    /// server identifies the caller from the client certificate it verified
+    /// during the TLS handshake. Configure it with
+    /// [`AxiamClientBuilder::with_client_cert`].
+    ///
+    /// On success the token is **adopted** as this client's credential, as a
+    /// `login` result is: management calls and `check_access` that follow send
+    /// it as `Authorization: Bearer`. It is also returned, as a
+    /// [`DeviceToken`].
+    ///
+    /// ```no_run
+    /// # use axiam_sdk::client::AxiamClient;
+    /// # async fn demo(cert_pem: &[u8], key_pem: &[u8]) -> Result<(), axiam_sdk::AxiamError> {
+    /// let device = AxiamClient::builder()
+    ///     .base_url("https://iam.example.com")?
+    ///     .tenant_id(uuid::Uuid::nil())
+    ///     .with_client_cert(cert_pem, key_pem)?
+    ///     .build()?;
+    /// let token = device.authenticate_device().await?;
+    /// println!("valid for {} s", token.expires_in);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # What the token is, and is not
+    ///
+    /// * A **service-account** token (`aud` = `axiam:m2m`, §6.1 rule 10). It is
+    ///   accepted by `check_access` / `batch_check` and by the §27 operations
+    ///   the account's roles authorize (§27.13 S-9); any other route answers
+    ///   `401` for an audience mismatch.
+    /// * **Certificate-bound** when AXIAM terminated TLS (§6.1 rule 9), so it
+    ///   works only on connections that present the same certificate. This
+    ///   client presents it on every REST request and on any gRPC channel built
+    ///   from [`AxiamClient::grpc_channel_config`]. A gRPC listener that does
+    ///   not request client certificates — the server's default,
+    ///   `AXIAM__GRPC_TLS_CLIENT_AUTH=off` — refuses a bound token on every call.
+    /// * **Not refreshable** (§6.1 rule 6). A later `401` on it is returned as
+    ///   [`AxiamError::Auth`] without any refresh attempt; recover by calling
+    ///   this method again.
+    ///
+    /// # Errors
+    ///
+    /// * [`AxiamError::Auth`], **with no wire call**, when this client was built
+    ///   without [`AxiamClientBuilder::with_client_cert`] (§6.1 rule 7). Without
+    ///   a certificate the server can only answer `401`, so going to the wire
+    ///   would turn a configuration mistake into an authentication failure.
+    /// * [`AxiamError::Auth`] on the server's `401`, with its message verbatim:
+    ///   an unknown, untrusted, expired, revoked or unbound certificate, and a
+    ///   `Server`-type certificate, are all refused that way (§6.1 rule 8). This
+    ///   *is* the login, so it never enters the §9 refresh guard.
+    /// * [`AxiamError::Network`] on a `429` — the route is rate-limited per
+    ///   client IP (default 60 per minute), and that is not an authentication
+    ///   failure — and on any other non-2xx or transport failure. Like every
+    ///   login, it is made **exactly once** (§16).
+    ///
+    /// [`AxiamClientBuilder::with_client_cert`]: crate::client::AxiamClientBuilder::with_client_cert
+    pub async fn authenticate_device(&self) -> Result<DeviceToken, AxiamError> {
+        self.ensure_open()?;
+        // §6.1 rule 7: unreachable without a certificate, and refused before
+        // the network rather than by it.
+        if !self.has_client_certificate() {
+            return Err(AxiamError::auth(
+                "authenticate_device: this client has no client certificate — configure one \
+                 with AxiamClientBuilder::with_client_cert (CONTRACT.md §6.1 rule 7)",
+            ));
+        }
+        // §17.1 rule 9: a credential change drops every memoised decision.
+        self.decision_memo().clear();
+
+        let response = self
+            .http()
+            .post(self.url(DEVICE_PATH))
+            .header("X-Tenant-ID", self.tenant_header_value())
+            // The certificate is the credential. Withhold the jar so a cookie
+            // session this client may still hold does not ride along with it.
+            .header(reqwest::header::COOKIE, "")
+            .send()
+            .await
+            .map_err(|e| AxiamError::Network {
+                message: format!("authenticate_device request failed: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+
+        let status = response.status().as_u16();
+        if status != 200 {
+            // §6.1 rule 8: `401` → `Auth`, verbatim; `429` and the rest follow
+            // the ordinary §2 mapping. Neither reaches the refresh guard.
+            return Err(map_error_response(status, response).await);
+        }
+        let wire: DeviceAuthResponseWire = response.json().await.map_err(deser_err)?;
+        let access = Sensitive::new(wire.access_token);
+
+        // Adopt it (§6.1 rule 6), as `absorb_session_cookies` adopts a login:
+        // decode the claims for `exp` and the tenant, then replace whatever
+        // credential this client held. `clear` first, because `set_tokens`
+        // keeps an existing refresh token when handed none, and a previous
+        // cookie session's refresh token must not survive into a device
+        // credential that has no refresh at all.
+        let claims = self
+            .jwks_verifier()
+            .verify_session_token(access.expose())
+            .await?;
+        let tenant_id = Uuid::parse_str(&claims.tenant_id).ok();
+        if let Some(org_id) = claims
+            .org_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            self.set_resolved_org_id(org_id);
+        }
+        let manager = self.token_manager();
+        manager.clear().await;
+        manager
+            .set_tokens(access.clone_inner(), None, Some(claims.exp), tenant_id)
+            .await;
+        self.set_bearer_credential(true);
+        // A device holds no login result: nothing gates `acting_tenant` now,
+        // and the server's answer decides (§5.2 rule 1).
+        self.set_principal_scope(None);
+
+        Ok(DeviceToken {
+            access_token: access,
+            token_type: wire.token_type,
+            expires_in: wire.expires_in,
+        })
     }
 
     fn build_login_body(&self, email: &str, password: &str) -> LoginRequestBody {
@@ -827,6 +1002,9 @@ pub(crate) trait TenantHeadersExt {
     fn tenant_headers_of(self, client: &AxiamClient) -> Self;
     /// `X-Axiam-Tenant` only — see [`AxiamClient::acting_tenant_header`].
     fn acting_tenant_of(self, client: &AxiamClient) -> Self;
+    /// The held credential when it is a bearer token — see
+    /// [`AxiamClient::session_credential`].
+    fn session_credential_of(self, client: &AxiamClient) -> Self;
 }
 
 impl TenantHeadersExt for reqwest::RequestBuilder {
@@ -836,6 +1014,10 @@ impl TenantHeadersExt for reqwest::RequestBuilder {
 
     fn acting_tenant_of(self, client: &AxiamClient) -> Self {
         client.acting_tenant_header(self)
+    }
+
+    fn session_credential_of(self, client: &AxiamClient) -> Self {
+        client.session_credential(self)
     }
 }
 

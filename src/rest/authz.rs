@@ -307,6 +307,8 @@ impl AxiamClient {
             .post(self.authz_url(path))
             // §5 rule 2 and, when this handle acts on a tenant, §5.2 rule 1.
             .tenant_headers_of(self)
+            // §6.1 rule 6: a device token, when that is the credential held.
+            .session_credential_of(self)
             // SDK-Q04: forward the captured `X-CSRF-Token` on this POST, the
             // same way `refresh`/`logout` do (§3) — the server's CSRF
             // protection covers state-changing verbs including authz POSTs.

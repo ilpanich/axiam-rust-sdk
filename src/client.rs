@@ -649,6 +649,7 @@ reason: None,
                 ),
                 closed: std::sync::atomic::AtomicBool::new(false),
                 principal_scope: std::sync::RwLock::new(None),
+                bearer_credential: std::sync::atomic::AtomicBool::new(false),
             }),
             acting_tenant: self.acting_tenant,
         })
@@ -749,6 +750,17 @@ pub(crate) struct AxiamClientInner {
     /// the server had said "not organization-level" (§5.2 rule 1: a client
     /// holding no login result has nothing to gate on).
     pub(crate) principal_scope: std::sync::RwLock<Option<PrincipalScope>>,
+    /// `true` while the credential held by `token_manager` came from a response
+    /// **body** — the §6.1 device login — rather than from the `axiam_access`
+    /// cookie.
+    ///
+    /// Such a credential reaches the server only as an `Authorization: Bearer`
+    /// header, and only with the jar's cookies withheld: the server reads the
+    /// `axiam_access` cookie *before* the header, so a leftover cookie session
+    /// would otherwise silently win and the request would run as whoever that
+    /// session belonged to. It also has no refresh token, so a `401` on it is
+    /// surfaced rather than sent to the §9 guard (§6.1 rule 6).
+    pub(crate) bearer_credential: std::sync::atomic::AtomicBool,
     /// The challenge token from the most recent `login()` call that
     /// returned `mfa_required: true`, so `verify_mfa(code)` can complete
     /// the two-phase flow with only a `code` argument, matching
@@ -959,6 +971,48 @@ impl AxiamClient {
         AxiamClient {
             inner: Arc::clone(&self.inner),
             acting_tenant: None,
+        }
+    }
+
+    /// Whether this client was built with a §6.1 client certificate.
+    pub(crate) fn has_client_certificate(&self) -> bool {
+        self.inner.client_cert_pem.is_some() && self.inner.client_key.is_some()
+    }
+
+    /// Whether the credential held is a body-delivered bearer token (the §6.1
+    /// device login) rather than a cookie session.
+    pub(crate) fn holds_bearer_credential(&self) -> bool {
+        self.inner
+            .bearer_credential
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record which kind of credential is now held.
+    pub(crate) fn set_bearer_credential(&self, bearer: bool) {
+        self.inner
+            .bearer_credential
+            .store(bearer, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Attach the held credential when it is a bearer token.
+    ///
+    /// A cookie session needs nothing here: the jar carries it. A device token
+    /// travels as `Authorization: Bearer`, with an explicit empty `Cookie`
+    /// header so `reqwest`'s jar adds nothing — the server reads the
+    /// `axiam_access` cookie before the header, and a cookie left over from an
+    /// earlier session must not quietly become the identity of this request.
+    pub(crate) fn session_credential(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        if !self.holds_bearer_credential() {
+            return request;
+        }
+        match self.inner.token_manager.cached_access_token() {
+            Some(token) => request
+                .header(reqwest::header::COOKIE, "")
+                .bearer_auth(token.expose()),
+            None => request,
         }
     }
 

@@ -172,6 +172,10 @@ impl AxiamClient {
             // once and retry once. `refresh()` is itself single-flight, so a
             // burst of concurrent management calls produces one refresh wire
             // call and shares its outcome (§9 rule 2).
+            // §6.1 rule 6: a device credential has no refresh token, so there
+            // is nothing for the guard to spend; the `401` is the answer, and
+            // `authenticate_device` again is the recovery.
+            Err(err @ AxiamError::Auth { .. }) if self.holds_bearer_credential() => Err(err),
             Err(AxiamError::Auth { .. }) => {
                 self.refresh().await?;
                 self.management_attempt(call, url, body, 1)
@@ -223,6 +227,8 @@ impl AxiamClient {
             // §5 rule 2: on every outgoing request, without exception — and
             // §5.2 rule 1's `X-Axiam-Tenant` when this handle acts on a tenant.
             .tenant_headers_of(self)
+            // §6.1 rule 6: a device token, when that is the credential held.
+            .session_credential_of(self)
             // §3: the double-submit header rides every state-changing verb.
             .maybe_csrf_header(self);
         if let Some(b) = body {

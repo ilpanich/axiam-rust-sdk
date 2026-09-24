@@ -62,6 +62,10 @@ async fn main() -> Result<(), AxiamError> {
     // and later decide you do, the only way back is `rotate_secret`.
 
     println!("\n3. generate the device certificate");
+    // `issuer_ca_id` is the **tenant's signing CA**, which chains to the
+    // organization CA anchored in step 1. A tenant principal may not issue
+    // directly under the organization CA (the server answers 404), and a
+    // service account never may (CONTRACT.md §6.1, contract 1.51).
     print_call(
         "POST /api/v1/certificates",
         "certificates().generate(&GenerateCertificateRequest { cert_type: Device, .. })",
@@ -91,15 +95,18 @@ async fn main() -> Result<(), AxiamError> {
     //         .tenant_id(tenant_id)
     //         .with_client_cert(cert_pem.as_bytes(), key_pem.as_bytes())?
     //         .build()?;
+    //     device.authenticate_device().await?;
     //     let decision = device.check_access("telemetry:publish", resource_id, None).await?;
     //
-    // §6.1: the certificate is presented at the TLS layer on every request,
-    // including the gRPC channel, and the server maps it to the service account
-    // bound in step 4.
+    // §6.1 rules 6-10: the certificate is presented at the TLS layer on every
+    // request, including the gRPC channel. `authenticate_device()` exchanges it
+    // for a token of the service account bound in step 4 — a token bound to
+    // this certificate, with no refresh. See `examples/device_mtls_login.rs`.
     print_call(
         "(TLS handshake)",
         "AxiamClient::builder().with_client_cert(cert_pem, key_pem)",
     );
+    print_call("POST /api/v1/auth/device", "device.authenticate_device()");
 
     println!("\nRotation, when the certificate nears expiry:");
     println!("   - generate a new one (step 3) and bind it (step 4) BEFORE revoking the old");
