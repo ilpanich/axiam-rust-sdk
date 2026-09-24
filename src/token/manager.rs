@@ -142,6 +142,7 @@ impl TokenManager {
     /// §9 guard, so an `UNAUTHENTICATED` on such a credential surfaces the
     /// server's own message rather than the guard's generic
     /// "no refresh token available" text.
+    #[cfg(feature = "grpc")]
     pub(crate) async fn has_refresh_token(&self) -> bool {
         self.state.lock().await.refresh.is_some()
     }
