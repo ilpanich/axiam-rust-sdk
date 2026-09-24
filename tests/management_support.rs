@@ -68,6 +68,27 @@ fn issue_test_access_token() -> String {
     jsonwebtoken::encode(&header, &claims, &key).expect("encode test access token")
 }
 
+/// Sign arbitrary claims with the harness key, so a test can mint the token a
+/// server would return — a device token with `cnf`, say — and have this
+/// harness's JWKS verify it.
+pub fn sign_claims(claims: &serde_json::Value) -> String {
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(TEST_KID.to_string());
+    let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
+    der.extend_from_slice(&TEST_ED25519_SEED);
+    let key = EncodingKey::from_ed_der(&der);
+    jsonwebtoken::encode(&header, claims, &key).expect("encode test token")
+}
+
+/// Mount the harness JWKS at `/oauth2/jwks`.
+pub async fn mount_jwks(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body()))
+        .mount(server)
+        .await;
+}
+
 fn jwks_body() -> serde_json::Value {
     json!({
         "keys": [{
@@ -85,6 +106,17 @@ fn jwks_body() -> serde_json::Value {
 /// The login mock is mounted at lowest specificity, so a test may mount its
 /// own management routes before or after without ordering trouble.
 pub async fn logged_in_client(server: &MockServer) -> AxiamClient {
+    logged_in_client_as(
+        server,
+        json!({ "id": Uuid::new_v4(), "username": "admin", "email": "admin@example.com" }),
+    )
+    .await
+}
+
+/// [`logged_in_client`], with the login response's `user` object supplied by
+/// the test — for the fields that describe the principal's reach
+/// (`organization_level`, `reachable_tenant_ids`; CONTRACT.md §5.2, §5.2.3).
+pub async fn logged_in_client_as(server: &MockServer, user: serde_json::Value) -> AxiamClient {
     Mock::given(method("GET"))
         .and(path("/oauth2/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body()))
@@ -93,7 +125,7 @@ pub async fn logged_in_client(server: &MockServer) -> AxiamClient {
 
     let access_token = issue_test_access_token();
     let mut response = ResponseTemplate::new(200).set_body_json(json!({
-        "user": { "id": Uuid::new_v4(), "username": "admin", "email": "admin@example.com" },
+        "user": user,
         "session_id": Uuid::new_v4(),
         "expires_in": 900,
     }));

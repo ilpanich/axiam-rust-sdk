@@ -11,7 +11,7 @@ pub mod webauthn;
 pub use account::{
     MfaEnrollment, PasswordResetConfirmation, PasswordResetContext, PasswordResetRequest,
 };
-pub use auth::LoginResult;
+pub use auth::{DeviceToken, LoginResult};
 pub use webauthn::{
     WebauthnChallenge, WebauthnCredential, WebauthnFailure, WebauthnLoginResult, WebauthnWorkspace,
     webauthn_response_from_json,

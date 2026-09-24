@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
+1, §6.1 rules 6–10, §10.1 rule 9, §27.6.1, §27.13). The vendored `CONTRACT.md`,
+`openapi.json` and `management-registry.json` come from axiam `56fbe44`;
+`proto/` was already identical.
+
+### Added
+
+- **Acting tenant** (§5.2 rule 1). `AxiamClientBuilder::with_acting_tenant(Uuid)`,
+  and on a client `acting_tenant(Uuid) -> Result<AxiamClient>` /
+  `clear_acting_tenant()`. Each `/api/v1` REST request of such a handle carries
+  `X-Axiam-Tenant`.
+  - The id is a `Uuid`, so a slug cannot be sent. The server ignores a value
+    that does not parse and answers for the caller's own tenant.
+  - The header is sent **only when set**. A client that never asks for it
+    sends what it sent before.
+  - The acting tenant belongs to the handle. `acting_tenant()` returns a new
+    handle over the same session, so concurrent tasks can act on different
+    tenants.
+  - Once a password or MFA login has reported the principal's reach, the
+    on-client form refuses client-side (`AxiamError::Authz`, no wire call)
+    unless the principal is `organization_level`, and refuses a tenant outside
+    `reachable_tenant_ids`. A client holding no login result lets the server's
+    `403` answer.
+  - The §17 decision memo is keyed on the acting tenant.
+  - REST-only: gRPC acts on the token's tenant, and no metadata key is
+    invented for it.
+- **`AxiamClient::authenticate_device()`**, the mTLS device login (§6.1 rules
+  6–10). It is `POST /api/v1/auth/device` with no body and returns
+  `rest::DeviceToken { access_token: Sensitive<String>, token_type, expires_in }`.
+  - It fails with `AxiamError::Auth`, **with no wire call**, on a client built
+    without `with_client_cert`.
+  - The token is adopted as the client's credential and sent as
+    `Authorization: Bearer`, with the cookie jar withheld. The server reads the
+    `axiam_access` cookie first, so a leftover session would otherwise win.
+  - It has no refresh. A `401` on it, at login or later, is surfaced, never
+    sent to the refresh guard. A `429` is not an authentication failure.
+  - New example: `examples/device_mtls_login.rs`. `examples/device_login.rs`
+    is still the RFC 8628 grant.
+- **gRPC `validate_token` / `introspect_token`** (§1.1.1, §10.3) on the new
+  `grpc::TokenGrpcClient`.
+  - Every response field is modelled, including `cnf` as
+    `Option<CnfClaim>`; absent and empty stay distinct.
+  - `status()` returns `Inactive` / `Bearer` / `SenderConstrained` /
+    `Unverifiable`, read from `cnf` and never from `token_type`.
+  - `verify_possession(PresentedProofs)` applies §10.1 rule 9. An empty
+    `CnfClaim` is refused.
+  - The inspected token is a separate, required `&Sensitive<String>`.
+  - With no caller token the call fails with no wire call. A token from
+    another tenant comes back `valid: false`; that is not an error.
+- **`JwksVerifier::verify_with_proofs(token, PresentedProofs)`**, the full
+  §10.1 set with rule-9 evidence. **`middleware::PeerCertificate`**: record the
+  verified peer certificate in `HttpServer::on_connect`, and `AxiamUser`
+  accepts a certificate-bound token that names it. `CnfClaim::verify` is the
+  one implementation of the rule-9 table, shared by local and gRPC
+  validation.
+- **Manifest additions** (§27.6.1, §27.5 rule 5).
+  - `ResourceSpec::with_metadata`, compared as the whole JSON object.
+  - `RoleBinding`, which is a role key or `{ role, resource, inherit }`, on
+    groups, users and service accounts. `inherit` is sent only when `false`.
+    One role bound twice to one subject is refused before any request. A
+    changed binding is unassign-then-assign, carries the `tenant_scope`
+    across, and restores the previous binding when the assign fails
+    (`Outcome::BindingUpdateFailed`).
+  - `ServiceAccountSpec`. It is reconciled by name, and an ambiguous name fails
+    `plan`. A `Create` carries the one-time `client_secret` on
+    `Outcome::CreatedServiceAccount` (and `ApplyReport::created_service_accounts()`),
+    kept even when a later action fails. `apply` never rotates.
+  - `manifest!` gains `metadata`, `at <resource>[, here only]` and
+    `service_account` statements.
+  - `webhooks` stays unimplemented. Contract 1.51 does not require it.
+- **Contract 1.51 model changes** (§27.13), from the regenerated surface:
+  - `CertificateType::Server`;
+  - `SubjectAltName` (`Dns` / `Ip`) and `subject_alt_names` on both leaf
+    requests;
+  - `server_cert_allowed_names` on the certificate-policy and settings DTOs;
+  - `inherit` on the three assign requests and on every assignment listing;
+  - `RoleAssignment::inherits()`, which reads an absent `inherit` as `true`.
+
+### Changed
+
+- **`X-Tenant-ID`** is now set in one place (`tenant_headers`) on the §1
+  authorization, §27 management, `refresh` and `logout` requests. The wire is
+  unchanged.
+- **A manifest binding of a plain role key over a server assignment that is
+  resource-scoped is now an `Update`.** Before, only the binding's presence was
+  compared. §27.6.1 defines the plain shape as "no resource", so the next
+  `apply` re-binds it tenant-wide.
+- `tools/gen_management.py` now emits an externally tagged `oneOf` as an enum,
+  and gives a required `inherit` a `true` default. Both are described under
+  Fixed.
+
+### Fixed
+
+- **`JwksVerifier::verify`, and so `AxiamUser`, the §11 macros and the §28 MCP
+  guard, accepted sender-constrained tokens as bearer tokens.** A token bound to
+  a certificate (`cnf.x5t#S256`, which every §6.1 device token now carries) or
+  to a DPoP key was admitted without proof of possession, against §10.1 rule 9.
+  `verify` now refuses any token carrying `cnf`, because it has no evidence to
+  check it against. See Breaking.
+- **`SubjectAltName` was generated as a struct with no fields.** It compiled
+  and serialized as `{}`, which the server refuses. It is now
+  `enum SubjectAltName { Dns(String), Ip(String) }`, externally tagged.
+- The three role-side assignment listings would have failed to decode against
+  a server older than 1.51, which omits the now-required `inherit`. The manifest
+  reads those listings to plan. Absent now reads as `true` (§27.13 S-10 rule 3).
+- `examples/sender_constrained_guard.rs` said `verify()` did not apply rule 9,
+  and would have refused the tokens it meant to accept. It now calls
+  `verify_with_proofs`.
+
+### Breaking
+
+- **A guard built on `JwksVerifier::verify` / `AxiamUser` now answers `401` to
+  a certificate- or DPoP-bound token for which it has no evidence.** To accept
+  device tokens, record `PeerCertificate` in `on_connect`, or call
+  `verify_with_proofs` / `verify_sender_constrained` with the connection's
+  certificate. An unbound token is unaffected.
+- `GroupSpec::roles` and `UserSpec::roles` are `Vec<RoleBinding>`, not
+  `Vec<String>`. `with_roles(["key"])`, `ManifestBuilder::group_role(g, "key")`
+  and `user_role(u, "key")` still compile, and a plain binding compares equal to
+  its key. Code that reads the vector as strings has to change.
+- `ManagementManifest` gains `service_accounts`, and `ResourceSpec` gains
+  `metadata`. A struct literal must name them, or use `new()` and the builders.
+- `Outcome` and `Target` gain variants. Both are `#[non_exhaustive]`, so only
+  an exhaustive `match` compiled against a pre-1.51 copy is affected.
+
 ## [1.0.0-beta16] - 2026-09-19
 
 ### Added

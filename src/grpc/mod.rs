@@ -12,6 +12,7 @@
 pub mod channel;
 pub mod client;
 pub mod interceptor;
+pub mod token;
 pub mod userinfo;
 
 /// Generated stubs from `build.rs` (`tonic-prost-build`) / the repository's
@@ -38,4 +39,5 @@ pub mod r#gen;
 pub use channel::{GrpcChannelConfig, build_channel};
 pub use client::{AccessDecision, AuthzGrpcClient, CheckAccessRequest, RefreshFn};
 pub use interceptor::AuthInterceptor;
+pub use token::{RptPermission, TokenGrpcClient, TokenIntrospection, TokenStatus, TokenValidation};
 pub use userinfo::{UserInfo, UserInfoGrpcClient};

@@ -16,7 +16,9 @@
 //!    by [`crate::token::JwksVerifier::verify`]: EdDSA `alg` pinned before
 //!    key lookup, a required numeric `exp`, `nbf` honoured when present,
 //!    `tenant_id` asserted against the verifier's configured tenant, and
-//!    `iss`/`aud` checked when configured. The registered verifier therefore
+//!    `iss`/`aud` checked when configured, and — since contract 1.51 — rule
+//!    9: a token carrying `cnf` is accepted only with matching evidence from
+//!    the connection (see [`PeerCertificate`]). The registered verifier therefore
 //!    **must** be built with
 //!    [`expect_tenant_id`](crate::token::JwksVerifier::expect_tenant_id):
 //!    the `/oauth2/jwks` trust anchor is organization-wide, so without it
@@ -76,6 +78,66 @@ use crate::token::JwksVerifier;
 const CSRF_COOKIE_NAME: &str = crate::token::manager::COOKIE_CSRF;
 /// Name of the request header carrying the double-submit CSRF token.
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
+
+/// The client certificate the TLS layer verified for **this connection** —
+/// the evidence [`AxiamUser`] needs to accept a certificate-bound token
+/// (CONTRACT.md §10.1 rule 9, RFC 8705 §3).
+///
+/// A token carrying `cnf.x5t#S256` — every token the §6.1 device login mints
+/// when AXIAM terminates TLS — is usable only by a presenter holding that
+/// certificate. [`AxiamUser`] refuses such a token unless it finds a
+/// `PeerCertificate` in the connection data, and accepts it only when the
+/// thumbprints match. An unbound token is unaffected either way.
+///
+/// Record it where the handshake is visible, in [`HttpServer::on_connect`],
+/// from the peer certificate the TLS stack verified. With rustls 0.23 (shown
+/// as text rather than a doctest: it needs `actix-tls`, which this crate does
+/// not depend on):
+///
+/// ```text
+/// use actix_tls::accept::rustls_0_23::TlsStream;
+/// use axiam_sdk::middleware::PeerCertificate;
+///
+/// HttpServer::new(app)
+///     .on_connect(|conn, ext| {
+///         if let Some(tls) = conn.downcast_ref::<TlsStream<actix_web::rt::net::TcpStream>>() {
+///             if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
+///                 ext.insert(PeerCertificate::from_der(leaf.as_ref()));
+///             }
+///         }
+///     })
+/// ```
+///
+/// **Never build one from a request header** (§10.1 rule 9 detail 2): a value
+/// the caller can set turns the binding into decoration. There is deliberately
+/// no constructor taking a header or a string — only DER bytes the server's own
+/// TLS stack handed it. Behind a terminating proxy, forward the certificate to
+/// the application over a channel it controls and verify it there first; if the
+/// application cannot see a certificate at all, bound tokens are refused, which
+/// is what detail 3 requires.
+///
+/// [`HttpServer::on_connect`]: actix_web::HttpServer::on_connect
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerCertificate {
+    thumbprint: String,
+}
+
+impl PeerCertificate {
+    /// From the DER encoding of the verified leaf certificate. Computes its
+    /// RFC 8705 §3.1 `x5t#S256` thumbprint once, per connection.
+    #[must_use]
+    pub fn from_der(der: &[u8]) -> Self {
+        Self {
+            thumbprint: crate::token::certificate_thumbprint_s256(der),
+        }
+    }
+
+    /// The certificate's `x5t#S256` thumbprint (base64url, unpadded).
+    #[must_use]
+    pub fn thumbprint(&self) -> &str {
+        &self.thumbprint
+    }
+}
 
 /// Authenticated identity injected by the [`AxiamUser`] extractor.
 ///
@@ -350,6 +412,12 @@ impl actix_web::FromRequest for AxiamUser {
         // `req`, no I/O).
         let method_is_state_changing = is_state_changing(req.method());
         let csrf_ok = csrf_valid(req);
+        // §10.1 rule 9: the evidence for a certificate-bound token, if the
+        // server recorded the peer certificate for this connection. Read here,
+        // from connection data only — never from a header.
+        let peer_thumbprint = req
+            .conn_data::<PeerCertificate>()
+            .map(|c| c.thumbprint().to_owned());
 
         Box::pin(async move {
             let (token, source) = token_result?;
@@ -371,8 +439,20 @@ impl actix_web::FromRequest for AxiamUser {
             let verifier = verifier.ok_or_else(|| {
                 AxiamExtractorError::misconfigured(invalid_token_challenge.clone())
             })?;
+            // Rules 1-9. Rule 9 with the connection's certificate as its
+            // evidence: a bound token is accepted only when it names this
+            // certificate, refused when there is none, and an unbound token is
+            // accepted either way. There is no DPoP evidence here — this
+            // extractor verifies no proof — so a `jkt`-bound token is refused,
+            // which is rule 9's row for an SDK that cannot check one here.
             let claims = verifier
-                .verify(&token)
+                .verify_with_proofs(
+                    &token,
+                    crate::token::PresentedProofs {
+                        certificate_thumbprint: peer_thumbprint.as_deref(),
+                        dpop_thumbprint: None,
+                    },
+                )
                 .await
                 .map_err(|e| AxiamExtractorError {
                     error: e,

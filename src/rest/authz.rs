@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::AxiamError;
 use crate::client::AxiamClient;
 use crate::memo::MemoKey;
-use crate::rest::auth::CsrfHeaderExt;
+use crate::rest::auth::{CsrfHeaderExt, TenantHeadersExt};
 use crate::retry::{Attempt, RetryRunner, ThreadRngJitter, TokioSleeper, parse_retry_after};
 use crate::telemetry::{Outcome, TelemetryEvent};
 
@@ -222,7 +222,11 @@ impl AxiamClient {
             request.resource_id,
             &request.action,
             request.scope.as_deref(),
-        );
+        )
+        // §5.2 rule 1: the same question asked while acting on another tenant
+        // is a different question, and handles sharing one memo must not
+        // answer it for each other.
+        .in_acting_tenant(self.acting_tenant_id());
         if let Some(hit) = memo.get_at(&key, crate::time::Instant::now()) {
             return Ok(hit);
         }
@@ -301,7 +305,10 @@ impl AxiamClient {
         let response = match self
             .http()
             .post(self.authz_url(path))
-            .header("X-Tenant-ID", self.tenant_header_value())
+            // §5 rule 2 and, when this handle acts on a tenant, §5.2 rule 1.
+            .tenant_headers_of(self)
+            // §6.1 rule 6: a device token, when that is the credential held.
+            .session_credential_of(self)
             // SDK-Q04: forward the captured `X-CSRF-Token` on this POST, the
             // same way `refresh`/`logout` do (§3) — the server's CSRF
             // protection covers state-changing verbs including authz POSTs.

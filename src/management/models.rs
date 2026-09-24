@@ -45,6 +45,17 @@ pub(crate) fn skip_empty_list<T>(value: &Option<Vec<T>>) -> bool {
     value.as_ref().is_none_or(|list| list.is_empty())
 }
 
+/// The value a required `inherit` flag takes when a server omits it.
+///
+/// CONTRACT.md §27.13 S-10 rule 3: absent means `true`, which is what every
+/// assignment written before the field existed means, and what a server older
+/// than contract 1.51 means by not sending it. Reading it as `false` would turn
+/// every pre-existing assignment into a non-inheritable one on this side of the
+/// wire; failing the decode would take the whole listing down with it.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 /// `ActorType` (generated from openapi.json).
 /// An **open** enum. A value this SDK does not know decodes to
 /// \[`ActorType::Unknown`\] carrying the string, rather than failing the
@@ -107,6 +118,19 @@ pub struct ApiProviderConfig {
 pub struct AssignRoleToGroupRequest {
     /// `group_id`.
     pub group_id: Uuid,
+    /// Whether the assignment also reaches the descendants of `resource_id`.
+    ///
+    /// Omitted — the default — or `true` is today's behaviour: a resource-scoped
+    /// assignment applies at its resource and everywhere below it. `false`
+    /// applies it at `resource_id` only, "here and no further", for allow and
+    /// deny grants alike.
+    ///
+    /// Refused with 400 when `false` is sent with no `resource_id` (a tenant-wide
+    /// assignment has no node to stop at) or for a role with `is_global: true` (a
+    /// global role applies everywhere by definition). The flag is part of the
+    /// assignment: to change it, unassign and assign again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<bool>,
     /// `resource_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -128,6 +152,19 @@ pub struct AssignRoleToGroupRequest {
 /// `AssignRoleToServiceAccountRequest` (generated from openapi.json).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssignRoleToServiceAccountRequest {
+    /// Whether the assignment also reaches the descendants of `resource_id`.
+    ///
+    /// Omitted — the default — or `true` is today's behaviour: a resource-scoped
+    /// assignment applies at its resource and everywhere below it. `false`
+    /// applies it at `resource_id` only, "here and no further", for allow and
+    /// deny grants alike.
+    ///
+    /// Refused with 400 when `false` is sent with no `resource_id` (a tenant-wide
+    /// assignment has no node to stop at) or for a role with `is_global: true` (a
+    /// global role applies everywhere by definition). The flag is part of the
+    /// assignment: to change it, unassign and assign again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<bool>,
     /// `resource_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -151,6 +188,19 @@ pub struct AssignRoleToServiceAccountRequest {
 /// `AssignRoleToUserRequest` (generated from openapi.json).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssignRoleToUserRequest {
+    /// Whether the assignment also reaches the descendants of `resource_id`.
+    ///
+    /// Omitted — the default — or `true` is today's behaviour: a resource-scoped
+    /// assignment applies at its resource and everywhere below it. `false`
+    /// applies it at `resource_id` only, "here and no further", for allow and
+    /// deny grants alike.
+    ///
+    /// Refused with 400 when `false` is sent with no `resource_id` (a tenant-wide
+    /// assignment has no node to stop at) or for a role with `is_global: true` (a
+    /// global role applies everywhere by definition). The flag is part of the
+    /// assignment: to change it, unassign and assign again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<bool>,
     /// `resource_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -395,7 +445,11 @@ pub struct CaCertificate {
     pub public_cert_pem: String,
     /// `status`.
     pub status: CertificateStatus,
-    /// The certificate subject (e.g., `CN=ACME Corp Root CA`).
+    /// The CA's common name, e.g. `ACME Corp Root CA`.
+    ///
+    /// The normalised value: a `CN=` prefix in the request is understood and
+    /// stripped, so this always says what the certificate's subject DN says
+    /// (DF-023).
     pub subject: String,
     /// The tenant this CA signs for, when it is a tenant signing CA.
     ///
@@ -444,7 +498,11 @@ pub struct Certificate {
     pub public_cert_pem: String,
     /// `status`.
     pub status: CertificateStatus,
-    /// The certificate subject (e.g., `CN=device-001`).
+    /// The certificate's common name, e.g. `device-001`.
+    ///
+    /// The normalised value: a `CN=` prefix in the request is understood and
+    /// stripped, so this always says what the certificate's subject DN says
+    /// (DF-023).
     pub subject: String,
     /// The tenant this certificate belongs to.
     pub tenant_id: Uuid,
@@ -457,6 +515,19 @@ pub struct CertificatePolicy {
     pub default_cert_validity_days: i32,
     /// `max_cert_validity_days`.
     pub max_cert_validity_days: i32,
+    /// The names a `Server` certificate may be issued for (S-7, DF-001): DNS
+    /// suffixes (`.lakeside.internal`, strictly below), exact hosts
+    /// (`lakeside.internal`) and IP prefixes (`10.0.0.0/8`, `fd00::/8`). See
+    /// \[`crate::models::server_names`\] for the matching rules.
+    ///
+    /// **Empty by default, and empty refuses every `Server` request** (I1). A
+    /// certificate for a name, signed under the organization root, is trusted by
+    /// every relying party that trusts that root, so the list is written where
+    /// the root is owned. A tenant override may only remove an entry or narrow
+    /// one; when the baseline later shrinks, the tenant's effective list is the
+    /// intersection of the two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cert_allowed_names: Option<Vec<String>>,
 }
 
 /// Status of a certificate in its lifecycle.
@@ -505,6 +576,8 @@ pub enum CertificateType {
     Service,
     /// `Device`
     Device,
+    /// `Server`
+    Server,
     /// A value not in this SDK's copy of the spec, kept verbatim.
     ///
     /// Reachable only by decoding; nothing in this SDK constructs it. Re-
@@ -833,7 +906,11 @@ pub struct CreateCaCertificateRequest {
     pub issue_from_root: Option<bool>,
     /// `key_algorithm`.
     pub key_algorithm: KeyAlgorithm,
-    /// `subject`.
+    /// The CA's common name, e.g. `ACME Corp Root CA`.
+    ///
+    /// A **common name**, not a distinguished name. A single `CN=` prefix is
+    /// accepted and stripped; anything else containing `=` — `O=Acme, CN=ACME
+    /// Corp Root CA` — is refused with `400`.
     pub subject: String,
     /// Validity duration in days.
     pub validity_days: i32,
@@ -853,6 +930,14 @@ pub struct CreateCertificateRequest {
     pub metadata: Option<serde_json::Value>,
     /// `subject`.
     pub subject: String,
+    /// The names a `Server` certificate is issued for, as `\[{"dns":
+    /// "api.lakeside.internal"}, {"ip": "10.0.0.5"}\]`. Required for `cert_type:
+    /// Server` and refused for every other type. Each name, and the common name,
+    /// must be admitted by the tenant's effective `server_cert_allowed_names`,
+    /// which is empty — refusing every `Server` request — until an organization
+    /// administrator lists names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_alt_names: Option<Vec<SubjectAltName>>,
     /// Validity duration in days.
     pub validity_days: i32,
 }
@@ -1021,7 +1106,10 @@ pub struct CreateIntermediateCaRequest {
     pub key_algorithm: KeyAlgorithm,
     /// The organization CA that signs it.
     pub parent_ca_id: Uuid,
-    /// Subject for the signing CA, e.g. `CN=ACME R&D Signing CA`.
+    /// The signing CA's common name, e.g. `ACME R&D Signing CA`.
+    ///
+    /// A **common name**, not a distinguished name. A single `CN=` prefix is
+    /// accepted and stripped; anything else containing `=` is refused with `400`.
     pub subject: String,
     /// Validity duration in days, capped to the parent's own expiry.
     pub validity_days: i32,
@@ -1807,7 +1895,11 @@ pub struct GeneratedCaCertificate {
     pub public_cert_pem: String,
     /// `status`.
     pub status: CertificateStatus,
-    /// The certificate subject (e.g., `CN=ACME Corp Root CA`).
+    /// The CA's common name, e.g. `ACME Corp Root CA`.
+    ///
+    /// The normalised value: a `CN=` prefix in the request is understood and
+    /// stripped, so this always says what the certificate's subject DN says
+    /// (DF-023).
     pub subject: String,
     /// The tenant this CA signs for, when it is a tenant signing CA.
     ///
@@ -1918,7 +2010,11 @@ pub struct GeneratedCertificate {
     pub public_cert_pem: String,
     /// `status`.
     pub status: CertificateStatus,
-    /// The certificate subject (e.g., `CN=device-001`).
+    /// The certificate's common name, e.g. `device-001`.
+    ///
+    /// The normalised value: a `CN=` prefix in the request is understood and
+    /// stripped, so this always says what the certificate's subject DN says
+    /// (DF-023).
     pub subject: String,
     /// The tenant this certificate belongs to.
     pub tenant_id: Uuid,
@@ -3397,6 +3493,12 @@ pub struct Role {
 /// to).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleAssignment {
+    /// Whether the assignment reaches the descendants of `resource_id` as well as
+    /// the resource itself (`true`, the default, and the value of every
+    /// assignment written before the field existed) or applies at that resource
+    /// only (`false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<bool>,
     /// `None` means the role was assigned globally (no resource scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -3412,6 +3514,10 @@ pub struct RoleAssignment {
 pub struct RoleGroupAssignment {
     /// The assigned group.
     pub group: Group,
+    /// Whether the assignment also reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    #[serde(default = "default_true")]
+    pub inherit: bool,
     /// `None` means the role was assigned globally (no resource scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -3425,6 +3531,10 @@ pub struct RoleGroupAssignment {
 /// A service account together with the resource scope of its assignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleServiceAccountAssignment {
+    /// Whether the assignment also reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    #[serde(default = "default_true")]
+    pub inherit: bool,
     /// `None` means the role was assigned globally (no resource scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -3441,6 +3551,10 @@ pub struct RoleServiceAccountAssignment {
 /// A user together with the resource scope of their assignment of this role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleUserAssignment {
+    /// Whether the assignment also reaches the descendants of `resource_id`
+    /// (`true`, the default) or applies at that resource only (`false`).
+    #[serde(default = "default_true")]
+    pub inherit: bool,
     /// `None` means the role was assigned globally (no resource scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<Uuid>,
@@ -3826,6 +3940,10 @@ pub struct SetOrgSettings {
     /// `sensitive_scopes_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive_scopes_enabled: Option<bool>,
+    /// S-7 — defaulted to empty, so an API client written before the field lands
+    /// on "no `Server` certificate is issued" (I1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cert_allowed_names: Option<Vec<String>>,
     /// `webauthn_user_verification`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_user_verification: Option<String>,
@@ -3882,6 +4000,12 @@ pub struct SignCertificateCsrRequest {
     /// `metadata`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// See \[`CreateCertificateRequest::subject_alt_names`\]. Stated here and never
+    /// in the CSR, which is still refused if it requests a `subjectAltName`.
+    /// Under a CA whose key is held by `vault_pki` a `Server` request on this
+    /// path is refused; use `POST /api/v1/certificates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_alt_names: Option<Vec<SubjectAltName>>,
     /// Validity duration in days.
     pub validity_days: i32,
 }
@@ -3936,6 +4060,24 @@ pub struct SmtpConfig {
     pub starttls: bool,
     /// `username`.
     pub username: String,
+}
+
+/// A name to put in a `Server` certificate's `subjectAltName`.
+///
+/// Stated explicitly in the request, never read from a CSR: a CSR asking for
+/// a `subjectAltName` extension is still refused. URI and e-mail names are
+/// not offered — nothing in AXIAM consumes them yet.
+/// Externally tagged on the wire: each value serializes as a one-key object
+/// whose key names the variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SubjectAltName {
+    /// A DNS name, e.g. `api.lakeside.internal` or `*.lakeside.internal`.
+    #[serde(rename = "dns")]
+    Dns(String),
+    /// An IPv4 or IPv6 address, e.g. `10.0.0.5`.
+    #[serde(rename = "ip")]
+    Ip(String),
 }
 
 /// A tenant is an isolated context within an organization.
@@ -4110,6 +4252,11 @@ pub struct TenantSettingsOverride {
     /// `sensitive_scopes_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive_scopes_enabled: Option<bool>,
+    /// S-7 — tighten-only: every entry must be covered by an organization entry.
+    /// An empty list means this tenant issues no `Server` certificate at all,
+    /// which is different from an absent field (inherit the organization's list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cert_allowed_names: Option<Vec<String>>,
     /// `webauthn_user_verification`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_user_verification: Option<String>,

@@ -20,7 +20,7 @@ pub mod actix;
 pub mod authz;
 pub mod mcp;
 
-pub use actix::AxiamUser;
+pub use actix::{AxiamUser, PeerCertificate};
 pub use authz::{
     AuthzGuardError, RequireAccess, UmaChallenger, require_role_check, resource_from_path,
     resource_from_static,

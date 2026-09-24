@@ -318,10 +318,33 @@ impl Claims {
         // The fast path, and the common one. Note it comes first: an unbound
         // token is accepted with no proofs at all, which is the property that
         // keeps existing deployments working.
-        let Some(cnf) = self.cnf.as_ref() else {
-            return Ok(());
-        };
+        match self.cnf.as_ref() {
+            None => Ok(()),
+            Some(cnf) => cnf.verify(proofs),
+        }
+    }
+}
 
+impl CnfClaim {
+    /// CONTRACT.md §10.1 rule 9 for a confirmation that is **present** — the
+    /// table [`Claims::verify_token_binding`] documents, minus its first row.
+    ///
+    /// The one implementation of the rule. [`Claims::verify_token_binding`]
+    /// applies it to a locally verified token, and the `grpc` feature's
+    /// `TokenValidation::verify_possession` to the `cnf` the gRPC
+    /// `TokenService` returned (§10.3 rule 1), so a local-verification caller
+    /// and a gRPC-introspecting one cannot disagree about whether a token is a
+    /// bearer token (§10.1 rule 9 detail 4).
+    ///
+    /// A confirmation naming neither member is refused — over gRPC that is an
+    /// empty `CnfClaim` message, which §10.3 rule 3 says to refuse rather than
+    /// read as unbound.
+    ///
+    /// # Errors
+    ///
+    /// [`AxiamError::Auth`] on any rejecting row.
+    pub fn verify(&self, proofs: PresentedProofs<'_>) -> Result<(), AxiamError> {
+        let cnf = self;
         let auth = |message: &str| AxiamError::Auth {
             message: message.to_owned(),
             oauth: None,
@@ -778,6 +801,24 @@ impl JwksVerifier {
     /// | 5 | `iss` | checked only when [`Self::expect_issuer`] was called. |
     /// | 6 | `aud` | checked only when [`Self::expect_audience`] was called. |
     /// | 7 | clock skew | [`CLOCK_SKEW_LEEWAY_SECS`] — a named, bounded, non-configurable 60 s. |
+    /// | 9 | `cnf` | this entry point has **no** transport evidence, so a token carrying `cnf` is **refused**, whatever it names; an unbound token is unaffected. |
+    ///
+    /// # Rule 9, and which entry point to call
+    ///
+    /// A token with `cnf` is not a bearer token (§10.1 rule 9): it may be used
+    /// only by a presenter that proves possession of the key it names. This
+    /// method is handed a token and nothing else, so it cannot see that proof,
+    /// and it fails closed — the "a different certificate, or none" row of the
+    /// rule's table. Until contract 1.51 it accepted such a token as a bearer
+    /// token, which is exactly the downgrade rule 9 exists to forbid, and the
+    /// §6.1 device login now mints bound tokens by default.
+    ///
+    /// To **accept** bound tokens, give the verifier the evidence your
+    /// transport holds: [`Self::verify_sender_constrained`] for a TLS client
+    /// certificate, [`Self::verify_with_proofs`] when a verified DPoP proof may
+    /// be present too. The [`AxiamUser`] extractor does this itself when the
+    /// server records the peer certificate (see
+    /// [`PeerCertificate`](crate::middleware::PeerCertificate)).
     ///
     /// # Errors
     ///
@@ -787,6 +828,39 @@ impl JwksVerifier {
     ///
     /// [`AxiamUser`]: crate::middleware::AxiamUser
     pub async fn verify(&self, token: &str) -> Result<Claims, AxiamError> {
+        self.verify_with_proofs(token, PresentedProofs::default())
+            .await
+    }
+
+    /// The complete §10.1 set — rules 1–8, then rule 9 against `proofs` — for
+    /// a resource server that may receive **certificate-bound or DPoP-bound**
+    /// tokens.
+    ///
+    /// `proofs` must come from the transport: the thumbprint of the peer
+    /// certificate the TLS layer verified for this connection, and the `jkt`
+    /// returned by [`crate::token::verify_dpop_proof`] for a proof checked
+    /// against this request — never a value a caller supplied in a header.
+    /// [`PresentedProofs::default()`] (no evidence) is exactly [`Self::verify`].
+    /// An unbound token is accepted with or without proofs.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::verify`] returns; rule 9 refusals are listed on
+    /// [`Claims::verify_token_binding`].
+    pub async fn verify_with_proofs(
+        &self,
+        token: &str,
+        proofs: PresentedProofs<'_>,
+    ) -> Result<Claims, AxiamError> {
+        let claims = self.verify_rules_one_to_eight(token).await?;
+        claims.verify_token_binding(proofs)?;
+        Ok(claims)
+    }
+
+    /// Rules 1–8 and the §10.4 feed — everything but the sender constraint,
+    /// which every public entry point then applies with the evidence it has.
+    /// Private on purpose: no caller may stop here.
+    async fn verify_rules_one_to_eight(&self, token: &str) -> Result<Claims, AxiamError> {
         let claims = self.verify_claims(token).await?;
         self.assert_tenant(&claims)?;
         self.assert_not_revoked(&claims).await?;
@@ -864,7 +938,7 @@ impl JwksVerifier {
         token: &str,
         presented_thumbprint: Option<&str>,
     ) -> Result<Claims, AxiamError> {
-        let claims = self.verify(token).await?;
+        let claims = self.verify_rules_one_to_eight(token).await?;
         claims.verify_certificate_binding(presented_thumbprint)?;
         Ok(claims)
     }

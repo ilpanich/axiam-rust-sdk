@@ -96,3 +96,20 @@ pub(crate) mod scope;
 
 pub use error::{FieldError, ValidationError};
 pub use page::{Page, PageRequest};
+
+impl models::RoleAssignment {
+    /// Whether this assignment reaches the descendants of its resource —
+    /// CONTRACT.md §27.13 S-10 rule 3.
+    ///
+    /// The generated field is `Option<bool>` because the schema makes it
+    /// optional on this, the subject-side listing. Absent means `true`: it is
+    /// what every assignment written before the field existed means, and what a
+    /// server older than contract 1.51 means by omitting it. Reading absent as
+    /// `false` would turn every pre-existing assignment into a non-inheritable
+    /// one on this side of the wire, which is why this reader exists rather
+    /// than leaving each caller to pick a default.
+    #[must_use]
+    pub fn inherits(&self) -> bool {
+        self.inherit.unwrap_or(true)
+    }
+}

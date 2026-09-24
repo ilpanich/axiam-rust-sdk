@@ -31,6 +31,11 @@ use crate::AxiamError;
 use crate::token::TokenManager;
 use crate::token::jwks::JwksVerifier;
 
+/// The header an organization-level principal names its acting tenant in —
+/// CONTRACT.md §5.2 rule 1. Distinct from `X-Tenant-ID` (§5 rule 2), which the
+/// server does not read.
+pub const ACTING_TENANT_HEADER: &str = "X-Axiam-Tenant";
+
 // `fetch` has no configurable deadline, so these govern the native transport
 // only. Kept out of the browser build rather than defined-and-ignored.
 #[cfg(not(target_arch = "wasm32"))]
@@ -109,6 +114,9 @@ pub struct AxiamClientBuilder {
     /// §17 decision-memo TTL. `None` (and `Some(ZERO)`) mean disabled, which
     /// is the default.
     decision_memo_ttl: Option<Duration>,
+    /// §5.2 rule 1 acting tenant. `None` — the default — sends no
+    /// `X-Axiam-Tenant` at all.
+    acting_tenant: Option<Uuid>,
 }
 
 impl AxiamClientBuilder {
@@ -171,6 +179,50 @@ impl AxiamClientBuilder {
     /// Mutually exclusive with [`Self::org_slug`] — the last one called wins.
     pub fn org_id(mut self, id: Uuid) -> Self {
         self.org = Some(OrgIdentifier::Id(id));
+        self
+    }
+
+    /// Act on another tenant of the caller's organization — CONTRACT.md §5.2
+    /// rule 1 (contract 1.51).
+    ///
+    /// Every REST request under `/api/v1` then carries `X-Axiam-Tenant: <id>`,
+    /// which is how an **organization-level** principal (one whose record lives
+    /// in its organization's reserved tenant) chooses the tenant it acts on
+    /// without signing in again. It is meaningful for such a principal only:
+    /// for an ordinary tenant principal the server answers `403`, and this is
+    /// not a general "switch tenant" capability.
+    ///
+    /// # What it does not do
+    ///
+    /// * **It does not change `X-Tenant-ID`** (§5 rule 2), which still names
+    ///   the tenant this client was built with. The server does not read that
+    ///   header; routers and gateways do. The two are different headers read by
+    ///   different mechanisms, and the SDK never couples them.
+    /// * **It does not change a `{tenant_id}` path segment.** A management route
+    ///   whose path names the tenant still defaults it from the constructor
+    ///   tenant (§27.4 rule 3); pass the id explicitly to address another one.
+    /// * **It does not reach gRPC.** The gRPC server reads no acting-tenant
+    ///   metadata — its interceptor reads `authorization` and takes the tenant
+    ///   from the token — so an RPC acts on the token's tenant whatever this
+    ///   says. The SDK does not invent a metadata key for it.
+    ///
+    /// # Why a `Uuid` and not a string
+    ///
+    /// The server parses the header as a UUID and **silently ignores** a value
+    /// that does not parse: the request then acts on the caller's own tenant
+    /// and succeeds, reporting success about the wrong tenant. Taking a
+    /// [`Uuid`] makes that request impossible to express, which is the
+    /// strongest form of the client-side refusal §5.2 rule 1 requires.
+    ///
+    /// # Gating
+    ///
+    /// Nothing is checked here: a builder precedes the login that would reveal
+    /// whether the principal is organization-level, and a service account never
+    /// receives a login result at all. The server's `403` is the answer. The
+    /// on-client form, [`AxiamClient::acting_tenant`], does gate once a login
+    /// result is held.
+    pub fn with_acting_tenant(mut self, tenant_id: Uuid) -> Self {
+        self.acting_tenant = Some(tenant_id);
         self
     }
 
@@ -596,7 +648,10 @@ reason: None,
                     self.decision_memo_ttl.unwrap_or(Duration::ZERO),
                 ),
                 closed: std::sync::atomic::AtomicBool::new(false),
+                principal_scope: std::sync::RwLock::new(None),
+                bearer_credential: std::sync::atomic::AtomicBool::new(false),
             }),
+            acting_tenant: self.acting_tenant,
         })
     }
 }
@@ -684,6 +739,28 @@ pub(crate) struct AxiamClientInner {
     /// §23 record against the account's own tenant rather than whichever one
     /// the client is currently pointed at. `None` until a login completes.
     pub(crate) resolved_principal_tenant_id: std::sync::RwLock<Option<Uuid>>,
+    /// CONTRACT.md §5.2 / §5.2.3 — what the last completed login said about
+    /// the principal's reach, when a login said anything at all.
+    ///
+    /// `None` until a password or MFA login reports a user object, and reset
+    /// by `logout`. It is `None` on purpose, rather than a defaulted `false`,
+    /// for every path that completes a session without a user object — OPAQUE,
+    /// SSO, the forced MFA setup, a device login, an injected token — because
+    /// "the server did not say" must not gate the acting-tenant helper as if
+    /// the server had said "not organization-level" (§5.2 rule 1: a client
+    /// holding no login result has nothing to gate on).
+    pub(crate) principal_scope: std::sync::RwLock<Option<PrincipalScope>>,
+    /// `true` while the credential held by `token_manager` came from a response
+    /// **body** — the §6.1 device login — rather than from the `axiam_access`
+    /// cookie.
+    ///
+    /// Such a credential reaches the server only as an `Authorization: Bearer`
+    /// header, and only with the jar's cookies withheld: the server reads the
+    /// `axiam_access` cookie *before* the header, so a leftover cookie session
+    /// would otherwise silently win and the request would run as whoever that
+    /// session belonged to. It also has no refresh token, so a `401` on it is
+    /// surfaced rather than sent to the §9 guard (§6.1 rule 6).
+    pub(crate) bearer_credential: std::sync::atomic::AtomicBool,
     /// The challenge token from the most recent `login()` call that
     /// returned `mfa_required: true`, so `verify_mfa(code)` can complete
     /// the two-phase flow with only a `code` argument, matching
@@ -746,6 +823,23 @@ pub(crate) struct AxiamClientInner {
 #[derive(Clone)]
 pub struct AxiamClient {
     pub(crate) inner: Arc<AxiamClientInner>,
+    /// CONTRACT.md §5.2 rule 1 — the tenant this **handle** acts on.
+    ///
+    /// Held on the handle rather than in the shared [`AxiamClientInner`]: a
+    /// provisioning task acting on tenant A and another acting on tenant B can
+    /// share one session without either rewriting the other's header between
+    /// the moment it decides and the moment it sends. See
+    /// [`AxiamClient::acting_tenant`].
+    pub(crate) acting_tenant: Option<Uuid>,
+}
+
+/// What a completed login reported about the principal's reach —
+/// CONTRACT.md §5.2 and §5.2.3. Kept only to gate
+/// [`AxiamClient::acting_tenant`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrincipalScope {
+    pub(crate) organization_level: bool,
+    pub(crate) reachable_tenant_ids: Option<Vec<Uuid>>,
 }
 
 impl AxiamClient {
@@ -763,6 +857,179 @@ impl AxiamClient {
     /// slug/UUID string the client was built with (CONTRACT.md §5).
     pub(crate) fn tenant_header_value(&self) -> String {
         self.inner.tenant.header_value()
+    }
+
+    /// The tenant headers every `/api/v1` REST request carries.
+    ///
+    /// `X-Tenant-ID` always (§5 rule 2); `X-Axiam-Tenant` only when this handle
+    /// acts on a tenant (§5.2 rule 1), so a client that never asked for one
+    /// sends byte-for-byte what it sent before contract 1.51.
+    pub(crate) fn tenant_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        let request = request.header("X-Tenant-ID", self.tenant_header_value());
+        self.acting_tenant_header(request)
+    }
+
+    /// `X-Axiam-Tenant` when this handle acts on a tenant, nothing otherwise.
+    ///
+    /// Split from [`Self::tenant_headers`] for the self-service calls that
+    /// predate the `X-Tenant-ID` rule and do not send it: §5.2.2 rule 4 says
+    /// to send the acting-tenant header "as normal" there and let the server
+    /// decide, and adding the §5 header to them is a separate change.
+    pub(crate) fn acting_tenant_header(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        match self.acting_tenant {
+            Some(tenant) => request.header(ACTING_TENANT_HEADER, tenant.to_string()),
+            None => request,
+        }
+    }
+
+    /// The tenant this handle acts on, if any — CONTRACT.md §5.2 rule 1.
+    ///
+    /// `None` means no `X-Axiam-Tenant` is sent, and the principal acts on its
+    /// own tenant.
+    #[must_use]
+    pub fn acting_tenant_id(&self) -> Option<Uuid> {
+        self.acting_tenant
+    }
+
+    /// A handle to this client that acts on `tenant_id` — CONTRACT.md §5.2
+    /// rule 1 (contract 1.51).
+    ///
+    /// The returned handle shares everything with `self` — session, cookie
+    /// jar, refresh guard, telemetry, decision memo — and differs only in the
+    /// `X-Axiam-Tenant` it sends. `self` is unchanged, so two tasks can act on
+    /// two tenants at once over one session. Drop the handle, or call
+    /// [`Self::clear_acting_tenant`], to act on the principal's own tenant
+    /// again.
+    ///
+    /// Meaningful only for an **organization-level** principal; see
+    /// [`AxiamClientBuilder::with_acting_tenant`] for what the header does and
+    /// does not reach (not `X-Tenant-ID`, not a `{tenant_id}` path, not gRPC).
+    ///
+    /// # Errors
+    ///
+    /// When this client holds a login result that reported the principal's
+    /// reach, the helper refuses client-side, with **no** wire call, rather
+    /// than offering what the server would refuse:
+    ///
+    /// * [`AxiamError::Authz`] if the login reported `organization_level:
+    ///   false` — an ordinary tenant principal is a principal of one tenant,
+    ///   and the server answers `403` to anything else;
+    /// * [`AxiamError::Authz`] if the login reported `reachable_tenant_ids` and
+    ///   `tenant_id` is not among them (§5.2.3 rule 4).
+    ///
+    /// A client holding no such result — a service account from client
+    /// credentials or the device login, an injected token, a session completed
+    /// without a user object — has nothing to gate on, so the handle is
+    /// returned and the server's `403` is the answer. An organization-level
+    /// **service account** is a supported design, and the server honours the
+    /// header for one on the terms it does for a user.
+    ///
+    /// There is no string form: the server silently ignores a value that is
+    /// not a UUID and answers for the caller's own tenant instead, so the type
+    /// is the refusal.
+    pub fn acting_tenant(&self, tenant_id: Uuid) -> Result<AxiamClient, AxiamError> {
+        if let Some(scope) = self.principal_scope() {
+            if !scope.organization_level {
+                return Err(AxiamError::authz(
+                    "acting_tenant: the signed-in principal is not organization-level, so it \
+                     cannot act on another tenant — the server would answer 403 (CONTRACT.md \
+                     §5.2 rule 1)",
+                    None,
+                    Some(tenant_id.to_string()),
+                ));
+            }
+            if let Some(reachable) = &scope.reachable_tenant_ids
+                && !reachable.contains(&tenant_id)
+            {
+                return Err(AxiamError::authz(
+                    "acting_tenant: the signed-in principal's roles do not reach this tenant — \
+                     it is not in reachable_tenant_ids, and the server refuses the header \
+                     with 403 (CONTRACT.md §5.2.3 rule 4)",
+                    None,
+                    Some(tenant_id.to_string()),
+                ));
+            }
+        }
+        Ok(AxiamClient {
+            inner: Arc::clone(&self.inner),
+            acting_tenant: Some(tenant_id),
+        })
+    }
+
+    /// A handle to this client that sends **no** `X-Axiam-Tenant` — the clear
+    /// form CONTRACT.md §5.2 rule 1 requires. The principal then acts on its
+    /// own tenant. Everything else is shared with `self`, as for
+    /// [`Self::acting_tenant`].
+    #[must_use]
+    pub fn clear_acting_tenant(&self) -> AxiamClient {
+        AxiamClient {
+            inner: Arc::clone(&self.inner),
+            acting_tenant: None,
+        }
+    }
+
+    /// Whether this client was built with a §6.1 client certificate.
+    pub(crate) fn has_client_certificate(&self) -> bool {
+        self.inner.client_cert_pem.is_some() && self.inner.client_key.is_some()
+    }
+
+    /// Whether the credential held is a body-delivered bearer token (the §6.1
+    /// device login) rather than a cookie session.
+    pub(crate) fn holds_bearer_credential(&self) -> bool {
+        self.inner
+            .bearer_credential
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record which kind of credential is now held.
+    pub(crate) fn set_bearer_credential(&self, bearer: bool) {
+        self.inner
+            .bearer_credential
+            .store(bearer, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Attach the held credential when it is a bearer token.
+    ///
+    /// A cookie session needs nothing here: the jar carries it. A device token
+    /// travels as `Authorization: Bearer`, with an explicit empty `Cookie`
+    /// header so `reqwest`'s jar adds nothing — the server reads the
+    /// `axiam_access` cookie before the header, and a cookie left over from an
+    /// earlier session must not quietly become the identity of this request.
+    pub(crate) fn session_credential(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        if !self.holds_bearer_credential() {
+            return request;
+        }
+        match self.inner.token_manager.cached_access_token() {
+            Some(token) => request
+                .header(reqwest::header::COOKIE, "")
+                .bearer_auth(token.expose()),
+            None => request,
+        }
+    }
+
+    /// What the last login reported about the principal's reach, if anything.
+    pub(crate) fn principal_scope(&self) -> Option<PrincipalScope> {
+        self.inner
+            .principal_scope
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// Record (or, with `None`, forget) what a login reported about reach.
+    pub(crate) fn set_principal_scope(&self, scope: Option<PrincipalScope>) {
+        if let Ok(mut guard) = self.inner.principal_scope.write() {
+            *guard = scope;
+        }
     }
 
     /// The resolved tenant UUID, if a login/verify_mfa has already

@@ -568,22 +568,40 @@ async fn a_cnf_naming_an_unimplemented_method_is_rejected_not_ignored() {
     }
 }
 
-/// `verify` is deliberately NOT a sender-constraining guard — it has no
-/// transport to ask. Documented, and asserted here so the split cannot be
-/// removed by accident: a resource server accepting bound tokens must call
-/// `verify_sender_constrained`.
+/// `verify` — the documented guard entry point, and what `AxiamUser` calls —
+/// **refuses** a bound token, because it has no transport evidence to check it
+/// against (the "a different certificate, or none" row of rule 9's table).
+///
+/// Until contract 1.51 this test asserted the opposite: that `verify` accepted
+/// a certificate-bound token as a bearer token and left rule 9 to a separate
+/// call. That was the defect §10.1 rule 9 forbids ("MUST NOT be accepted as
+/// one") in the one entry point every guard used, and the §6.1 device login now
+/// mints bound tokens by default. The assertion is inverted on purpose, not
+/// relaxed: the standalone claim check below still holds exactly as before.
 #[tokio::test]
-async fn plain_verify_does_not_enforce_the_binding_and_says_so() {
+async fn plain_verify_refuses_a_bound_token_it_has_no_evidence_for() {
     let server = jwks_server().await;
     let verifier = guard_verifier(&server.uri());
     let token = sign_eddsa(&bound_claims(THUMBPRINT));
 
-    let claims = verifier
+    let err = verifier
         .verify(&token)
         .await
-        .expect("verify() checks rules 1-8, not rule 9");
-    // ...but the claim is right there for a caller that wants to apply rule 9
-    // itself, which is exactly what the standalone method is for.
+        .expect_err("verify() has no certificate, so rule 9 refuses a bound token");
+    assert_auth_error_containing(err, "no client certificate was presented");
+
+    // The same token, with its evidence, through the entry points that take
+    // some — and the standalone claim check, which is unchanged.
+    let claims = verifier
+        .verify_with_proofs(
+            &token,
+            PresentedProofs {
+                certificate_thumbprint: Some(THUMBPRINT),
+                dpop_thumbprint: None,
+            },
+        )
+        .await
+        .expect("accepted with the certificate it names");
     claims
         .verify_certificate_binding(Some(THUMBPRINT))
         .expect("the standalone rule-9 check accepts the right certificate");
@@ -592,12 +610,107 @@ async fn plain_verify_does_not_enforce_the_binding_and_says_so() {
         .expect_err("...and rejects an absent one");
 }
 
+/// Step 7 of the contract-1.51 port, in one place: a token carrying
+/// `x5t#S256` — the shape of every §6.1 device token — is refused by each
+/// entry point without matching certificate evidence and accepted by each with
+/// it, and an unbound token still verifies through all three.
+#[tokio::test]
+async fn every_entry_point_applies_rule_9_to_a_device_token() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    let bound = sign_eddsa(&bound_claims(THUMBPRINT));
+    let unbound = sign_eddsa(&good_claims());
+    let with = |thumbprint: Option<&'static str>| PresentedProofs {
+        certificate_thumbprint: thumbprint,
+        dpop_thumbprint: None,
+    };
+
+    // Refused without matching evidence.
+    assert!(verifier.verify(&bound).await.is_err());
+    for presented in [None, Some(OTHER_THUMBPRINT)] {
+        assert!(
+            verifier
+                .verify_sender_constrained(&bound, presented)
+                .await
+                .is_err()
+        );
+        assert!(
+            verifier
+                .verify_with_proofs(&bound, with(presented))
+                .await
+                .is_err()
+        );
+    }
+
+    // Accepted with it.
+    verifier
+        .verify_sender_constrained(&bound, Some(THUMBPRINT))
+        .await
+        .expect("sender-constrained entry point, right certificate");
+    verifier
+        .verify_with_proofs(&bound, with(Some(THUMBPRINT)))
+        .await
+        .expect("full entry point, right certificate");
+
+    // The positive regression: an unbound token still verifies, everywhere,
+    // with or without a certificate.
+    verifier.verify(&unbound).await.expect("verify");
+    for presented in [None, Some(THUMBPRINT)] {
+        verifier
+            .verify_sender_constrained(&unbound, presented)
+            .await
+            .expect("verify_sender_constrained");
+        verifier
+            .verify_with_proofs(&unbound, with(presented))
+            .await
+            .expect("verify_with_proofs");
+    }
+}
+
+/// `verify` refuses **every** `cnf`, not only a certificate one: a DPoP
+/// binding, both, and an empty object are as unverifiable to it as a
+/// certificate it cannot see.
+#[tokio::test]
+async fn plain_verify_refuses_every_confirmation() {
+    let server = jwks_server().await;
+    let verifier = guard_verifier(&server.uri());
+    for cnf in [
+        json!({ "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I" }),
+        json!({ "x5t#S256": THUMBPRINT, "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I" }),
+        json!({}),
+    ] {
+        let mut claims = good_claims();
+        claims["cnf"] = cnf.clone();
+        let token = sign_eddsa(&claims);
+        assert!(
+            verifier.verify(&token).await.is_err(),
+            "verify() accepted cnf {cnf}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // §10.1 rule 9 extended for DPoP (contract 1.16)
 // ---------------------------------------------------------------------------
 
 const JKT: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
 const OTHER_JKT: &str = "sBjflhaR2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+/// Decode a token's claims — signature checked — **without** rule 9.
+///
+/// The tests below exercise the claim-level table (`verify_token_binding`,
+/// `verify_certificate_binding`) against bound tokens, so they need the claims
+/// of a token that `verify()` itself now refuses: since contract 1.51 `verify`
+/// applies rule 9 with no evidence. `verify_signature_only_unchecked` is the
+/// primitive that decodes without judging; what each test asserts about the
+/// binding table is unchanged, and `every_entry_point_applies_rule_9_to_a_device_token`
+/// pins the entry points themselves.
+async fn decoded(verifier: &JwksVerifier, token: &str) -> axiam_sdk::token::Claims {
+    verifier
+        .verify_signature_only_unchecked(token)
+        .await
+        .expect("a well-signed token decodes")
+}
 
 /// Claims carrying whatever `cnf` the caller wants.
 fn claims_with_cnf(cnf: serde_json::Value) -> serde_json::Value {
@@ -634,13 +747,24 @@ async fn a_dpop_bound_token_accepts_the_matching_key() {
     let verifier = guard_verifier(&server.uri());
     let token = sign_eddsa(&claims_with_cnf(json!({ "jkt": JKT })));
 
-    let claims = verifier.verify(&token).await.unwrap();
+    let claims = decoded(&verifier, &token).await;
     claims
         .verify_token_binding(PresentedProofs {
             certificate_thumbprint: None,
             dpop_thumbprint: Some(JKT),
         })
         .expect("the proof names the confirmed key");
+    // The same answer through the entry point that takes evidence.
+    verifier
+        .verify_with_proofs(
+            &token,
+            PresentedProofs {
+                certificate_thumbprint: None,
+                dpop_thumbprint: Some(JKT),
+            },
+        )
+        .await
+        .expect("verify_with_proofs agrees with the claim-level table");
 }
 
 #[tokio::test]
@@ -648,7 +772,7 @@ async fn a_dpop_bound_token_is_rejected_without_a_proof_or_with_the_wrong_key() 
     let server = jwks_server().await;
     let verifier = guard_verifier(&server.uri());
     let token = sign_eddsa(&claims_with_cnf(json!({ "jkt": JKT })));
-    let claims = verifier.verify(&token).await.unwrap();
+    let claims = decoded(&verifier, &token).await;
 
     let err = claims
         .verify_token_binding(PresentedProofs::default())
@@ -675,7 +799,7 @@ async fn a_cnf_naming_both_methods_requires_both() {
     let token = sign_eddsa(&claims_with_cnf(
         json!({ "x5t#S256": THUMBPRINT, "jkt": JKT }),
     ));
-    let claims = verifier.verify(&token).await.unwrap();
+    let claims = decoded(&verifier, &token).await;
 
     claims
         .verify_token_binding(PresentedProofs {
@@ -697,6 +821,27 @@ async fn a_cnf_naming_both_methods_requires_both() {
             dpop_thumbprint: Some(JKT),
         })
         .expect_err("the proof alone is not enough");
+
+    // The conjunction holds at the entry point too.
+    for (case, (certificate_thumbprint, dpop_thumbprint, ok)) in [
+        (Some(THUMBPRINT), Some(JKT), true),
+        (Some(THUMBPRINT), None, false),
+        (None, Some(JKT), false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = verifier
+            .verify_with_proofs(
+                &token,
+                PresentedProofs {
+                    certificate_thumbprint,
+                    dpop_thumbprint,
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), ok, "conjunction case {case}");
+    }
 }
 
 /// An **empty** `cnf` names nothing checkable and must be refused, not read as
@@ -707,7 +852,7 @@ async fn an_empty_cnf_is_refused_rather_than_read_as_unbound() {
     let server = jwks_server().await;
     let verifier = guard_verifier(&server.uri());
     let token = sign_eddsa(&claims_with_cnf(json!({})));
-    let claims = verifier.verify(&token).await.unwrap();
+    let claims = decoded(&verifier, &token).await;
 
     let err = claims
         .verify_token_binding(PresentedProofs::default())
@@ -724,7 +869,7 @@ async fn the_certificate_only_entry_point_refuses_a_dpop_bound_token() {
     let server = jwks_server().await;
     let verifier = guard_verifier(&server.uri());
     let token = sign_eddsa(&claims_with_cnf(json!({ "jkt": JKT })));
-    let claims = verifier.verify(&token).await.unwrap();
+    let claims = decoded(&verifier, &token).await;
 
     for presented in [None, Some(THUMBPRINT)] {
         claims
@@ -742,7 +887,7 @@ async fn the_certificate_only_entry_point_refuses_a_both_bound_token() {
     let token = sign_eddsa(&claims_with_cnf(
         json!({ "x5t#S256": THUMBPRINT, "jkt": JKT }),
     ));
-    let claims = verifier.verify(&token).await.unwrap();
+    let claims = decoded(&verifier, &token).await;
 
     let err = claims
         .verify_certificate_binding(Some(THUMBPRINT))

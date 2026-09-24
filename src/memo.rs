@@ -49,7 +49,7 @@ pub const MAX_TTL: Duration = Duration::from_secs(5);
 const MAX_ENTRIES: usize = 1024;
 
 /// The §17.1 rule 3 key: all four components, with absent distinguished from
-/// present. A memo that ignored `scope` would answer a narrower question with a
+/// present — plus the acting tenant (§5.2 rule 1), which changes the question. A memo that ignored `scope` would answer a narrower question with a
 /// broader answer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MemoKey {
@@ -57,6 +57,11 @@ pub(crate) struct MemoKey {
     resource_id: Uuid,
     action: String,
     scope: Option<String>,
+    /// The `X-Axiam-Tenant` the check was sent under (CONTRACT.md §5.2 rule
+    /// 1). Handles acting on different tenants share one memo, and the server
+    /// can answer the same four components differently in each; `None` is the
+    /// principal's own tenant.
+    acting_tenant: Option<Uuid>,
 }
 
 impl MemoKey {
@@ -71,7 +76,15 @@ impl MemoKey {
             resource_id,
             action: action.to_string(),
             scope: scope.map(str::to_string),
+            acting_tenant: None,
         }
+    }
+
+    /// Key the entry to the acting tenant the check is sent under.
+    #[must_use]
+    pub(crate) fn in_acting_tenant(mut self, acting_tenant: Option<Uuid>) -> Self {
+        self.acting_tenant = acting_tenant;
+        self
     }
 }
 

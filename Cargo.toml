@@ -313,6 +313,12 @@ required-features = ["rest"]
 name = "device_mtls_provisioning"
 required-features = ["rest"]
 
+# CONTRACT.md §6.1 rules 6-10: the mTLS device login, `authenticate_device()`.
+# Not the RFC 8628 device grant, which is `device_login`.
+[[example]]
+name = "device_mtls_login"
+required-features = ["rest"]
+
 # CONTRACT.md §27 management surface: the imperative CRUD walkthrough.
 [[example]]
 name = "management_basics"

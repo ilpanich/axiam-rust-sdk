@@ -21,6 +21,14 @@ use crate::token::TokenManager;
 /// Injects `authorization: Bearer <token>` and `x-tenant-id` (UUID form)
 /// metadata on every outgoing RPC (CONTRACT.md §5). Never logs the token —
 /// `expose()` is only called at the metadata-insertion boundary.
+///
+/// **No acting tenant is sent, by design** (CONTRACT.md §5.2 rule 1). The
+/// AXIAM gRPC server reads no acting-tenant metadata: its interceptor reads
+/// `authorization` and takes the tenant from the token. An RPC therefore acts
+/// on the token's tenant whatever
+/// [`AxiamClient::acting_tenant`](crate::client::AxiamClient::acting_tenant)
+/// or `with_acting_tenant` says, and this interceptor does not invent a
+/// metadata key the server would ignore.
 #[derive(Clone)]
 pub struct AuthInterceptor {
     token_manager: std::sync::Arc<TokenManager>,

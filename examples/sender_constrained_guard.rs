@@ -66,22 +66,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         verified_dpop_thumbprint: None,
     };
 
-    // Rules 1-8: signature, expiry, issuer, audience. NOT rule 9 — `verify`
-    // has no transport to ask, which is exactly why the binding check is a
-    // separate call rather than something you can forget to opt into.
-    let claims = verifier.verify(token).await?;
-
     let certificate_thumbprint = transport
         .peer_certificate_der
         .as_deref()
         .map(certificate_thumbprint_s256);
 
-    // Rule 9. Returns `Ok` immediately for an unbound token, so adopting this
+    // Rules 1-9 in one call: signature, expiry, tenant, issuer, audience — and
+    // the sender constraint against the evidence this connection produced.
+    // An unbound token is accepted with or without evidence, so adopting this
     // does not break existing deployments.
-    claims.verify_token_binding(PresentedProofs {
-        certificate_thumbprint: certificate_thumbprint.as_deref(),
-        dpop_thumbprint: transport.verified_dpop_thumbprint.as_deref(),
-    })?;
+    //
+    // Plain `verify(token)` applies rule 9 too (since contract 1.51), but with
+    // no evidence at all, so it refuses every bound token. Use it only where
+    // bound tokens should never be accepted.
+    let claims = verifier
+        .verify_with_proofs(
+            token,
+            PresentedProofs {
+                certificate_thumbprint: certificate_thumbprint.as_deref(),
+                dpop_thumbprint: transport.verified_dpop_thumbprint.as_deref(),
+            },
+        )
+        .await?;
 
     println!("subject {} authorized", claims.sub);
     Ok(())

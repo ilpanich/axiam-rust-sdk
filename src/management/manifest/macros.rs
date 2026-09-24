@@ -48,6 +48,33 @@
 /// assert_eq!(m.users[0].groups, vec!["staff"]);
 /// ```
 ///
+/// Contract 1.51 adds three things (§27.6.1): a resource's `metadata`, a role
+/// bound **at a resource** — optionally `here only`, which stops it at that
+/// resource (`inherit: false`) — and service accounts:
+///
+/// ```
+/// use axiam_sdk::manifest;
+/// use axiam_sdk::management::manifest::RoleBinding;
+///
+/// let m = manifest! {
+///     resource site  = "site-1", "site", metadata serde_json::json!({ "region": "eu" });
+///     resource flat  = "flat-7", "apartment", under site;
+///     role resident  = "Resident", "Lives here";
+///     role concierge = "Concierge", "Runs the site";
+///     user ann       = "ann", "ann@example.com";
+///     assign role resident, to user ann, at flat;
+///     service_account gate = "gate-controller", "Opens the gate";
+///     assign role concierge, to service_account gate, at site, here only;
+/// };
+///
+/// assert_eq!(m.resources[0].metadata, Some(serde_json::json!({ "region": "eu" })));
+/// assert_eq!(m.users[0].roles, vec![RoleBinding::at("resident", "flat")]);
+/// assert_eq!(
+///     m.service_accounts[0].roles,
+///     vec![RoleBinding::at_only("concierge", "site")]
+/// );
+/// ```
+///
 /// A `user` that may have to be *created* needs a password; add it with
 /// `password <expr>`, where the expression is a
 /// [`Sensitive<String>`](crate::Sensitive):
@@ -91,6 +118,17 @@ macro_rules! __axiam_manifest_stmt {
     ($b:ident;) => {};
 
     // resource <key> = <name>, <type>[, under <parent>];
+    // resource <key> = <name>, <type>[, under <parent>], metadata <expr>;
+    ($b:ident; resource $key:ident = $name:expr, $ty:expr, under $parent:ident, metadata $meta:expr; $($rest:tt)*) => {
+        $b.resource(stringify!($key), $name, $ty, Some(stringify!($parent)));
+        $b.resource_metadata(stringify!($key), $meta);
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; resource $key:ident = $name:expr, $ty:expr, metadata $meta:expr; $($rest:tt)*) => {
+        $b.resource(stringify!($key), $name, $ty, None);
+        $b.resource_metadata(stringify!($key), $meta);
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
     ($b:ident; resource $key:ident = $name:expr, $ty:expr, under $parent:ident; $($rest:tt)*) => {
         $b.resource(stringify!($key), $name, $ty, Some(stringify!($parent)));
         $crate::__axiam_manifest_stmt!($b; $($rest)*);
@@ -166,6 +204,36 @@ macro_rules! __axiam_manifest_stmt {
         $crate::__axiam_manifest_stmt!($b; $($rest)*);
     };
 
+    // assign role <role>, to group|user|service_account <key>, at <resource>[, here only];
+    ($b:ident; assign role $role:ident, to group $group:ident, at $res:ident, here only; $($rest:tt)*) => {
+        $b.group_role(stringify!($group), $crate::management::manifest::RoleBinding::at_only(stringify!($role), stringify!($res)));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; assign role $role:ident, to group $group:ident, at $res:ident; $($rest:tt)*) => {
+        $b.group_role(stringify!($group), $crate::management::manifest::RoleBinding::at(stringify!($role), stringify!($res)));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; assign role $role:ident, to user $user:ident, at $res:ident, here only; $($rest:tt)*) => {
+        $b.user_role(stringify!($user), $crate::management::manifest::RoleBinding::at_only(stringify!($role), stringify!($res)));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; assign role $role:ident, to user $user:ident, at $res:ident; $($rest:tt)*) => {
+        $b.user_role(stringify!($user), $crate::management::manifest::RoleBinding::at(stringify!($role), stringify!($res)));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; assign role $role:ident, to service_account $sa:ident, at $res:ident, here only; $($rest:tt)*) => {
+        $b.service_account_role(stringify!($sa), $crate::management::manifest::RoleBinding::at_only(stringify!($role), stringify!($res)));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; assign role $role:ident, to service_account $sa:ident, at $res:ident; $($rest:tt)*) => {
+        $b.service_account_role(stringify!($sa), $crate::management::manifest::RoleBinding::at(stringify!($role), stringify!($res)));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; assign role $role:ident, to service_account $sa:ident; $($rest:tt)*) => {
+        $b.service_account_role(stringify!($sa), stringify!($role));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+
     // assign role <role>, to group|user <key>;
     ($b:ident; assign role $role:ident, to group $group:ident; $($rest:tt)*) => {
         $b.group_role(stringify!($group), stringify!($role));
@@ -183,6 +251,16 @@ macro_rules! __axiam_manifest_stmt {
     };
     ($b:ident; user $key:ident = $name:expr, $email:expr; $($rest:tt)*) => {
         $b.user(stringify!($key), $name, $email, None);
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+
+    // service_account <key> = <name>[, <description>];
+    ($b:ident; service_account $key:ident = $name:expr, $desc:expr; $($rest:tt)*) => {
+        $b.service_account(stringify!($key), $name, Some($desc));
+        $crate::__axiam_manifest_stmt!($b; $($rest)*);
+    };
+    ($b:ident; service_account $key:ident = $name:expr; $($rest:tt)*) => {
+        $b.service_account(stringify!($key), $name, None);
         $crate::__axiam_manifest_stmt!($b; $($rest)*);
     };
 
