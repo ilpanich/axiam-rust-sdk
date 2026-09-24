@@ -27,7 +27,7 @@ step; ticked and pushed the moment a step is done. Deleted in the final commit.
   wasm-pack web/bundler/nodejs + `wasm-smoke.mjs` ✓ (wasm-pack 0.15.0 via npm), buf 1.50.0
   lint/format/breaking ✓ (via npm), `cargo audit` ✓ (0 findings; yank check could not reach
   the index: 503), coverage 92.08 % lines ≥ 90 ✓ (`manifest/builder.rs` raised to 100 %)
-- [ ] 10. PR opened, subscribed, green
+- [ ] 10. PR opened, subscribed, green — **opened: ilpanich/axiam-rust-sdk#115, subscribed**; waiting for CI. When green: delete this ledger in the final commit, delete the resume triggers
 - [ ] 11. Fan-out row, ambiguities for C-12, prompt for C-2 … C-11
 
 ## CI commands (step 2)
