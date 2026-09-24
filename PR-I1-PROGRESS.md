@@ -18,7 +18,7 @@ step; ticked and pushed the moment a step is done. Deleted in the final commit.
 - [x] 4. Acting tenant (§5.2 rule 1) — handle-scoped `with_acting_tenant` / `acting_tenant` / `clear_acting_tenant`; gated on a held login result; memo keyed on it; `tests/acting_tenant_test.rs` (9); suite 947/0
 - [x] 5. `authenticate_device()` (§6.1 rules 6–10) + `examples/device_mtls_login.rs` — runtime gate (AuthError, zero wire) rather than a typestate, reason in the commit; token adopted as a bearer with the jar withheld; 401 never refreshes; `tests/device_auth_test.rs` (8); suite 956/0
 - [x] 6. gRPC `validate_token` / `introspect_token` (§1.1.1, §10.3) — `grpc::TokenGrpcClient`; rule-9 table moved onto `CnfClaim::verify` (one implementation for local and gRPC); `tests/grpc_token_test.rs` (8); suite 964/0
-- [ ] 7. JwksVerifier and `cnf` (§10.1 rule 9)
+- [x] 7. JwksVerifier and `cnf` (§10.1 rule 9) — **bug fixed**: `verify()` (the `AxiamUser` guard) accepted bound tokens as bearer; now refuses them without evidence; `verify_with_proofs`; `middleware::PeerCertificate` via `on_connect`; the test that pinned the defect is inverted, not relaxed; `tests/actix_bound_token_test.rs` (2) + 3 new in `local_verification_set_test`; suite 968/0
 - [ ] 8. Manifest (§27.6.1, §27.5 rule 5, §27.9 tests)
 - [ ] 9. README conformance, CHANGELOG, full CI suite locally
 - [ ] 10. PR opened, subscribed, green
