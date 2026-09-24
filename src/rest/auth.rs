@@ -136,6 +136,17 @@ pub(crate) struct LoginUserInfoWire {
     reachable_tenant_ids: Option<Vec<Uuid>>,
 }
 
+impl LoginUserInfoWire {
+    /// What this user object says about the principal's reach — the input to
+    /// the §5.2 rule 1 gate on [`AxiamClient::acting_tenant`].
+    pub(crate) fn principal_scope(&self) -> crate::client::PrincipalScope {
+        crate::client::PrincipalScope {
+            organization_level: self.organization_level,
+            reachable_tenant_ids: self.reachable_tenant_ids.clone(),
+        }
+    }
+}
+
 /// `200 OK` body from `/api/v1/auth/login`, `/api/v1/auth/mfa/verify`, and
 /// (fields overlap) `/api/v1/auth/refresh`.
 #[derive(Debug, Deserialize)]
@@ -425,6 +436,14 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
 
     client.capture_csrf_from_jar();
 
+    // A new session is a new principal until its login says otherwise. The two
+    // callers that read a user object (`login`, `verify_mfa`) record its reach
+    // straight after this; every other path that lands here (OPAQUE, SSO, the
+    // forced MFA setup, WebAuthn) completes a session without one, and must
+    // not inherit the previous principal's reach as a gate on
+    // `acting_tenant` (CONTRACT.md §5.2 rule 1).
+    client.set_principal_scope(None);
+
     Ok(claims)
 }
 
@@ -471,6 +490,9 @@ impl AxiamClient {
                 if let Some(pt) = wire.user.principal_tenant_id.or(wire.user.tenant_id) {
                     self.set_resolved_principal_tenant_id(pt);
                 }
+                // §5.2 rule 1: this client now holds a login result, so the
+                // acting-tenant helper gates on what it reported.
+                self.set_principal_scope(Some(wire.user.principal_scope()));
                 Ok(LoginResult::success_with_user(
                     wire.session_id,
                     wire.expires_in,
@@ -555,6 +577,9 @@ impl AxiamClient {
                 if let Some(pt) = wire.user.principal_tenant_id.or(wire.user.tenant_id) {
                     self.set_resolved_principal_tenant_id(pt);
                 }
+                // §5.2 rule 1: this client now holds a login result, so the
+                // acting-tenant helper gates on what it reported.
+                self.set_principal_scope(Some(wire.user.principal_scope()));
                 Ok(LoginResult::success_with_user(
                     wire.session_id,
                     wire.expires_in,
@@ -616,7 +641,7 @@ impl AxiamClient {
                     let response = client
                         .http()
                         .post(client.url(REFRESH_PATH))
-                        .header("X-Tenant-ID", client.tenant_header_value())
+                        .tenant_headers_of(&client)
                         .maybe_csrf_header(&client)
                         .json(&body)
                         .send()
@@ -724,7 +749,7 @@ impl AxiamClient {
         let response = self
             .http()
             .post(self.url(LOGOUT_PATH))
-            .header("X-Tenant-ID", self.tenant_header_value())
+            .tenant_headers_of(self)
             .maybe_csrf_header(self)
             .json(&body)
             .send()
@@ -739,6 +764,7 @@ impl AxiamClient {
         }
 
         self.token_manager().clear().await;
+        self.set_principal_scope(None);
         Ok(())
     }
 
@@ -793,6 +819,26 @@ pub(crate) fn deser_err(e: reqwest::Error) -> AxiamError {
 /// `if-let`/`header` boilerplate everywhere. `pub(crate)` so sibling REST
 /// modules (e.g. `rest::authz`) reuse the exact same forwarding logic instead
 /// of duplicating it (SDK-Q04).
+/// Extension so a request builder chain can take the §5 / §5.2 tenant headers
+/// in one call, in the same fluent position as [`CsrfHeaderExt`].
+pub(crate) trait TenantHeadersExt {
+    /// `X-Tenant-ID`, plus `X-Axiam-Tenant` when the handle acts on a tenant —
+    /// see [`AxiamClient::tenant_headers`].
+    fn tenant_headers_of(self, client: &AxiamClient) -> Self;
+    /// `X-Axiam-Tenant` only — see [`AxiamClient::acting_tenant_header`].
+    fn acting_tenant_of(self, client: &AxiamClient) -> Self;
+}
+
+impl TenantHeadersExt for reqwest::RequestBuilder {
+    fn tenant_headers_of(self, client: &AxiamClient) -> Self {
+        client.tenant_headers(self)
+    }
+
+    fn acting_tenant_of(self, client: &AxiamClient) -> Self {
+        client.acting_tenant_header(self)
+    }
+}
+
 pub(crate) trait CsrfHeaderExt {
     fn maybe_csrf_header(self, client: &AxiamClient) -> Self;
 }

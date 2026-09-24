@@ -37,7 +37,9 @@ use crate::AxiamError;
 use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
 use crate::rest::LoginResult;
-use crate::rest::auth::{CsrfHeaderExt, absorb_session_cookies, deser_err, map_error_response};
+use crate::rest::auth::{
+    CsrfHeaderExt, TenantHeadersExt, absorb_session_cookies, deser_err, map_error_response,
+};
 
 const REGISTER_START_PATH: &str = "/api/v1/auth/webauthn/register/start";
 const REGISTER_FINISH_PATH: &str = "/api/v1/auth/webauthn/register/finish";
@@ -558,6 +560,10 @@ impl AxiamClient {
         self.http()
             .post(self.url(path))
             .maybe_csrf_header(self)
+            // §5.2.2 rule 4: sent "as normal" on self-service calls too, and
+            // the server decides which tenant a call about the caller's own id
+            // belongs to. Only when this handle acts on a tenant.
+            .acting_tenant_of(self)
             .json(body)
             .send()
             .await
