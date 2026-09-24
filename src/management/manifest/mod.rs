@@ -1067,7 +1067,8 @@ impl<'c> Manifest<'c> {
                     stopped = true;
                     out.push((action, Outcome::Failed(e.to_string())));
                 }
-                Err(StepError::Rebind { error, restore }) => {
+                Err(StepError::Rebind(failure)) => {
+                    let RebindFailure { error, restore } = *failure;
                     stopped = true;
                     out.push((
                         action,
@@ -1365,7 +1366,10 @@ impl<'c> Manifest<'c> {
                             previous.tenant_scope,
                         )
                         .await;
-                    return Err(StepError::Rebind { error, restore });
+                    return Err(StepError::Rebind(Box::new(RebindFailure {
+                        error,
+                        restore,
+                    })));
                 }
             }
             Step::CreateServiceAccount {
@@ -1504,11 +1508,15 @@ enum Done {
 enum StepError {
     Plain(AxiamError),
     /// A binding `Update` whose re-assignment failed, and what restoring the
-    /// previous binding did.
-    Rebind {
-        error: AxiamError,
-        restore: Result<(), AxiamError>,
-    },
+    /// previous binding did. Boxed: two errors side by side would make every
+    /// step's `Result` carry them inline (clippy `result_large_err`).
+    Rebind(Box<RebindFailure>),
+}
+
+/// The two results a failed binding `Update` reports (§27.6.1 item 2).
+struct RebindFailure {
+    error: AxiamError,
+    restore: Result<(), AxiamError>,
 }
 
 impl From<AxiamError> for StepError {
