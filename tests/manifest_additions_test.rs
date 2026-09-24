@@ -892,3 +892,70 @@ async fn the_fake_enforces_one_assignment_per_subject_and_role() {
     };
     assert_eq!(statuses, vec![204, 409]);
 }
+
+/// Flipping `inherit` on a group's and a service account's binding is the
+/// same unassign-then-assign as for a user: each kind's own unassign route,
+/// then an assign carrying the new flag, and the next plan converges.
+#[tokio::test]
+async fn a_flipped_inherit_rebinds_groups_and_service_accounts_too() {
+    let (server, tenant, client) = tenant_server().await;
+    let site = tenant.seed_resource("site-1", json!({}));
+    let role = tenant.seed_role("Concierge", false);
+    let sa = tenant.seed_service_account("gate-controller");
+    let group = Uuid::new_v4();
+    tenant.state().groups.push(json!({
+        "id": group, "tenant_id": TENANT_ID, "name": "Staff", "description": "Staff",
+        "metadata": {}, "created_at": NOW, "updated_at": NOW,
+    }));
+    for (kind, subject) in [("groups", group), ("service-accounts", sa)] {
+        tenant.seed_assignment(Assignment {
+            kind,
+            role,
+            subject,
+            resource_id: Some(site),
+            inherit: true,
+            tenant_scope: None,
+        });
+    }
+    let manifest = ManagementManifest::new()
+        .with_resource(ResourceSpec::new("site", "site-1", "site"))
+        .with_role(RoleSpec::new("concierge", "Concierge", "Concierge"))
+        .with_group(
+            GroupSpec::new("staff", "Staff", "Staff")
+                .with_roles([RoleBinding::at_only("concierge", "site")]),
+        )
+        .with_service_account(
+            ServiceAccountSpec::new("gate", "gate-controller")
+                .with_roles([RoleBinding::at_only("concierge", "site")]),
+        );
+
+    let at = mark(&server).await;
+    let report = client.manifest().apply(&manifest).await.unwrap();
+    assert!(report.is_complete(), "{:?}", report.failure());
+
+    let deletes: Vec<String> = requests_since(&server, at)
+        .await
+        .iter()
+        .filter(|r| r.method.as_str() == "DELETE")
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert_eq!(
+        deletes,
+        vec![
+            format!("/api/v1/roles/{role}/groups/{group}"),
+            format!("/api/v1/roles/{role}/service-accounts/{sa}"),
+        ]
+    );
+    assert!(
+        tenant.state().assignments.iter().all(|a| !a.inherit),
+        "both now stop at the resource"
+    );
+    assert!(
+        client
+            .manifest()
+            .plan(&manifest)
+            .await
+            .unwrap()
+            .is_converged()
+    );
+}

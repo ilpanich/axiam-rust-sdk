@@ -20,7 +20,13 @@ step; ticked and pushed the moment a step is done. Deleted in the final commit.
 - [x] 6. gRPC `validate_token` / `introspect_token` (§1.1.1, §10.3) — `grpc::TokenGrpcClient`; rule-9 table moved onto `CnfClaim::verify` (one implementation for local and gRPC); `tests/grpc_token_test.rs` (8); suite 964/0
 - [x] 7. JwksVerifier and `cnf` (§10.1 rule 9) — **bug fixed**: `verify()` (the `AxiamUser` guard) accepted bound tokens as bearer; now refuses them without evidence; `verify_with_proofs`; `middleware::PeerCertificate` via `on_connect`; the test that pinned the defect is inverted, not relaxed; `tests/actix_bound_token_test.rs` (2) + 3 new in `local_verification_set_test`; suite 968/0
 - [x] 8. Manifest (§27.6.1, §27.5 rule 5, §27.9 tests) — `ResourceSpec.metadata`, `RoleBinding` (two shapes), `ServiceAccountSpec`, `Outcome::{CreatedServiceAccount, BindingUpdateFailed}`, `manifest!` statements; `tests/manifest_additions_test.rs` (13, stateful fake tenant); six mutations caught; suite 982/0
-- [ ] 9. README conformance, CHANGELOG, full CI suite locally
+- [x] 9. README conformance, CHANGELOG, full CI suite locally — every `sdk-ci-rust.yml` job run here:
+  fmt ✓, clippy -D warnings ✓, build/test all-features stable 985/0 ✓ and MSRV 1.88 982/0 ✓
+  (before the last 3 tests), doc -D warnings ✓, examples (stable + 1.88) ✓, leak gate ✓,
+  TLS-lint ✓, `--features grpc` ✓, macros publish dry-run ✓, §27.8 drift ✓, wasm32 check ✓,
+  wasm-pack web/bundler/nodejs + `wasm-smoke.mjs` ✓ (wasm-pack 0.15.0 via npm), buf 1.50.0
+  lint/format/breaking ✓ (via npm), `cargo audit` ✓ (0 findings; yank check could not reach
+  the index: 503), coverage 92.08 % lines ≥ 90 ✓ (`manifest/builder.rs` raised to 100 %)
 - [ ] 10. PR opened, subscribed, green
 - [ ] 11. Fan-out row, ambiguities for C-12, prompt for C-2 … C-11
 

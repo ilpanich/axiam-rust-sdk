@@ -131,3 +131,107 @@ fn an_empty_declaration_is_legal() {
     assert!(m.resources.is_empty());
     assert!(m.roles.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Contract 1.51 (§27.6.1): metadata, scoped bindings, service accounts
+// ---------------------------------------------------------------------------
+
+/// Every 1.51 statement lowers to what the fluent constructors build.
+#[test]
+fn the_1_51_statements_agree_with_the_fluent_form() {
+    use axiam_sdk::management::manifest::{GroupSpec, RoleBinding, ServiceAccountSpec, UserSpec};
+    let meta = serde_json::json!({ "region": "eu" });
+
+    let declared = manifest! {
+        resource site  = "site-1", "site", metadata meta.clone();
+        resource flat  = "flat-7", "apartment", under site, metadata serde_json::json!({});
+        role resident  = "Resident", "Lives here";
+        role guest     = "Guest", "Visits";
+        role concierge = "Concierge", "Runs the site";
+        group staff    = "Staff", "Staff";
+        assign role concierge, to group staff, at site;
+        assign role guest, to group staff, at flat, here only;
+        user ann       = "ann", "ann@example.com";
+        assign role resident, to user ann, at flat, here only;
+        assign role guest, to user ann, at site;
+        service_account gate  = "gate-controller", "Opens the gate";
+        service_account meter = "meter";
+        assign role concierge, to service_account gate, at site, here only;
+        assign role guest, to service_account gate;
+        assign role resident, to service_account meter, at flat;
+    };
+
+    assert_eq!(declared.resources[0].metadata, Some(meta));
+    assert_eq!(declared.resources[1].parent.as_deref(), Some("site"));
+    assert_eq!(declared.resources[1].metadata, Some(serde_json::json!({})));
+    let group = GroupSpec::new("staff", "Staff", "Staff").with_roles([
+        RoleBinding::at("concierge", "site"),
+        RoleBinding::at_only("guest", "flat"),
+    ]);
+    assert_eq!(declared.groups[0], group);
+    let user = UserSpec::new("ann", "ann", "ann@example.com").with_roles([
+        RoleBinding::at_only("resident", "flat"),
+        RoleBinding::at("guest", "site"),
+    ]);
+    assert_eq!(declared.users[0].roles, user.roles);
+    assert_eq!(
+        declared.service_accounts,
+        vec![
+            ServiceAccountSpec::new("gate", "gate-controller")
+                .with_description("Opens the gate")
+                .with_roles([
+                    RoleBinding::at_only("concierge", "site"),
+                    RoleBinding::from("guest"),
+                ]),
+            ServiceAccountSpec::new("meter", "meter")
+                .with_roles([RoleBinding::at("resident", "flat")]),
+        ]
+    );
+    // The accessors say what the shape says.
+    let b = &declared.service_accounts[0].roles[0];
+    assert_eq!(
+        (b.role(), b.resource(), b.inherit()),
+        ("concierge", Some("site"), false)
+    );
+    let plain = &declared.service_accounts[0].roles[1];
+    assert_eq!(
+        (plain.role(), plain.resource(), plain.inherit()),
+        ("guest", None, true)
+    );
+    assert_eq!(*plain, "guest");
+    assert_ne!(*b, "concierge", "a scoped binding is not its bare key");
+}
+
+/// A 1.51 statement attaching to an undeclared key is reported by key, like
+/// every other attachment.
+#[test]
+fn an_unresolvable_1_51_attachment_is_reported_by_key() {
+    let mut builder = ManifestBuilder::new();
+    builder.resource_metadata("nowhere", serde_json::json!({}));
+    let err = builder.try_build().expect_err("no such resource");
+    assert!(err.contains("nowhere"), "{err}");
+
+    let mut builder = ManifestBuilder::new();
+    builder.service_account_role("ghost", "role");
+    let err = builder.try_build().expect_err("no such service account");
+    assert!(err.contains("ghost"), "{err}");
+
+    let mut builder = ManifestBuilder::new();
+    builder.group_role("nobody", "role");
+    let err = builder.try_build().expect_err("no such group");
+    assert!(err.contains("nobody"), "{err}");
+
+    let mut builder = ManifestBuilder::new();
+    builder.user_role("nobody", "role");
+    let err = builder.try_build().expect_err("no such user");
+    assert!(err.contains("nobody"), "{err}");
+
+    let mut builder = ManifestBuilder::new();
+    builder.member("nobody", "group");
+    let err = builder.try_build().expect_err("no such user");
+    assert!(err.contains("nobody"), "{err}");
+
+    let mut builder = ManifestBuilder::new();
+    builder.grant("nobody", "perm", PermissionEffect::Allow, &[]);
+    assert!(builder.try_build().is_err());
+}

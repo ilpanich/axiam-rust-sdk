@@ -56,7 +56,7 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.50**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.51**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28 (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
 signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
@@ -73,6 +73,33 @@ that ships only one half to say which; this one ships both.
 into the range because they landed after this SDK already claimed §1–§13: widening the
 range silently would turn a statement that was true when written into a different claim
 without anyone editing it.
+
+### Contract 1.51 — what this SDK ships, and what it declines
+
+| Contract 1.51 item | Status here |
+|---|---|
+| §1.1.1 `validate_token` / `introspect_token` (gRPC) | **Shipped**: `grpc::TokenGrpcClient`. Every response field, `cnf` optional, `status()` / `verify_possession()` for §10.3 rules 1–4 |
+| §5.2 rule 1 acting tenant (SHOULD) | **Shipped**: `with_acting_tenant(Uuid)` / `acting_tenant(Uuid)` / `clear_acting_tenant()`. REST-only; gRPC acts on the token's tenant |
+| §6.1 rules 6–10 `authenticate_device()` | **Shipped**. Rule 7 is enforced **client-side at runtime** (`AxiamError::Auth`, zero wire calls), not in the type system — see below |
+| §10.1 rule 9 in the documented guard | **Shipped**, as a fix: `JwksVerifier::verify` / `AxiamUser` refuse a bound token without evidence, and accept it with `PeerCertificate` or `verify_with_proofs` |
+| §27.6.1 `resources[].metadata` | **Shipped**, whole-object equality |
+| §27.6.1 two-shape role binding, `inherit` | **Shipped** on groups, users and service accounts |
+| §27.6.1 `service_accounts`, §27.5 rule 5 | **Shipped**; the one-time `client_secret` is on `Outcome::CreatedServiceAccount` |
+| §27.13 `Server` type, `subject_alt_names`, `inherit` | **Shipped** via the regenerated surface; `CertificateType` decodes openly |
+| §27.6 `webhooks` in the manifest | **Declined**: the contract names it without specifying it, and no consumer has asked for it |
+
+**Why §6.1 rule 7 is a runtime check here.** The contract says "where the type system
+can express that, it does". Rust's could, but only by making `AxiamClient` a typestate.
+`AxiamClient<WithCertificate>` would change the type of every client in every caller,
+and would force every builder method to be forwarded for the sake of one operation. The
+SDK uses the rule's other branch instead: the call fails with `AxiamError::Auth` before
+any request, and a test pins that no request is made.
+
+**The manifest, in §27.10's terms.** This SDK is in the full tier: resources (nested),
+scopes, permissions, roles, role grants, groups, users, service accounts, resource
+metadata, and group/user/service-account role bindings in both shapes. `webhooks` is not
+implemented. The §27.7 `#[derive(AxiamSpec)]` form has never shipped here; `manifest!`
+is the declarative form.
 
 ### Retry policy (§16)
 
@@ -209,6 +236,26 @@ let verifier = JwksVerifier::new(http, &base_url)?
 primitive, for integrators implementing their own policy. It checks the signature and
 nothing else — never use it to guard a route.
 
+**Rule 9, sender-constrained tokens (fixed in contract 1.51).** `verify(token)` applies
+rule 9 with no evidence at all, so it **refuses** any token carrying `cnf`. That includes
+every §6.1 device token, which is bound to its certificate. Until 1.51 it accepted those
+as bearer tokens. To accept bound tokens, give the verifier the evidence your transport
+holds:
+
+```rust,ignore
+// The certificate the TLS layer verified for this connection — never a header.
+let claims = verifier
+    .verify_with_proofs(token, PresentedProofs {
+        certificate_thumbprint: Some(&certificate_thumbprint_s256(peer_der)),
+        dpop_thumbprint: None,          // or the jkt `verify_dpop_proof` returned
+    })
+    .await?;
+```
+
+`AxiamUser` does this by itself when the server records the peer certificate as
+`middleware::PeerCertificate` in `HttpServer::on_connect`. A deployment where the
+application never sees a client certificate refuses bound tokens, as detail 3 requires.
+
 ### §10.4 the session-revocation feed (contract 1.44, opt-in)
 
 §10.2 records the gap this narrows: local verification proves a token was issued and has
@@ -258,8 +305,8 @@ dependencies for the transports/integrations it actually uses:
 
 | Feature | Default | Enables |
 |---------|---------|---------|
-| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`, `sso_providers`, `sso_start_oauth2`, `sso_complete_oauth2`, `sso_complete_handoff`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
-| `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1) — both over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
+| `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, the §6.1 mTLS device login `authenticate_device`, the §5.2 acting tenant (`with_acting_tenant` / `acting_tenant` / `clear_acting_tenant`), `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`, `sso_providers`, `sso_start_oauth2`, `sso_complete_oauth2`, `sso_complete_handoff`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
+| `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1); `TokenGrpcClient` gRPC `validate_token`/`introspect_token` (CONTRACT §1.1.1, reading `cnf` per §10.3) — all over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
 | `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8), and `reactor_serve(config, handler)` — the CONTRACT.md §22 reactor runtime (hook events, signed in **both** directions) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
 | — | — | `webhook::verify_webhook` (CONTRACT.md §13) has no feature of its own: it is compiled whenever `rest` **or** `amqp` is on, since both already vendor its `hmac`/`sha2`/`hex`/`subtle` inputs. With the default feature set it is always available |
@@ -325,6 +372,49 @@ let allowed = client.can("resource:write", resource_id, None).await?;
 ```
 
 See [`examples/rest_check_access.rs`](examples/rest_check_access.rs).
+
+### Acting on another tenant (`rest`, CONTRACT.md §5.2 rule 1)
+
+An **organization-level** principal (one whose record lives in the organization's
+reserved tenant) acts on another tenant of the organization by sending
+`X-Axiam-Tenant`. Build a handle for that tenant; the original keeps acting on its own:
+
+```rust,ignore
+let client = AxiamClient::builder()
+    .base_url("https://iam.example.com")?
+    .tenant_slug("organization")
+    .org_slug("acme")
+    .build()?;
+client.login("root@acme.example", password).await?;
+
+let prod = client.acting_tenant(prod_tenant_id)?;   // refused client-side unless organization_level
+prod.groups().list(PageRequest::first(50)).await?;  // sends X-Axiam-Tenant: <prod_tenant_id>
+client.groups().list(PageRequest::first(50)).await?; // sends none
+```
+
+The header is sent only when set. It changes neither `X-Tenant-ID` nor a `{tenant_id}` path
+segment, and it does not reach gRPC, whose calls act on the token's tenant.
+
+### mTLS device login (`rest`, CONTRACT.md §6.1 rules 6–10)
+
+A device holding a certificate that is bound to a service account logs in with the
+certificate alone:
+
+```rust,ignore
+let device = AxiamClient::builder()
+    .base_url("https://iam.example.com")?
+    .tenant_id(tenant_id)
+    .with_client_cert(&cert_pem, &key_pem)?
+    .build()?;
+let token = device.authenticate_device().await?;   // POST /api/v1/auth/device, no body
+device.can("telemetry:publish", resource_id, None).await?;
+```
+
+The token is a service-account token bound to the certificate. It works only over
+connections that present that certificate, which this client does on REST and gRPC alike.
+It has no refresh: call `authenticate_device()` again before `expires_in` runs out. See
+[`examples/device_mtls_login.rs`](examples/device_mtls_login.rs). Not to be confused with
+the RFC 8628 device grant in [`examples/device_login.rs`](examples/device_login.rs).
 
 ### gRPC authorization checks (`grpc`)
 
@@ -671,6 +761,11 @@ async fn protected(user: AxiamUser) -> String {
 ```
 
 See [`examples/actix_route_guard.rs`](examples/actix_route_guard.rs).
+
+A certificate-bound token (every §6.1 device token) is accepted only when the server has
+recorded the connection's verified client certificate as `middleware::PeerCertificate` in
+`HttpServer::on_connect` and the token names it. With no certificate it is refused
+(CONTRACT.md §10.1 rule 9).
 
 ### Declarative authorization helpers (`macros`)
 
