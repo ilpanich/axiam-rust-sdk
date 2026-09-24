@@ -564,10 +564,11 @@ impl AxiamClient {
             // and withhold a stale cookie, exactly as management/authz do
             // (`client.rs::session_credential`).
             .session_credential_of(self)
-            // §5.2.2 rule 4: sent "as normal" on self-service calls too, and
-            // the server decides which tenant a call about the caller's own id
-            // belongs to. Only when this handle acts on a tenant.
-            .acting_tenant_of(self)
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): `X-Tenant-ID` is
+            // unconditional on every request — this builder predated the
+            // rule and only ever sent §5.2 rule 1's `X-Axiam-Tenant` ("as
+            // normal", §5.2.2 rule 4).
+            .tenant_headers_of(self)
             .json(body)
             .send()
             .await
@@ -604,6 +605,10 @@ impl AxiamClient {
     ) -> Result<reqwest::Response, AxiamError> {
         self.http()
             .post(self.url(path))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request, even this sessionless pair — distinct from
+            // the CSRF/cookie omission just above, which is deliberate.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .header(reqwest::header::COOKIE, "")
             .json(body)
             .send()

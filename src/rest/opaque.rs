@@ -242,6 +242,9 @@ impl AxiamClient {
         let response = self
             .http()
             .post(self.url(LOGIN_START_PATH))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .json(&LoginStartRequest {
                 workspace: self.workspace_body(),
                 username_or_email: username_or_email.to_string(),
@@ -285,6 +288,9 @@ impl AxiamClient {
         let response = self
             .http()
             .post(self.url(LOGIN_FINISH_PATH))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .json(&LoginFinishRequest {
                 opaque_session: started.opaque_session,
                 ke3: finished.ke3,
@@ -403,6 +409,9 @@ impl AxiamClient {
         let response = self
             .http()
             .post(self.url(REGISTER_START_PATH))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .json(&RegisterStartRequest {
                 workspace,
                 registration_request: request,

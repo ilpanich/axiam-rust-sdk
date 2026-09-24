@@ -440,6 +440,9 @@ impl AxiamClient {
         let response = self
             .http()
             .get(url)
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request, even a pre-session GET.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .send()
             .await
             .map_err(|e| AxiamError::Network {
@@ -490,10 +493,12 @@ impl AxiamClient {
             // (`client.rs::session_credential`) — a self-service call is not
             // exempt from §6.1 rule 6 just because it predates it.
             .session_credential_of(self)
-            // §5.2.2 rule 4: sent "as normal" on self-service calls too, and
-            // the server decides which tenant a call about the caller's own id
-            // belongs to. Only when this handle acts on a tenant.
-            .acting_tenant_of(self)
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): `X-Tenant-ID` is
+            // unconditional on every request — this self-service builder
+            // predates the rule and only ever sent §5.2 rule 1's
+            // `X-Axiam-Tenant` ("as normal", §5.2.2 rule 4). Sending both
+            // together matches every other request builder in the crate.
+            .tenant_headers_of(self)
             .json(body)
             .send()
             .await

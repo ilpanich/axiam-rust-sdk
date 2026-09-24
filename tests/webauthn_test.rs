@@ -22,7 +22,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const STATE_TOKEN: &str = "state-token-fixture-value-do-not-log";
@@ -459,6 +459,25 @@ async fn discoverable_workspace_can_be_overridden() {
 // §24.2 — two distinct flows
 // ---------------------------------------------------------------------------
 
+/// CONTRACT 1.52 (C-12) — §5 rule 2: the session-based ceremonies
+/// (`webauthn_post`) sent no `X-Tenant-ID` either — its
+/// `.acting_tenant_of(self)` call only ever adds `X-Axiam-Tenant`.
+#[tokio::test]
+async fn authenticate_start_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(AUTH_START))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(challenge_body(discoverable_challenge()))
+        .mount(&server)
+        .await;
+
+    build_client(&server.uri())
+        .webauthn_authenticate_start(&Sensitive::new(CHALLENGE_TOKEN.into()))
+        .await
+        .expect("§5 rule 2: webauthn_authenticate_start() must send X-Tenant-ID");
+}
+
 #[tokio::test]
 async fn second_factor_start_sends_only_the_challenge_token() {
     let server = MockServer::start().await;
@@ -764,6 +783,26 @@ async fn setup_register_start_returns_the_challenge() {
 
     assert_eq!(challenge.state_token.expose(), STATE_TOKEN);
     assert_eq!(challenge.challenge, creation_challenge());
+}
+
+/// CONTRACT 1.52 (C-12) — §5 rule 2: `X-Tenant-ID` is unconditional on every
+/// outgoing request, including the sessionless setup pair.
+/// `webauthn_post_no_session` sent no headers at all beyond the empty
+/// `Cookie` it deliberately pre-empts the jar with.
+#[tokio::test]
+async fn setup_register_start_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(SETUP_REGISTER_START))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(challenge_body(creation_challenge()))
+        .mount(&server)
+        .await;
+
+    build_client(&server.uri())
+        .webauthn_setup_register_start(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect("§5 rule 2: webauthn_setup_register_start() must send X-Tenant-ID");
 }
 
 /// §25.1 rule 2 / §24.1: the same `400` `mfa_setup_enroll` gives for an

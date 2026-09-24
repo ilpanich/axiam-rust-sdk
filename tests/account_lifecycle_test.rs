@@ -17,7 +17,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const SECRET: &str = "JBSWY3DPEHPK3PXPSECRETVALUE";
@@ -558,6 +558,47 @@ async fn reset_context_returns_the_policy_and_no_identity() {
         .expect("context");
 
     assert_eq!(context.opaque.expect("policy")["mode"], "required");
+}
+
+/// CONTRACT 1.52 (C-12) — §5 rule 2: `X-Tenant-ID` is unconditional on every
+/// outgoing request. `password_reset_context` sent none at all.
+#[tokio::test]
+async fn reset_context_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/reset/context"))
+        .and(query_param("token", RESET_TOKEN))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"opaque": {"mode": "required", "ksf": "argon2id"}})),
+        )
+        .mount(&server)
+        .await;
+
+    build_client(&server.uri())
+        .password_reset_context(&Sensitive::new(RESET_TOKEN.into()))
+        .await
+        .expect("§5 rule 2: password_reset_context() must send X-Tenant-ID");
+}
+
+/// `mfa_setup_enroll` goes through `account_post`, which sent no
+/// `X-Tenant-ID` either — the builder's `.acting_tenant_of(self)` call only
+/// ever adds `X-Axiam-Tenant`.
+#[tokio::test]
+async fn mfa_setup_enroll_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/mfa/setup/enroll"))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(enroll_body())
+        .mount(&server)
+        .await;
+
+    build_client(&server.uri())
+        .mfa_setup_enroll(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect("§5 rule 2: mfa_setup_enroll() must send X-Tenant-ID");
 }
 
 #[tokio::test]
