@@ -395,11 +395,13 @@ fn an_empty_tenant_scope_is_dropped_from_the_body() {
 
     let omitted = AssignRoleToUserRequest {
         user_id: Uuid::new_v4(),
+        inherit: None,
         resource_id: None,
         tenant_scope: None,
     };
     let empty = AssignRoleToUserRequest {
         user_id: Uuid::new_v4(),
+        inherit: None,
         resource_id: None,
         tenant_scope: Some(Vec::new()),
     };
@@ -434,6 +436,7 @@ fn a_named_tenant_scope_is_sent() {
     expect_present(
         serde_json::to_value(AssignRoleToUserRequest {
             user_id: Uuid::new_v4(),
+            inherit: None,
             resource_id: None,
             tenant_scope: Some(vec![scoped]),
         })
@@ -443,6 +446,7 @@ fn a_named_tenant_scope_is_sent() {
     expect_present(
         serde_json::to_value(AssignRoleToGroupRequest {
             group_id: Uuid::new_v4(),
+            inherit: None,
             resource_id: None,
             tenant_scope: Some(vec![scoped]),
         })
@@ -452,6 +456,7 @@ fn a_named_tenant_scope_is_sent() {
     expect_present(
         serde_json::to_value(AssignRoleToServiceAccountRequest {
             service_account_id: Uuid::new_v4(),
+            inherit: None,
             resource_id: None,
             tenant_scope: Some(vec![scoped]),
         })

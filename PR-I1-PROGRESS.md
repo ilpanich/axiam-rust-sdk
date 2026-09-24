@@ -14,7 +14,7 @@ step; ticked and pushed the moment a step is done. Deleted in the final commit.
 
 - [x] 1. SAGE boot — **not connected** in this session (no `sage_*` tools exist); continued without it
 - [x] 2. Read CLAUDE.md, README conformance, CHANGELOG, every CI workflow; record CI commands below
-- [ ] 3. Re-vendor from `56fbe44` + regenerate §27; CertificateType decodes openly (+ test)
+- [x] 3. Re-vendor from `56fbe44` + regenerate §27; CertificateType decodes openly (+ test) — CONTRACT/openapi/registry byte-match `56fbe44`, proto already identical; generator taught externally-tagged `oneOf` (SubjectAltName was an empty struct) and `inherit` absent→true; `tests/contract_151_models_test.rs` (8); full suite 938/0
 - [ ] 4. Acting tenant (§5.2 rule 1)
 - [ ] 5. `authenticate_device()` (§6.1 rules 6–10) + `examples/device_mtls_login.rs`
 - [ ] 6. gRPC `validate_token` / `introspect_token` (§1.1.1, §10.3)

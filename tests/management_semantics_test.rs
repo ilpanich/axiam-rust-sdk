@@ -689,6 +689,7 @@ async fn sign_csr_decodes_as_certificate_and_drops_a_private_key_the_server_sent
             csr_pem: "-----BEGIN CERTIFICATE REQUEST-----".into(),
             issuer_ca_id: ca,
             metadata: None,
+            subject_alt_names: None,
             validity_days: 90,
         })
         .await

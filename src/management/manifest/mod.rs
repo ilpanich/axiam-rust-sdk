@@ -995,6 +995,10 @@ impl<'c> Manifest<'c> {
                         role_id,
                         &models::AssignRoleToGroupRequest {
                             group_id,
+                            // CONTRACT.md §27.13 S-10 rule 1: never sent as
+                            // `true`, so an inheritable binding's body stays a
+                            // pre-1.51 body.
+                            inherit: None,
                             resource_id: None,
                             // CONTRACT.md §5.2.3. A manifest has no syntax for
                             // naming tenants on an assignment, so every one it
@@ -1045,6 +1049,8 @@ impl<'c> Manifest<'c> {
                         role_id,
                         &models::AssignRoleToUserRequest {
                             user_id,
+                            // CONTRACT.md §27.13 S-10 rule 1 -- see `AssignRoleToGroup`.
+                            inherit: None,
                             resource_id: None,
                             // CONTRACT.md §5.2.3 -- see `AssignRoleToGroup`.
                             tenant_scope: None,

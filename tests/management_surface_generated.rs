@@ -669,7 +669,7 @@ async fn roles_surface() {
         .expect("roles.delete");
 
     // roles.list_users
-    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/users"), 200, r#"[{"user": {"created_at": "2026-08-26T00:00:00Z", "email": "example", "email_verified": true, "failed_login_attempts": 1, "id": "11111111-1111-4111-8111-111111111111", "is_locked": true, "metadata": {}, "mfa_enabled": true, "status": "Active", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "username": "example"}}]"#).await;
+    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/users"), 200, r#"[{"inherit": true, "user": {"created_at": "2026-08-26T00:00:00Z", "email": "example", "email_verified": true, "failed_login_attempts": 1, "id": "11111111-1111-4111-8111-111111111111", "is_locked": true, "metadata": {}, "mfa_enabled": true, "status": "Active", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "username": "example"}}]"#).await;
     client
         .roles()
         .list_users(example_id())
@@ -690,6 +690,7 @@ async fn roles_surface() {
         .assign_to_user(
             example_id(),
             &models::AssignRoleToUserRequest {
+                inherit: None,
                 resource_id: None,
                 tenant_scope: None,
                 user_id: example_id(),
@@ -714,7 +715,7 @@ async fn roles_surface() {
         .expect("roles.unassign_from_user");
 
     // roles.list_groups
-    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/groups"), 200, r#"[{"group": {"created_at": "2026-08-26T00:00:00Z", "description": "example", "id": "11111111-1111-4111-8111-111111111111", "metadata": {}, "name": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}}]"#).await;
+    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/groups"), 200, r#"[{"group": {"created_at": "2026-08-26T00:00:00Z", "description": "example", "id": "11111111-1111-4111-8111-111111111111", "metadata": {}, "name": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}, "inherit": true}]"#).await;
     client
         .roles()
         .list_groups(example_id())
@@ -736,6 +737,7 @@ async fn roles_surface() {
             example_id(),
             &models::AssignRoleToGroupRequest {
                 group_id: example_id(),
+                inherit: None,
                 resource_id: None,
                 tenant_scope: None,
             },
@@ -804,7 +806,7 @@ async fn roles_surface() {
         .expect("roles.revoke_permission");
 
     // roles.list_service_accounts
-    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/service-accounts"), 200, r#"[{"service_account": {"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "id": "11111111-1111-4111-8111-111111111111", "name": "example", "status": "Active", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}}]"#).await;
+    mount(&server, "GET", &format!("/api/v1/roles/{EXAMPLE_ID}/service-accounts"), 200, r#"[{"inherit": true, "service_account": {"client_id": "example", "created_at": "2026-08-26T00:00:00Z", "id": "11111111-1111-4111-8111-111111111111", "name": "example", "status": "Active", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}}]"#).await;
     client
         .roles()
         .list_service_accounts(example_id())
@@ -825,6 +827,7 @@ async fn roles_surface() {
         .assign_to_service_account(
             example_id(),
             &models::AssignRoleToServiceAccountRequest {
+                inherit: None,
                 resource_id: None,
                 service_account_id: example_id(),
                 tenant_scope: None,
@@ -1197,6 +1200,7 @@ async fn certificates_surface() {
             key_algorithm: models::KeyAlgorithm::Rsa4096,
             metadata: None,
             subject: "example".to_string(),
+            subject_alt_names: None,
             validity_days: 1,
         })
         .await
@@ -1211,6 +1215,7 @@ async fn certificates_surface() {
             csr_pem: "example".to_string(),
             issuer_ca_id: example_id(),
             metadata: None,
+            subject_alt_names: None,
             validity_days: 1,
         })
         .await
@@ -1992,6 +1997,7 @@ async fn settings_surface() {
             require_symbols: true,
             require_uppercase: true,
             sensitive_scopes_enabled: None,
+            server_cert_allowed_names: None,
             webauthn_user_verification: None,
         })
         .await
