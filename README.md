@@ -1879,21 +1879,79 @@ let report = client.manifest().apply(&desired).await?;
 each spec by its natural key — a user's `username`, a role's `name`, a scope's `name`
 within its resource — and returns the ordered actions that would reconcile the tenant.
 
-- **Nothing is ever deleted.** A manifest is usually a *subset* of a tenant's truth, and a
-  prune would turn "make sure these three roles exist" into "delete the other forty". There
-  is no prune option, deliberately.
+- **Nothing outside a manifest's own entities is ever deleted.** A manifest is usually a
+  *subset* of a tenant's truth, and a prune would turn "make sure these three roles exist"
+  into "delete the other forty". There is no prune option, deliberately. The one exception is
+  a role binding's own `Update`: there is no update endpoint, so it is performed as
+  **unassign, then assign**, and between the two calls the subject does not hold the role.
 - **A field the manifest does not state is never a difference**, so `apply` is safe against
   a tenant that also holds hand-made state.
 - **Applying twice converges**: the second plan is all `NoChange`. That is what makes
   re-running after a failure safe.
 - **There is no transaction** across 158 independent HTTP endpoints, and `ApplyReport` does
-  not pretend there is. If step 12 of 30 fails, steps 1–11 have happened; the report says
-  which, execution stops rather than continuing blindly, and there is no `rollback` —
-  because this SDK could not honour one.
+  not pretend there is. If step 12 of 30 fails, steps 1–11 have happened and the report says
+  which, execution stops rather than continuing blindly. The one exception is a binding
+  `Update`'s own assign half: if it fails, `apply` re-assigns the previous binding and reports
+  both outcomes (`Outcome::BindingUpdateFailed { restore }`) — restoring one binding is not a
+  transaction over the other 157 endpoints, which still have no rollback.
 
 Broken manifests are refused before the first request: dangling keys, duplicate keys, a
-cycle in the resource parent graph, and a user that would have to be created with no
-`initial_password` all fail while nothing has been changed.
+cycle in the resource parent graph, a user that would have to be created with no
+`initial_password`, a role bound twice to one subject (the server keys assignments on
+subject and role and answers `409` to a second), and a global role bound with
+`inherit: false` (the server answers `400`; §27.6.1 lets an SDK say so first) all fail while
+nothing has been changed. One check cannot run this early: a service account's name is not
+unique on the server, so an ambiguous one — more than one existing account sharing a
+manifest entry's name — is caught only once `plan()`'s own `GET`s have run, and fails there.
+
+#### Resource-scoped bindings, service accounts, and metadata
+
+The example above only assigns a role tenant-wide. The full grammar of the `manifest!`
+macro's `assign` statement, contract 1.51's `RoleBinding` type:
+
+```rust,ignore
+assign role editor, to group staff;                       // RoleBinding::Role — tenant-wide
+assign role editor, to group staff, at documents;          // RoleBinding::at — reaches descendants
+assign role editor, to group staff, at documents, here only; // RoleBinding::at_only — inherit: false
+```
+
+The same three forms work for `to user` and `to service_account`. A plain (non-`assign`)
+statement — `group_role(g, "key")`, `user_role(u, "key")` — still compiles and produces
+`RoleBinding::Role`; a manifest built by hand does the same by pushing `RoleBinding`s onto a
+spec's `roles: Vec<RoleBinding>` (`RoleBinding::at`/`at_only` take a role key and a resource
+key). `inherit: false` on a role the manifest declares `global` is refused client-side
+(§27.6.1) — a global role reaches everywhere and ignores the resource.
+
+Service accounts are a manifest entity too, with their own bindings:
+
+```rust,ignore
+service_account device_writer = "device-writer", "Writes telemetry for this fleet";
+assign role editor, to service_account device_writer, at documents;
+```
+
+`ServiceAccountSpec` mirrors `UserSpec`: `key`, `name` (the natural key — see the ambiguity
+refusal above), an optional `description` (the only field an `Update` reconciles), and
+`roles: Vec<RoleBinding>`. A `Create` step's `Outcome` is `Outcome::CreatedServiceAccount`,
+carrying the server's one-time `client_secret` (never returned by a later read, §27.5 rules 3
+and 5); `ApplyReport::created_service_accounts()` iterates every one an apply created,
+including ones created before a later step failed.
+
+`ResourceSpec` takes arbitrary metadata:
+
+```rust,ignore
+resource documents = "documents", "collection", under workspace, metadata json!({"team": "docs"});
+```
+
+or, built by hand, `ResourceSpec::new(key, name, kind).with_metadata(json!({...}))`. Drift on
+it compares by JSON value equality, independent of key order — a stated `{}` is a value like
+any other, distinct from an unstated field.
+
+A binding `Update`'s own re-assignment can itself fail (its unassign already succeeded).
+`apply` re-assigns the previous binding and reports **both** outcomes as data, not only a
+message: `Outcome::BindingUpdateFailed { error, restore: Result<(), String> }` — `restore: Ok`
+means the subject holds the role exactly as before, `restore: Err(reason)` means it holds
+none and says why. `plan()` reports the binding change itself as `Change::Update`, not only
+`apply()`.
 
 ### Examples
 
