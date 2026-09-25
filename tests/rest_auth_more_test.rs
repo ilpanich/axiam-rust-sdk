@@ -12,6 +12,12 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
+
+/// A throwaway password for a mocked login, generated per call so no credential
+/// literal appears in the test source (the same helper `acting_tenant_test.rs` uses).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -637,7 +643,7 @@ async fn login_sends_the_x_tenant_id_header() {
         .expect("client builds");
 
     client
-        .login("alice@example.com", "correct horse battery staple")
+        .login("alice@example.com", &any_password())
         .await
         .expect("§5 rule 2: login() must send X-Tenant-ID on every request");
 }
@@ -665,7 +671,7 @@ async fn verify_mfa_sends_the_x_tenant_id_header() {
         .build()
         .expect("client builds");
     client
-        .login("alice@example.com", "correct horse battery staple")
+        .login("alice@example.com", &any_password())
         .await
         .expect("login should report mfa_required");
 

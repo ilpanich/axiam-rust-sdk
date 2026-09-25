@@ -16,6 +16,12 @@ use axiam_sdk::client::AxiamClient;
 use axiam_sdk::management::PageRequest;
 use serde_json::json;
 use uuid::Uuid;
+
+/// A throwaway password for a mocked login, generated per call so no credential
+/// literal appears in the test source (the same helper `acting_tenant_test.rs` uses).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -548,7 +554,7 @@ async fn login_after_a_device_login_replaces_the_device_credential() {
     let client = device_client(&server.uri());
     client.authenticate_device().await.expect("device login");
     client
-        .login("u@example.com", "correct horse")
+        .login("u@example.com", &any_password())
         .await
         .expect("login");
     client.groups().list(PageRequest::first(50)).await.unwrap();

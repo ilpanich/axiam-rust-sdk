@@ -17,6 +17,12 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+/// A throwaway password for a mocked login, generated per call so no credential
+/// literal appears in the test source (the same helper `acting_tenant_test.rs` uses).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -385,7 +391,7 @@ async fn mfa_setup_confirm_records_the_acting_tenant_gate() {
 
     let client = build_client(&server.uri());
     let login = client
-        .login("alice@example.com", "pw")
+        .login("alice@example.com", &any_password())
         .await
         .expect("login");
     let setup_token = login.setup_token.as_ref().expect("setup token");
