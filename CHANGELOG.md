@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-beta17] - 2026-09-25
 Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
 1, §6.1 rules 6–10, §10.1 rule 9, §27.6.1, §27.13). The vendored `CONTRACT.md`,
 `openapi.json` and `management-registry.json` come from axiam `56fbe44`;
 `proto/` was already identical.
 
 ### Added
+
+- Metadata, two-shape role bindings, service accounts (CONTRACT §27.6.1, contract 1.51)
+
+- Validate_token / introspect_token (CONTRACT §1.1.1, §10.3, contract 1.51)
+
+- Authenticate_device(), the mTLS device login (CONTRACT §6.1 rules 6-10)
+
+- Acting tenant, X-Axiam-Tenant (CONTRACT §5.2 rule 1, contract 1.51)
+
+- Re-vendor contract 1.51 and regenerate the §27 surface
 
 - **Acting tenant** (§5.2 rule 1). `AxiamClientBuilder::with_acting_tenant(Uuid)`,
   and on a client `acting_tenant(Uuid) -> Result<AxiamClient>` /
@@ -37,6 +48,7 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
   - The §17 decision memo is keyed on the acting tenant.
   - REST-only: gRPC acts on the token's tenant, and no metadata key is
     invented for it.
+
 - **`AxiamClient::authenticate_device()`**, the mTLS device login (§6.1 rules
   6–10). It is `POST /api/v1/auth/device` with no body and returns
   `rest::DeviceToken { access_token: Sensitive<String>, token_type, expires_in }`.
@@ -49,6 +61,7 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
     sent to the refresh guard. A `429` is not an authentication failure.
   - New example: `examples/device_mtls_login.rs`. `examples/device_login.rs`
     is still the RFC 8628 grant.
+
 - **gRPC `validate_token` / `introspect_token`** (§1.1.1, §10.3) on the new
   `grpc::TokenGrpcClient`.
   - Every response field is modelled, including `cnf` as
@@ -60,12 +73,14 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
   - The inspected token is a separate, required `&Sensitive<String>`.
   - With no caller token the call fails with no wire call. A token from
     another tenant comes back `valid: false`; that is not an error.
+
 - **`JwksVerifier::verify_with_proofs(token, PresentedProofs)`**, the full
   §10.1 set with rule-9 evidence. **`middleware::PeerCertificate`**: record the
   verified peer certificate in `HttpServer::on_connect`, and `AxiamUser`
   accepts a certificate-bound token that names it. `CnfClaim::verify` is the
   one implementation of the rule-9 table, shared by local and gRPC
   validation.
+
 - **Manifest additions** (§27.6.1, §27.5 rule 5).
   - `ResourceSpec::with_metadata`, compared as the whole JSON object.
   - `RoleBinding`, which is a role key or `{ role, resource, inherit }`, on
@@ -81,6 +96,7 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
   - `manifest!` gains `metadata`, `at <resource>[, here only]` and
     `service_account` statements.
   - `webhooks` stays unimplemented. Contract 1.51 does not require it.
+
 - **Contract 1.51 model changes** (§27.13), from the regenerated surface:
   - `CertificateType::Server`;
   - `SubjectAltName` (`Dns` / `Ip`) and `subject_alt_names` on both leaf
@@ -91,23 +107,64 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
 
 ### Changed
 
+- Re-vendor CONTRACT.md at contract 1.52
+
+- Generate the mocked-login passwords added by C-12 instead of hard-coding them
+
+- Correct C-12 findings and fill the 1.51 manifest documentation gap
+
+- Drop the resume ledger — CI green on c853412
+
+- Keep credential literals and tainted Debug renders out of the new tests (CodeQL)
+
+- Ledger — PR #115 open
+
+- README conformance at contract 1.51, CHANGELOG, coverage for the new manifest paths
+
+- Ledger — steps 1-2 done, CI commands recorded
+
+- Progress ledger
+
+- Bump dtolnay/rust-toolchain
+
+- Bump taiki-e/install-action from 2.87.11 to 2.87.15
+
+- Bump github/codeql-action/upload-sarif
+
 - **CONTRACT.md re-vendored at contract 1.52.** Copied byte for byte from axiam `80bc7aa`
   (sha256 `c7954eec…`), the merge of the C-12 cross-SDK conformance review
   (ilpanich/axiam#500). 1.52 changes no wire behaviour: it writes rules N1–N6, which
   this SDK's C-12 fixes (#116) already implement. The README's conformance line
   moves to 1.52.
+
 - **`X-Tenant-ID`** is now set in one place (`tenant_headers`) on the §1
   authorization, §27 management, `refresh` and `logout` requests. The wire is
   unchanged.
+
 - **A manifest binding of a plain role key over a server assignment that is
   resource-scoped is now an `Update`.** Before, only the binding's presence was
   compared. §27.6.1 defines the plain shape as "no resource", so the next
   `apply` re-binds it tenant-wide.
+
 - `tools/gen_management.py` now emits an externally tagged `oneOf` as an enum,
   and gives a required `inherit` a `true` default. Both are described under
   Fixed.
 
 ### Fixed
+
+- Gate TokenManager::has_refresh_token behind the grpc feature
+
+- Never enter the gRPC refresh guard for a non-refreshable credential
+
+- Record the acting-tenant gate from OPAQUE/MFA-setup/WebAuthn-setup completions
+
+- Send X-Tenant-ID unconditionally on every REST request
+
+- Present the device credential on account/webauthn calls and logout
+
+- Box the rebind failure (clippy result_large_err on stable 1.98)
+
+- JwksVerifier::verify enforces §10.1 rule 9 (contract 1.51)
 
 - **`JwksVerifier::verify`, and so `AxiamUser`, the §11 macros and the §28 MCP
   guard, accepted sender-constrained tokens as bearer tokens.** A token bound to
@@ -115,15 +172,19 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
   to a DPoP key was admitted without proof of possession, against §10.1 rule 9.
   `verify` now refuses any token carrying `cnf`, because it has no evidence to
   check it against. See Breaking.
+
 - **`SubjectAltName` was generated as a struct with no fields.** It compiled
   and serialized as `{}`, which the server refuses. It is now
   `enum SubjectAltName { Dns(String), Ip(String) }`, externally tagged.
+
 - The three role-side assignment listings would have failed to decode against
   a server older than 1.51, which omits the now-required `inherit`. The manifest
   reads those listings to plan. Absent now reads as `true` (§27.13 S-10 rule 3).
+
 - `examples/sender_constrained_guard.rs` said `verify()` did not apply rule 9,
   and would have refused the tokens it meant to accept. It now calls
   `verify_with_proofs`.
+
 - **C-12 conformance review (CONTRACT 1.52, unmerged draft).** Four defects
   the §6.1 device credential could hit after `authenticate_device()`:
   - **N4.3.** `account_post`, `webauthn_post` and `logout` sent no bearer
@@ -149,14 +210,18 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
   device tokens, record `PeerCertificate` in `on_connect`, or call
   `verify_with_proofs` / `verify_sender_constrained` with the connection's
   certificate. An unbound token is unaffected.
+
 - `GroupSpec::roles` and `UserSpec::roles` are `Vec<RoleBinding>`, not
   `Vec<String>`. `with_roles(["key"])`, `ManifestBuilder::group_role(g, "key")`
   and `user_role(u, "key")` still compile, and a plain binding compares equal to
   its key. Code that reads the vector as strings has to change.
+
 - `ManagementManifest` gains `service_accounts`, and `ResourceSpec` gains
   `metadata`. A struct literal must name them, or use `new()` and the builders.
+
 - `Outcome` and `Target` gain variants. Both are `#[non_exhaustive]`, so only
   an exhaustive `match` compiled against a pre-1.51 copy is affected.
+
 - **The N5.5 fix above (OPAQUE `login/finish`, `mfa_setup_confirm`,
   `webauthn_setup_register_finish`) tightens `acting_tenant()`.** It
   previously always succeeded after these three calls, because the gate was
