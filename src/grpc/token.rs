@@ -424,6 +424,13 @@ impl TokenGrpcClient {
         match attempt().await {
             Ok(response) => Ok(response.into_inner()),
             Err(status) if status.code() == Code::Unauthenticated => {
+                // CONTRACT 1.52 N4.5 (C-12): see
+                // `AuthzGrpcClient::refresh_and_retry` — a credential with no
+                // refresh token is never refreshed, and surfaces the
+                // server's own message rather than the guard's.
+                if !self.token_manager.has_refresh_token().await {
+                    return Err(status_to_axiam_error(status));
+                }
                 let observed = self
                     .token_manager
                     .cached_access_token()

@@ -12,12 +12,18 @@ use std::sync::Mutex;
 
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::rest::{PasswordResetConfirmation, PasswordResetRequest};
-use axiam_sdk::{AxiamError, Sensitive};
+use axiam_sdk::{AuthzKind, AxiamError, Sensitive};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-use wiremock::matchers::{method, path, query_param};
+
+/// A throwaway password for a mocked login, generated per call so no credential
+/// literal appears in the test source (the same helper `acting_tenant_test.rs` uses).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const SECRET: &str = "JBSWY3DPEHPK3PXPSECRETVALUE";
@@ -332,6 +338,91 @@ async fn the_forced_path_runs_end_to_end() {
     assert_eq!(client.resolved_tenant_id().await, Some(tenant_id));
 }
 
+/// CONTRACT 1.52 N5.5 (C-12): `mfa_setup_confirm` completes a login and the
+/// server's response carries a full user object (the same handler builds it
+/// as a password login, `axiam-api-rest/src/handlers/opaque.rs`'s sibling),
+/// so it must record the §5.2 rule 1 gate from it rather than resetting it to
+/// unknown through `absorb_session_cookies`.
+#[tokio::test]
+async fn mfa_setup_confirm_records_the_acting_tenant_gate() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let reachable = Uuid::new_v4();
+    let unreachable = Uuid::new_v4();
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "mfa_setup_required": true,
+            "setup_token": SETUP_TOKEN,
+        })))
+        .mount(&server)
+        .await;
+    mount_capturing(&server, "/api/v1/auth/mfa/setup/enroll", enroll_body()).await;
+
+    let access = access_token(tenant_id, org_id);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/mfa/setup/confirm"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "session_id": Uuid::new_v4(),
+                    "expires_in": 900,
+                    "user": {
+                        "id": Uuid::new_v4(), "username": "alice", "email": "a@example.com",
+                        "organization_level": true,
+                        "reachable_tenant_ids": [reachable],
+                    },
+                }))
+                .append_header(
+                    "Set-Cookie",
+                    format!("axiam_access={access}; Path=/; HttpOnly").as_str(),
+                )
+                .append_header(
+                    "Set-Cookie",
+                    "axiam_refresh=refresh-cookie; Path=/; HttpOnly",
+                )
+                .append_header("Set-Cookie", "axiam_csrf=csrf-tok; Path=/"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri());
+    let login = client
+        .login("alice@example.com", &any_password())
+        .await
+        .expect("login");
+    let setup_token = login.setup_token.as_ref().expect("setup token");
+    client
+        .mfa_setup_enroll(setup_token)
+        .await
+        .expect("setup enroll");
+    client
+        .mfa_setup_confirm(setup_token, "123456")
+        .await
+        .expect("setup confirm");
+
+    assert!(
+        client.acting_tenant(reachable).is_ok(),
+        "the reported reach must be recorded, not reset to unknown"
+    );
+    let Err(err) = client.acting_tenant(unreachable) else {
+        panic!("outside the reported reach, so the gate must refuse client-side");
+    };
+    assert!(
+        matches!(
+            err,
+            AxiamError::Authz {
+                kind: AuthzKind::Denied,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Email verification
 // ---------------------------------------------------------------------------
@@ -558,6 +649,47 @@ async fn reset_context_returns_the_policy_and_no_identity() {
         .expect("context");
 
     assert_eq!(context.opaque.expect("policy")["mode"], "required");
+}
+
+/// CONTRACT 1.52 (C-12) — §5 rule 2: `X-Tenant-ID` is unconditional on every
+/// outgoing request. `password_reset_context` sent none at all.
+#[tokio::test]
+async fn reset_context_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/reset/context"))
+        .and(query_param("token", RESET_TOKEN))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"opaque": {"mode": "required", "ksf": "argon2id"}})),
+        )
+        .mount(&server)
+        .await;
+
+    build_client(&server.uri())
+        .password_reset_context(&Sensitive::new(RESET_TOKEN.into()))
+        .await
+        .expect("§5 rule 2: password_reset_context() must send X-Tenant-ID");
+}
+
+/// `mfa_setup_enroll` goes through `account_post`, which sent no
+/// `X-Tenant-ID` either — the builder's `.acting_tenant_of(self)` call only
+/// ever adds `X-Axiam-Tenant`.
+#[tokio::test]
+async fn mfa_setup_enroll_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/mfa/setup/enroll"))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(enroll_body())
+        .mount(&server)
+        .await;
+
+    build_client(&server.uri())
+        .mfa_setup_enroll(&Sensitive::new(SETUP_TOKEN.into()))
+        .await
+        .expect("§5 rule 2: mfa_setup_enroll() must send X-Tenant-ID");
 }
 
 #[tokio::test]

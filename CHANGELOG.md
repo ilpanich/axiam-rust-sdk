@@ -16,8 +16,12 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
 
 - **Acting tenant** (§5.2 rule 1). `AxiamClientBuilder::with_acting_tenant(Uuid)`,
   and on a client `acting_tenant(Uuid) -> Result<AxiamClient>` /
-  `clear_acting_tenant()`. Each `/api/v1` REST request of such a handle carries
-  `X-Axiam-Tenant`.
+  `clear_acting_tenant()`. Each authenticated `/api/v1` REST request of such a
+  handle carries `X-Axiam-Tenant` — the server reads the header only in its
+  authentication extractor, so a pre-session route (`login`, `verify_mfa`,
+  OPAQUE, the device login, SSO completions, the WebAuthn setup pair,
+  `/oauth2/*`) reads no acting tenant, whether or not the header happens to
+  be sent there.
   - The id is a `Uuid`, so a slug cannot be sent. The server ignores a value
     that does not parse and answers for the caller's own tenant.
   - The header is sent **only when set**. A client that never asks for it
@@ -115,6 +119,23 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
 - `examples/sender_constrained_guard.rs` said `verify()` did not apply rule 9,
   and would have refused the tokens it meant to accept. It now calls
   `verify_with_proofs`.
+- **C-12 conformance review (CONTRACT 1.52, unmerged draft).** Four defects
+  the §6.1 device credential could hit after `authenticate_device()`:
+  - **N4.3.** `account_post`, `webauthn_post` and `logout` sent no bearer
+    credential, so a stale cookie from an earlier session rode along instead
+    of the device token.
+  - **§5 rule 2.** `login`, `verify_mfa`, `password_reset_context`, the
+    WebAuthn setup pair, `account_post`, `webauthn_post` and the three OPAQUE
+    calls sent no `X-Tenant-ID` at all — the header is unconditional on every
+    request, not only once a session exists.
+  - **N5.5.** OPAQUE `login/finish`, `mfa_setup_confirm` and
+    `webauthn_setup_register_finish` all complete a login and the server's
+    response carries a user object, but the §5.2 rule 1 gate was reset to
+    unknown rather than recorded from it.
+  - **N4.5 (gRPC).** `AuthzGrpcClient`/`TokenGrpcClient`/`UserInfoGrpcClient`
+    entered the §9 refresh guard on every `UNAUTHENTICATED`, even for a
+    credential with no refresh token to spend; the guard's own generic
+    message was surfaced instead of the server's.
 
 ### Breaking
 
@@ -131,6 +152,15 @@ Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
   `metadata`. A struct literal must name them, or use `new()` and the builders.
 - `Outcome` and `Target` gain variants. Both are `#[non_exhaustive]`, so only
   an exhaustive `match` compiled against a pre-1.51 copy is affected.
+- **The N5.5 fix above (OPAQUE `login/finish`, `mfa_setup_confirm`,
+  `webauthn_setup_register_finish`) tightens `acting_tenant()`.** It
+  previously always succeeded after these three calls, because the gate was
+  left unknown; it now refuses (`AxiamError::Authz`) for a tenant outside the
+  reach the response actually reported, exactly as it already did after
+  `login()`/`verify_mfa()`. A caller relying on the old, unconditionally
+  permissive behaviour after one of these three calls will see a new
+  client-side refusal for a tenant its principal cannot reach — the server
+  was always going to answer that request with its own `403`.
 
 ## [1.0.0-beta16] - 2026-09-19
 

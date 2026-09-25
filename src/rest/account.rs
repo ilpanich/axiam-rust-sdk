@@ -17,7 +17,8 @@ use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
 use crate::rest::LoginResult;
 use crate::rest::auth::{
-    CsrfHeaderExt, TenantHeadersExt, absorb_session_cookies, deser_err, map_error_response,
+    CsrfHeaderExt, LoginUserInfoWire, TenantHeadersExt, absorb_session_cookies, deser_err,
+    map_error_response,
 };
 
 const MFA_ENROLL_PATH: &str = "/api/v1/auth/mfa/enroll";
@@ -122,6 +123,11 @@ struct MfaConfirmWire {
 struct LoginSuccessWire {
     session_id: Uuid,
     expires_in: u64,
+    /// CONTRACT 1.52 N5.5 (C-12): present on this completion exactly as on a
+    /// password `login()` (the server handler shares the builder). Decoded
+    /// leniently — absent means unknown, never an error (N5.5 rule 5).
+    #[serde(default)]
+    user: Option<LoginUserInfoWire>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +301,13 @@ impl AxiamClient {
             200 => {
                 let wire: LoginSuccessWire = response.json().await.map_err(deser_err)?;
                 absorb_session_cookies(self).await?;
+                // CONTRACT 1.52 N5.5 (C-12): this completes a login and the
+                // response carries a user object exactly as `login()`'s
+                // does — record the gate from it rather than leaving
+                // `absorb_session_cookies`'s blanket reset to unknown.
+                if let Some(user) = &wire.user {
+                    self.set_principal_scope(Some(user.principal_scope()));
+                }
                 Ok(LoginResult::success(wire.session_id, wire.expires_in))
             }
             status => Err(map_error_response(status, response).await),
@@ -440,6 +453,9 @@ impl AxiamClient {
         let response = self
             .http()
             .get(url)
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request, even a pre-session GET.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .send()
             .await
             .map_err(|e| AxiamError::Network {
@@ -485,10 +501,17 @@ impl AxiamClient {
         self.http()
             .post(self.url(path))
             .maybe_csrf_header(self)
-            // §5.2.2 rule 4: sent "as normal" on self-service calls too, and
-            // the server decides which tenant a call about the caller's own id
-            // belongs to. Only when this handle acts on a tenant.
-            .acting_tenant_of(self)
+            // CONTRACT 1.52 N4.3 (C-12): present the held device credential
+            // and withhold a stale cookie, exactly as management/authz do
+            // (`client.rs::session_credential`) — a self-service call is not
+            // exempt from §6.1 rule 6 just because it predates it.
+            .session_credential_of(self)
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): `X-Tenant-ID` is
+            // unconditional on every request — this self-service builder
+            // predates the rule and only ever sent §5.2 rule 1's
+            // `X-Axiam-Tenant` ("as normal", §5.2.2 rule 4). Sending both
+            // together matches every other request builder in the crate.
+            .tenant_headers_of(self)
             .json(body)
             .send()
             .await

@@ -12,7 +12,13 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
-use wiremock::matchers::{body_string_contains, method, path};
+
+/// A throwaway password for a mocked login, generated per call so no credential
+/// literal appears in the test source (the same helper `acting_tenant_test.rs` uses).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
+use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_ED25519_SEED: [u8; 32] = [
@@ -605,4 +611,82 @@ async fn login_200_without_session_cookies_is_an_auth_error() {
         .await
         .expect_err("a 200 login with no session cookie must fail");
     assert!(matches!(err, AxiamError::Auth { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// CONTRACT 1.52 (C-12) — §5 rule 2: `X-Tenant-ID` is unconditional on every
+// outgoing request, including the pre-session calls that predate it.
+// ---------------------------------------------------------------------------
+
+/// `login()` sent no `X-Tenant-ID` at all. The mock requires it, so an
+/// unfixed client's request matches nothing and the call fails.
+#[tokio::test]
+async fn login_sends_the_x_tenant_id_header() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+
+    client
+        .login("alice@example.com", &any_password())
+        .await
+        .expect("§5 rule 2: login() must send X-Tenant-ID on every request");
+}
+
+/// `verify_mfa()` has the same gap as `login()`.
+#[tokio::test]
+async fn verify_mfa_sends_the_x_tenant_id_header() {
+    let mock_server = MockServer::start().await;
+    mount_jwks(&mock_server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+            "mfa_required": true,
+            "challenge_token": "challenge-abc",
+            "available_methods": ["totp"],
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = AxiamClient::builder()
+        .base_url(mock_server.uri())
+        .expect("valid base_url")
+        .tenant_slug("acme")
+        .build()
+        .expect("client builds");
+    client
+        .login("alice@example.com", &any_password())
+        .await
+        .expect("login should report mfa_required");
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/mfa/verify"))
+        .and(header("X-Tenant-ID", "acme"))
+        .respond_with(login_ok_response(&access))
+        .mount(&mock_server)
+        .await;
+
+    client
+        .verify_mfa("123456")
+        .await
+        .expect("§5 rule 2: verify_mfa() must send X-Tenant-ID on every request");
 }

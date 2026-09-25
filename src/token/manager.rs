@@ -134,6 +134,19 @@ impl TokenManager {
         self.state.lock().await.exp
     }
 
+    /// Whether a refresh token is currently held.
+    ///
+    /// CONTRACT 1.52 N4.5 (C-12): a §6.1 device (or client-credentials)
+    /// credential is never refreshed, on either transport — it has no
+    /// refresh token to spend. A gRPC caller checks this before entering the
+    /// §9 guard, so an `UNAUTHENTICATED` on such a credential surfaces the
+    /// server's own message rather than the guard's generic
+    /// "no refresh token available" text.
+    #[cfg(feature = "grpc")]
+    pub(crate) async fn has_refresh_token(&self) -> bool {
+        self.state.lock().await.refresh.is_some()
+    }
+
     /// Access the shared state handle for the single-flight refresh guard.
     pub(crate) fn state_handle(&self) -> Arc<Mutex<TokenState>> {
         Arc::clone(&self.state)

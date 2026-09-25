@@ -515,6 +515,12 @@ impl AxiamClient {
         let response = self
             .http()
             .post(self.url(LOGIN_PATH))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request, including this pre-session call — the server
+            // reads no acting tenant here, so §5.2 rule 1's header is
+            // optional and harmless, but `tenant_headers_of` sends both
+            // together and matches every other request builder in the crate.
+            .tenant_headers_of(self)
             .json(&body)
             .send()
             .await
@@ -602,6 +608,8 @@ impl AxiamClient {
         let response = self
             .http()
             .post(self.url(MFA_VERIFY_PATH))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): see `login()`.
+            .tenant_headers_of(self)
             .json(&body)
             .send()
             .await
@@ -794,6 +802,11 @@ impl AxiamClient {
             .http()
             .post(self.url(LOGOUT_PATH))
             .tenant_headers_of(self)
+            // CONTRACT 1.52 N4.3 (C-12): present the held device credential
+            // and withhold a stale cookie — logout must identify the session
+            // it is closing by the credential actually held, not by whatever
+            // cookie happens to still be in the jar.
+            .session_credential_of(self)
             .maybe_csrf_header(self)
             .json(&body)
             .send()
@@ -1000,8 +1013,6 @@ pub(crate) trait TenantHeadersExt {
     /// `X-Tenant-ID`, plus `X-Axiam-Tenant` when the handle acts on a tenant —
     /// see [`AxiamClient::tenant_headers`].
     fn tenant_headers_of(self, client: &AxiamClient) -> Self;
-    /// `X-Axiam-Tenant` only — see [`AxiamClient::acting_tenant_header`].
-    fn acting_tenant_of(self, client: &AxiamClient) -> Self;
     /// The held credential when it is a bearer token — see
     /// [`AxiamClient::session_credential`].
     fn session_credential_of(self, client: &AxiamClient) -> Self;
@@ -1010,10 +1021,6 @@ pub(crate) trait TenantHeadersExt {
 impl TenantHeadersExt for reqwest::RequestBuilder {
     fn tenant_headers_of(self, client: &AxiamClient) -> Self {
         client.tenant_headers(self)
-    }
-
-    fn acting_tenant_of(self, client: &AxiamClient) -> Self {
-        client.acting_tenant_header(self)
     }
 
     fn session_credential_of(self, client: &AxiamClient) -> Self {

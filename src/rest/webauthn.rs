@@ -38,7 +38,8 @@ use crate::Sensitive;
 use crate::client::{AxiamClient, OrgIdentifier, TenantIdentifier};
 use crate::rest::LoginResult;
 use crate::rest::auth::{
-    CsrfHeaderExt, TenantHeadersExt, absorb_session_cookies, deser_err, map_error_response,
+    CsrfHeaderExt, LoginUserInfoWire, TenantHeadersExt, absorb_session_cookies, deser_err,
+    map_error_response,
 };
 
 const REGISTER_START_PATH: &str = "/api/v1/auth/webauthn/register/start";
@@ -175,6 +176,11 @@ struct LoginWire {
 struct SetupLoginSuccessWire {
     session_id: Uuid,
     expires_in: u64,
+    /// CONTRACT 1.52 N5.5 (C-12): present on this completion exactly as on a
+    /// password `login()`. Decoded leniently — absent means unknown, never
+    /// an error (N5.5 rule 5).
+    #[serde(default)]
+    user: Option<LoginUserInfoWire>,
 }
 
 #[derive(Serialize)]
@@ -480,6 +486,12 @@ impl AxiamClient {
                 // Same triple, same call as `mfa_setup_confirm` and every
                 // other login completion (§24.3 rule 2).
                 absorb_session_cookies(self).await?;
+                // CONTRACT 1.52 N5.5 (C-12): record the gate from the
+                // response's user object rather than leaving
+                // `absorb_session_cookies`'s blanket reset to unknown.
+                if let Some(user) = &wire.user {
+                    self.set_principal_scope(Some(user.principal_scope()));
+                }
                 Ok(LoginResult::success(wire.session_id, wire.expires_in))
             }
             status => Err(map_error_response(status, http_response).await),
@@ -560,10 +572,15 @@ impl AxiamClient {
         self.http()
             .post(self.url(path))
             .maybe_csrf_header(self)
-            // §5.2.2 rule 4: sent "as normal" on self-service calls too, and
-            // the server decides which tenant a call about the caller's own id
-            // belongs to. Only when this handle acts on a tenant.
-            .acting_tenant_of(self)
+            // CONTRACT 1.52 N4.3 (C-12): present the held device credential
+            // and withhold a stale cookie, exactly as management/authz do
+            // (`client.rs::session_credential`).
+            .session_credential_of(self)
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): `X-Tenant-ID` is
+            // unconditional on every request — this builder predated the
+            // rule and only ever sent §5.2 rule 1's `X-Axiam-Tenant` ("as
+            // normal", §5.2.2 rule 4).
+            .tenant_headers_of(self)
             .json(body)
             .send()
             .await
@@ -600,6 +617,10 @@ impl AxiamClient {
     ) -> Result<reqwest::Response, AxiamError> {
         self.http()
             .post(self.url(path))
+            // CONTRACT 1.52 N-§5-rule-2 (C-12): unconditional on every
+            // outgoing request, even this sessionless pair — distinct from
+            // the CSRF/cookie omission just above, which is deliberate.
+            .header("X-Tenant-ID", self.tenant_header_value())
             .header(reqwest::header::COOKIE, "")
             .json(body)
             .send()

@@ -15,13 +15,14 @@
 #![cfg(feature = "opaque")]
 
 use axiam_opaque::testing;
+use axiam_sdk::AuthzKind;
 use axiam_sdk::AxiamError;
 use axiam_sdk::client::AxiamClient;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -193,6 +194,133 @@ async fn the_password_never_appears_in_any_request_body() {
             received.url
         );
     }
+}
+
+/// CONTRACT 1.52 (C-12) — §5 rule 2: `X-Tenant-ID` is unconditional on every
+/// outgoing request. None of the three OPAQUE calls sent it.
+#[tokio::test]
+async fn register_start_sends_the_x_tenant_id_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/register/start"))
+        .and(header("X-Tenant-ID", "default"))
+        .respond_with(RegisterStart {
+            setup: Arc::new(Mutex::new(None)),
+        })
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .opaque_enrollment(PASSWORD)
+        .await
+        .expect("§5 rule 2: register/start must send X-Tenant-ID");
+}
+
+/// The login half (`login/start` and `login/finish`) has the same gap.
+#[tokio::test]
+async fn login_start_and_finish_send_the_x_tenant_id_header() {
+    let (server, setup, record) = enrolled().await;
+    mount_jwks(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/login/start"))
+        .and(header("X-Tenant-ID", "default"))
+        .respond_with(LoginStart::new(setup, record, None))
+        .mount(&server)
+        .await;
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let jti = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id, user_id, jti);
+    let mut finish_response = ResponseTemplate::new(200).set_body_json(json!({
+        "session_id": jti,
+        "expires_in": 900,
+    }));
+    for cookie in [
+        format!("axiam_access={access}; Path=/; HttpOnly"),
+        "axiam_refresh=test-refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=test-csrf-token; Path=/".to_string(),
+    ] {
+        finish_response = finish_response.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/login/finish"))
+        .and(header("X-Tenant-ID", "default"))
+        .respond_with(finish_response)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .login_opaque("alice", PASSWORD)
+        .await
+        .expect("§5 rule 2: login/start and login/finish must send X-Tenant-ID");
+}
+
+/// CONTRACT 1.52 N5.5 (C-12): OPAQUE `login/finish` completes a login and
+/// the server's response carries a full user object (the same handler
+/// builds it as a password login, `axiam-api-rest/src/handlers/opaque.rs`),
+/// so it must record the §5.2 rule 1 gate from it rather than resetting it
+/// to unknown through `absorb_session_cookies`.
+#[tokio::test]
+async fn opaque_login_finish_records_the_acting_tenant_gate() {
+    let (server, setup, record) = enrolled().await;
+    mount_jwks(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/login/start"))
+        .respond_with(LoginStart::new(setup, record, None))
+        .mount(&server)
+        .await;
+
+    let tenant_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let jti = Uuid::new_v4();
+    let reachable = Uuid::new_v4();
+    let unreachable = Uuid::new_v4();
+    let access = issue_test_access_token(tenant_id, org_id, user_id, jti);
+    let mut finish_response = ResponseTemplate::new(200).set_body_json(json!({
+        "session_id": jti,
+        "expires_in": 900,
+        "user": {
+            "id": user_id, "username": "alice", "email": "alice@example.com",
+            "organization_level": true,
+            "reachable_tenant_ids": [reachable],
+        },
+    }));
+    for cookie in [
+        format!("axiam_access={access}; Path=/; HttpOnly"),
+        "axiam_refresh=test-refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=test-csrf-token; Path=/".to_string(),
+    ] {
+        finish_response = finish_response.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/opaque/login/finish"))
+        .respond_with(finish_response)
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    client.login_opaque("alice", PASSWORD).await.expect("login");
+
+    assert!(
+        client.acting_tenant(reachable).is_ok(),
+        "the reported reach must be recorded, not reset to unknown"
+    );
+    let Err(err) = client.acting_tenant(unreachable) else {
+        panic!("outside the reported reach, so the gate must refuse client-side");
+    };
+    assert!(
+        matches!(
+            err,
+            AxiamError::Authz {
+                kind: AuthzKind::Denied,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
