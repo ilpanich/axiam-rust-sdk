@@ -138,6 +138,13 @@ jobs:
         # D-10: MSRV (1.88, from Cargo.toml's rust-version) is CI-enforced
         # alongside the normal stable toolchain.
         toolchain: ["1.88", stable]
+    env:
+      # Cargo.lock is gitignored, so each leg resolves fresh. The workspace's
+      # resolver 3 makes that resolution MSRV-aware ("fallback"): right for the
+      # 1.88 leg, which must see what a 1.88 consumer gets. The stable leg opts
+      # out ("allow") so it builds against the newest releases — what most
+      # consumers actually resolve — instead of the MSRV-capped set.
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: ${{ matrix.toolchain == 'stable' && 'allow' || 'fallback' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Free up disk space
