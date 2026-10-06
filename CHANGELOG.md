@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Raise the MSRV from 1.88 to 1.89 (`rust-version`, `supported_versions::MIN_RUST_VERSION`
+  and the CI matrix), so the SDK builds against current dependency releases: uuid 1.27
+  requires Rust 1.89. The workspace now uses resolver 3, so a dependency raising its own
+  MSRV no longer breaks the MSRV CI job before the SDK decides to follow.
+
 ## [1.0.0-beta17] - 2026-09-25
 Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
 1, §6.1 rules 6–10, §10.1 rule 9, §27.6.1, §27.13). The vendored `CONTRACT.md`,

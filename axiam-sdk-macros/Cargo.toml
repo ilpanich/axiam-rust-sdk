@@ -11,7 +11,7 @@
 name = "axiam-sdk-macros"
 version = "1.0.0-beta17"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Proc-macro Actix-Web authorization attributes for the AXIAM Rust SDK (axiam-sdk)"
 license = "Apache-2.0"
 publish = true

@@ -17,13 +17,13 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 - **Registry:** [crates.io/crates/axiam-sdk](https://crates.io/crates/axiam-sdk) _(reserved, not yet published)_
 - **API docs:** [docs.rs/axiam-sdk](https://docs.rs/axiam-sdk) — built automatically by docs.rs on each release
 - **License:** Apache-2.0
-- **MSRV:** Rust 1.88 (`rust-version = "1.88"` in `Cargo.toml`, enforced in CI) — see [Supported Rust versions](#supported-rust-versions)
+- **MSRV:** Rust 1.89 (`rust-version = "1.89"` in `Cargo.toml`, enforced in CI) — see [Supported Rust versions](#supported-rust-versions)
 
 ## Supported Rust versions
 
 | | Toolchain | Why this one |
 |---|---|---|
-| **Floor** | 1.88 | `rust-version` in `Cargo.toml`. Exposed as `supported_versions::MIN_RUST_VERSION`. Edition 2024 sets the hard lower bound at 1.85. |
+| **Floor** | 1.89 | `rust-version` in `Cargo.toml`. Exposed as `supported_versions::MIN_RUST_VERSION`. Edition 2024 sets the hard lower bound at 1.85. |
 | **Newest** | `stable` | Tracked, not pinned. Exposed as `supported_versions::NEWEST_TESTED`. |
 
 **The crate is built against the floor, and against current stable.** The gating
@@ -31,7 +31,7 @@ matrix in `sdk-ci-rust.yml` runs the full suite on **both** (D-10). Style gates 
 `cargo fmt`, `clippy -D warnings` — run on stable only, deliberately: clippy's lint
 set grows with every release, so running it under the pinned MSRV compiler would turn
 each new lint into a spurious MSRV-job failure. The MSRV job's job is to prove the
-crate still *compiles* on 1.88.
+crate still *compiles* on 1.89.
 
 Rust enforces the floor better than most ecosystems do, and there is genuinely
 nothing to preflight there: `rust-version` is a hard constraint Cargo checks during

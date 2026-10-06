@@ -163,7 +163,7 @@ pub mod supported_versions {
     /// The minimum supported Rust version, mirroring `rust-version` in `Cargo.toml`.
     ///
     /// Cargo refuses to build the crate on anything older.
-    pub const MIN_RUST_VERSION: &str = "1.88";
+    pub const MIN_RUST_VERSION: &str = "1.89";
 
     /// The Rust edition the crate is compiled under.
     ///

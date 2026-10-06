@@ -135,9 +135,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # D-10: MSRV (1.88, from Cargo.toml's rust-version) is CI-enforced
+        # D-10: MSRV (1.89, from Cargo.toml's rust-version) is CI-enforced
         # alongside the normal stable toolchain.
-        toolchain: ["1.88", stable]
+        toolchain: ["1.89", stable]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Free up disk space
@@ -161,7 +161,7 @@ jobs:
       # Style gates run on stable only: clippy's lint set grows with every
       # release, so running it under the pinned MSRV compiler would turn each
       # new lint into a spurious MSRV-job failure. The MSRV job's job is to
-      # prove the crate still COMPILES on 1.88, not to re-police style.
+      # prove the crate still COMPILES on 1.89, not to re-police style.
       - name: Format check
         if: matrix.toolchain == 'stable'
         run: cargo fmt --all --check
@@ -243,7 +243,7 @@ jobs:
       # published on a PR: it depends on axiam-sdk-macros with an unpublished
       # `=`-version path dep, and `cargo package`/`publish` for the umbrella resolves
       # that dependency from the registry (co-packaging unpublished siblings via
-      # `--workspace` only works on newer cargo, not the 1.88 MSRV toolchain, and
+      # `--workspace` only works on newer cargo, not the 1.89 MSRV toolchain, and
       # `publish --workspace` is nightly-only — rust-lang/cargo#10948). The umbrella's
       # build is already covered by the build/test jobs above, and its real
       # publish-verify runs in the release job, which publishes axiam-sdk-macros first
