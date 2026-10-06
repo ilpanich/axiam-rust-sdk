@@ -15,7 +15,7 @@
 name = "axiam-sdk-wasm"
 version = "1.0.0-beta17"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Browser (WebAssembly) build of the official AXIAM IAM client SDK"
 license = "Apache-2.0"
 publish = false          # published to npm by wasm-pack, never to crates.io

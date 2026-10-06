@@ -12,13 +12,19 @@ members = ["axiam-sdk-macros", "vendor/axiam-opaque"]
 # `wasm-pack` is pointed at the directory instead. Excluding it also keeps it
 # out of `cargo publish`'s file set for the root crate.
 exclude = ["axiam-sdk-wasm"]
-resolver = "2"
+# Resolver 3 = resolver 2 + MSRV-aware resolution: when generating Cargo.lock
+# (gitignored, so CI regenerates it on every run), Cargo prefers dependency
+# versions whose `rust-version` is compatible with the lowest one among the
+# workspace members. Without it, an upstream release that raises its MSRV
+# (as uuid 1.27 did, to Rust 1.89) breaks the D-10 MSRV CI job overnight with
+# no change on our side; raising our own MSRV then stays a deliberate choice.
+resolver = "3"
 
 [package]
 name = "axiam-sdk"
 version = "1.0.0-beta17"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Official Rust client SDK for AXIAM IAM"
 license = "Apache-2.0"
 publish = true

@@ -24,13 +24,15 @@ edition = "2024"
 # in its tree is far below. Verified by compiling this crate and the whole SDK
 # under `cargo +1.88`.
 #
-# It matters because this SDK's MSRV is 1.88 and CI enforces it. Carrying the
-# server's number here made `Test (1.88)` fail with "axiam-opaque requires
-# rustc 1.93" — a floor nothing actually needed.
+# It matters because this crate is a member of the SDK's workspace, whose MSRV
+# CI enforces. Carrying the server's number here made the MSRV test leg fail
+# with "axiam-opaque requires rustc 1.93" — a floor nothing actually needed.
 #
-# ilpanich/axiam is being changed to declare 1.88 explicitly on this crate, at
-# which point the two copies match again and this comment can go.
-rust-version = "1.88"
+# The value tracks the SDK's MSRV (1.89), not this crate's own floor (1.88):
+# the workspace's MSRV-aware resolver (resolver 3) resolves against the lowest
+# `rust-version` among members, so a lower number here would hold the whole
+# SDK's dependency set back to what 1.88 can build.
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/ilpanich/axiam"
 description = "AXIAM's OPAQUE (RFC 9807) ciphersuite, key-stretching functions and client operations"

@@ -1,7 +1,7 @@
 //! Language-version support policy — D-10.
 //!
 //! This SDK has gated on both ends of its supported range since it was written:
-//! `toolchain: ["1.88", stable]`. That made it the model the other ten AXIAM SDKs
+//! `toolchain: ["1.89", stable]`. That made it the model the other ten AXIAM SDKs
 //! were brought in line with, and this test is what keeps it from quietly drifting
 //! out of the shape everything else now copies.
 //!
@@ -37,7 +37,7 @@ fn read(relative: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()))
 }
 
-/// The `rust-version = "1.88"` value from Cargo.toml's `[package]` section.
+/// The `rust-version = "1.89"` value from Cargo.toml's `[package]` section.
 fn declared_msrv() -> String {
     let manifest = read("Cargo.toml");
     manifest
@@ -65,7 +65,7 @@ fn declared_edition() -> String {
         .expect("Cargo.toml declares no edition")
 }
 
-/// The `toolchain: ["1.88", stable]` list from the CI test matrix.
+/// The `toolchain: ["1.89", stable]` list from the CI test matrix.
 fn ci_matrix() -> Vec<String> {
     let workflow = read(".github/workflows/sdk-ci-rust.yml");
 
