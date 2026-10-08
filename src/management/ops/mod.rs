@@ -13,6 +13,7 @@
 pub mod audit;
 pub mod ca_certificates;
 pub mod certificates;
+pub mod directory;
 pub mod email_config;
 pub mod federation;
 pub mod groups;
@@ -26,10 +27,13 @@ pub mod privacy;
 pub mod reactors;
 pub mod resources;
 pub mod roles;
+pub mod saml;
+pub mod scim_targets;
 pub mod scim_tokens;
 pub mod scopes;
 pub mod service_accounts;
 pub mod settings;
+pub mod ssf;
 pub mod tenants;
 pub mod users;
 pub mod webauthn_policy;
@@ -215,6 +219,62 @@ impl AxiamClient {
     #[must_use]
     pub fn email_config(&self) -> email_config::EmailConfig<'_> {
         email_config::EmailConfig::new(self)
+    }
+
+    /// The `directory` management namespace.
+    ///
+    /// A tenant's LDAP / Active Directory identity source (CONTRACT §30): the one
+    /// configuration, the explicit act that links an existing local account to
+    /// its directory entry, and a read-only view of the sync job. Signing in
+    /// needs nothing new -- a directory account calls the same §1 `login`.
+    ///
+    /// Acquiring the handle performs no I/O (§27.2 rule 1).
+    #[must_use]
+    pub fn directory(&self) -> directory::Directory<'_> {
+        directory::Directory::new(self)
+    }
+
+    /// The `saml` management namespace.
+    ///
+    /// A tenant's SAML 2.0 identity provider (CONTRACT §29): the registry of
+    /// service providers, the import of an SP's metadata into a *draft*
+    /// registration (never a write), and the lifecycle of the IdP signing
+    /// credential. The protocol itself -- single sign-on, single logout, the IdP
+    /// metadata document -- is browser and SP-to-IdP surface under
+    /// /saml/v2/{tenant_id}, an SP's own SAML library speaks to it, and it is not
+    /// in this registry.
+    ///
+    /// Acquiring the handle performs no I/O (§27.2 rule 1).
+    #[must_use]
+    pub fn saml(&self) -> saml::Saml<'_> {
+        saml::Saml::new(self)
+    }
+
+    /// The `ssf` management namespace.
+    ///
+    /// A tenant's Shared Signals Framework streams (CONTRACT §32): which receiver
+    /// -- an OAuth2 client of the tenant -- receives which CAEP and RISC security
+    /// events, as SETs pushed to its endpoint or polled. The receiver's own
+    /// protocol (transmitter metadata, the SSF stream management API, polling) is
+    /// not in this registry.
+    ///
+    /// Acquiring the handle performs no I/O (§27.2 rule 1).
+    #[must_use]
+    pub fn ssf(&self) -> ssf::Ssf<'_> {
+        ssf::Ssf::new(self)
+    }
+
+    /// The `scim_targets` management namespace.
+    ///
+    /// A tenant's outbound SCIM targets (CONTRACT §31): the downstream SCIM 2.0
+    /// service providers AXIAM pushes the tenant's users and groups to, each with
+    /// its delivery state. The credential AXIAM pushes with is write-only.
+    /// Deleting a target does not deprovision anything downstream.
+    ///
+    /// Acquiring the handle performs no I/O (§27.2 rule 1).
+    #[must_use]
+    pub fn scim_targets(&self) -> scim_targets::ScimTargets<'_> {
+        scim_targets::ScimTargets::new(self)
     }
 
     /// The `settings` management namespace.

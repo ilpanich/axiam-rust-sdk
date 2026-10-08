@@ -91,11 +91,20 @@ RUST_KEYWORDS = {
     "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
 }
 
+# Tagged unions whose tag is an open set (CONTRACT §31.2: "An SDK MUST decode an
+# unknown `type` without failing"). They gain a decode-only `Unknown` arm.
+OPEN_UNIONS = {"ScimTargetAuth", "ScimTargetScope"}
+
 # §27.4 rule 3: `{org_id}` always defaults from the client. `{tenant_id}`
 # defaults from the client only where it names the *context*; in `tenants` and
 # in the signing-CA routes it names the object being acted on, so it stays an
 # ordinary argument.
-IMPLICIT_TENANT_NAMESPACES = {"email_config", "settings", "webauthn_policy"}
+# The §29, §30 and §32 namespaces (contract 1.54-1.56) carry `{tenant_id}` as
+# the context on every route, and their sections say so in as many words
+# ("defaulted from the client's configured tenant per §27.4 rule 3").
+IMPLICIT_TENANT_NAMESPACES = {
+    "directory", "email_config", "saml", "settings", "ssf", "webauthn_policy",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +237,9 @@ class Types:
         self.schemas = spec["components"]["schemas"]
         #: Structs synthesized for anonymous `oneOf` variants, name -> schema.
         self.synthetic: dict[str, dict[str, Any]] = {}
-        #: Every string-enum schema; all of them are emitted `Copy`.
-        self.copy_enums = {
-            pascal(n) for n, sc in self.schemas.items() if "enum" in sc
-        }
+        #: Every string-enum schema. None of them is `Copy`: each carries an
+        #: `Unknown(String)` arm (§27.11 rule 1), so a field of one is cloned.
+        self.copy_enums: set[str] = set()
 
     def is_copy(self, ty: str) -> bool:
         """Whether a generated Rust type is `Copy`, `Option` unwrapped."""
@@ -589,6 +597,19 @@ pub(crate) fn default_true() -> bool {
     return "\n".join(out)
 
 
+def enum_variant(value: Any) -> str:
+    """The Rust variant name for one enum value.
+
+    Most values are snake_case words. §32's `SsfEventType` values are event-type
+    *URIs*; the last path segment (`session-revoked`) is what names the event,
+    so that is what names the variant, and the URI is kept by `rename`.
+    """
+    text = str(value)
+    if "/" in text:
+        text = text.rstrip("/").rsplit("/", 1)[-1]
+    return pascal(text)
+
+
 def emit_enum(rname: str, schema: dict[str, Any]) -> str:
     lines = doc_lines(schema.get("description") or f"`{rname}` (generated from openapi.json).")
     lines.extend(doc_lines(
@@ -605,7 +626,7 @@ def emit_enum(rname: str, schema: dict[str, Any]) -> str:
     lines.append("#[non_exhaustive]")
     lines.append(f"pub enum {rname} {{")
     for value in schema["enum"]:
-        variant = pascal(str(value))
+        variant = enum_variant(value)
         lines.extend(doc_lines(f"`{value}`", "    "))
         if variant != value:
             lines.append(f'    #[serde(rename = "{value}")]')
@@ -659,6 +680,15 @@ def emit_union(rname: str, schema: dict[str, Any], arms: list, types: Types) -> 
                     lines.append(skip_attr(ident, ty, "        "))
                 lines.append(f"        {ident}: {ty},")
             lines.append("    },")
+    if rname in OPEN_UNIONS:
+        lines.extend(doc_lines(
+            f"A `{tag_field}` this SDK does not know (CONTRACT §31.2, §27.13: an open "
+            "set, decoded without failing).\n\n"
+            "Reachable only by decoding. It is never sent: serializing it is an "
+            "error, because §27.13 forbids sending a value the SDK does not know "
+            "and the members it arrived with are not kept.", "    "))
+        lines.append("    #[serde(other, skip_serializing)]")
+        lines.append("    Unknown,")
     lines.append("}\n")
     lines.extend(extra)
     return "\n".join(lines)
@@ -987,7 +1017,7 @@ def emit_operation(
     method = field_name(opname)[0]
     implicit = implicit_params(namespace, op)
     verb = {"GET": "Verb::Get", "POST": "Verb::Post", "PUT": "Verb::Put",
-            "DELETE": "Verb::Delete"}[op["method"]]
+            "PATCH": "Verb::Patch", "DELETE": "Verb::Delete"}[op["method"]]
 
     args: list[str] = []
     prelude: list[str] = []
@@ -1350,7 +1380,7 @@ def struct_literal(name: str, types: Types, secrets: set[str], depth: int = 0) -
     """Construct a named model, required fields only, the rest defaulted."""
     schema = types.schemas.get(name, {})
     if "enum" in schema:
-        return f"models::{pascal(name)}::{pascal(str(schema['enum'][0]))}"
+        return f"models::{pascal(name)}::{enum_variant(schema['enum'][0])}"
     if schema.get("oneOf"):
         union = discriminated(schema, types)
         if union:
@@ -1360,6 +1390,18 @@ def struct_literal(name: str, types: Types, secrets: set[str], depth: int = 0) -
                     payload["$ref"].rsplit("/", 1)[-1], types, secrets, depth + 1
                 )
                 return f"models::{pascal(name)}::{pascal(str(value))}({inner})"
+            required = set(payload.get("required", []))
+            parts = []
+            for pname, pschema in sorted(payload.get("properties", {}).items()):
+                if pname == union[0][0]:
+                    continue
+                value_lit = (
+                    rust_literal(pschema, types, set(), pname, depth + 1)
+                    if pname in required
+                    else "None"
+                )
+                parts.append(f"{field_name(pname)[0]}: {value_lit}")
+            return f"models::{pascal(name)}::{pascal(str(value))} {{ {', '.join(parts)} }}"
         return "Default::default()"
 
     props, required, _ = types.flatten(name)
