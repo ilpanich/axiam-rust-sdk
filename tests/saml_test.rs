@@ -307,7 +307,10 @@ async fn a_credential_has_no_key_member_and_promotion_may_retire_nothing() {
         format!("{credential:#?}"),
         serde_json::to_string(&credential).unwrap(),
     ] {
-        assert!(!rendering.contains(&leaked), "{rendering}");
+        assert!(
+            !rendering.contains(&leaked),
+            "the leaked key value appears in a rendering"
+        );
         assert!(!rendering.contains("private_key_pem"));
     }
     let promotion = client

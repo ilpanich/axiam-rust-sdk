@@ -414,9 +414,13 @@ async fn a_400_invalid_client_metadata_is_an_oauth_protocol_error() {
 // ── 5. Redaction ────────────────────────────────────────────────────────────
 
 fn assert_no_fragment(haystack: &str, secret: &str) {
+    // The failure message names neither the fragment nor the haystack: a
+    // failing redaction test must not itself print the secret it caught.
     for i in 0..=secret.len().saturating_sub(8) {
-        let piece = &secret[i..i + 8];
-        assert!(!haystack.contains(piece), "found {piece:?} in {haystack:?}");
+        assert!(
+            !haystack.contains(&secret[i..i + 8]),
+            "an 8-character fragment of the secret (offset {i}) appears in a rendering"
+        );
     }
 }
 

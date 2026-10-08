@@ -34,10 +34,12 @@ fn random() -> String {
 }
 
 fn assert_no_fragment(haystack: &str, secret: &str) {
-    for i in 0..=secret.len() - 8 {
+    // The failure message names neither the fragment nor the haystack: a
+    // failing redaction test must not itself print the secret it caught.
+    for i in 0..=secret.len().saturating_sub(8) {
         assert!(
             !haystack.contains(&secret[i..i + 8]),
-            "fragment of a secret in {haystack:?}"
+            "an 8-character fragment of the secret (offset {i}) appears in a rendering"
         );
     }
 }
