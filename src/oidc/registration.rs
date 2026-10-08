@@ -298,11 +298,16 @@ impl AxiamClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(crate::retry::parse_retry_after);
-                decode_registration(response, "read_client_registration")
-                    .await
-                    .map_err(|err| crate::retry::Attempt { err, retry_after })
+                let status = response.status().as_u16();
+                let result = decode_registration(response, "read_client_registration").await;
+                match result {
+                    Err(err) if crate::retry::status_is_retryable(status) => {
+                        Err(crate::retry::Attempt { err, retry_after })
+                    }
+                    other => Ok(other),
+                }
             })
-            .await
+            .await?
     }
 
     /// `PUT registration_client_uri` (RFC 7592 §2.2, CONTRACT.md §28.12) —
