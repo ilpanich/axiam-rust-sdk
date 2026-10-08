@@ -129,6 +129,7 @@ impl AxiamClient {
                         .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             }
         })?;
 

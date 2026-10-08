@@ -238,6 +238,7 @@ impl Claims {
             message: message.to_owned(),
             oauth: None,
             reason: None,
+            set_reason: None,
         };
 
         let Some(expected) = cnf.certificate_thumbprint() else {
@@ -349,6 +350,7 @@ impl CnfClaim {
             message: message.to_owned(),
             oauth: None,
             reason: None,
+            set_reason: None,
         };
 
         if cnf.names_nothing_checkable() {
@@ -787,6 +789,25 @@ impl JwksVerifier {
         Ok(data.claims)
     }
 
+    /// The key `kid` names, fetching the JWKS if needed and, on a miss, forcing
+    /// **one** refetch — rate-limited to once per minute
+    /// (`FORCED_REFETCH_MIN_INTERVAL`) — before giving up with `Ok(None)`.
+    ///
+    /// The shared machinery behind the §32.7 SET verifier, which maps its
+    /// own reason codes and so needs the lookup without
+    /// [`Self::verify_id_token_signature`]'s §12.3 ones.
+    pub(crate) async fn key_for_kid(
+        &self,
+        kid: &str,
+    ) -> Result<Option<jsonwebtoken::jwk::Jwk>, AxiamError> {
+        let jwks = self.get_or_fetch().await?;
+        if let Some(jwk) = find_jwk_by_kid(&jwks, kid) {
+            return Ok(Some(jwk));
+        }
+        let refreshed = self.force_refetch_if_allowed().await?;
+        Ok(find_jwk_by_kid(&refreshed, kid))
+    }
+
     /// Verify an inbound AXIAM access token against the **complete**
     /// CONTRACT.md §10.1 minimum local-verification set. This is the SDK's
     /// documented guard entry point — the §10 [`AxiamUser`] extractor and the
@@ -903,6 +924,7 @@ impl JwksVerifier {
                     .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
         Ok(())
@@ -1065,6 +1087,7 @@ impl JwksVerifier {
             message: format!("invalid token header: {e}"),
             oauth: None,
             reason: None,
+            set_reason: None,
         })?;
 
         // Rule 1: rejected WITHOUT consulting a key — `alg: none` and every
@@ -1074,6 +1097,7 @@ impl JwksVerifier {
                 message: "unexpected alg: only EdDSA is accepted".into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
 
@@ -1090,6 +1114,7 @@ impl JwksVerifier {
                     message: "unknown kid after JWKS refetch".into(),
                     oauth: None,
                     reason: None,
+                    set_reason: None,
                 })?
             }
         };
@@ -1098,6 +1123,7 @@ impl JwksVerifier {
             message: "unable to build decoding key from JWK".into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })
     }
 
@@ -1115,6 +1141,7 @@ impl JwksVerifier {
                 .into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })?;
 
         let actual =
@@ -1122,6 +1149,7 @@ impl JwksVerifier {
                 message: "token tenant_id claim is absent or not a UUID".into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             })?;
 
         if actual != expected {
@@ -1129,6 +1157,7 @@ impl JwksVerifier {
                 message: "token tenant_id does not match the configured tenant".into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
 
@@ -1266,6 +1295,7 @@ fn decode_claims(
             message,
             oauth: None,
             reason: None,
+            set_reason: None,
         }
     })?;
 

@@ -420,6 +420,7 @@ impl AxiamClient {
                     .into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })
     }
 
@@ -435,6 +436,7 @@ impl AxiamClient {
                 ),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             })
     }
 
@@ -455,6 +457,7 @@ impl AxiamClient {
                     .into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })
     }
 
@@ -988,6 +991,7 @@ impl AxiamClient {
                         .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
 

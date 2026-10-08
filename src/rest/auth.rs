@@ -442,6 +442,7 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
             message: "server response did not set the axiam_access cookie".into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })?;
     // H8 fix (SDK bench harness validation): `axiam_refresh` is
     // `Path=/api/v1/auth/refresh`-scoped (crates/axiam-api-rest/src/
@@ -598,6 +599,7 @@ impl AxiamClient {
                     .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             })?;
 
         let body = MfaVerifyRequestBody {
@@ -662,6 +664,7 @@ impl AxiamClient {
                     message: "no access token to refresh — call login() first".into(),
                     oauth: None,
                     reason: None,
+                    set_reason: None,
                 })?;
         let observed_value = observed.expose().clone();
 
@@ -673,11 +676,13 @@ impl AxiamClient {
                     .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             })?;
         let org_id = self.resolved_org_id().ok_or_else(|| AxiamError::Auth {
             message: "org_id could not be resolved; login() must succeed before refresh()".into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })?;
 
         let client = self.clone();
@@ -718,6 +723,7 @@ impl AxiamClient {
                                     message: "refresh response did not set axiam_access".into(),
                                     oauth: None,
                                     reason: None,
+                                    set_reason: None,
                                 })?;
                             // Same REFRESH_PATH-scoped lookup as
                             // absorb_session_cookies above, and just as
@@ -785,6 +791,7 @@ impl AxiamClient {
                             message: "access token has no session id (jti) to log out".into(),
                             oauth: None,
                             reason: None,
+                            set_reason: None,
                         })?
                 }
                 None => {
@@ -792,6 +799,7 @@ impl AxiamClient {
                         message: "no active session to log out".into(),
                         oauth: None,
                         reason: None,
+                        set_reason: None,
                     });
                 }
             }

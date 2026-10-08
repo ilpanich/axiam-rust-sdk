@@ -452,6 +452,7 @@ impl AxiamClientBuilder {
                     .into(),
                 oauth: None,
 reason: None,
+    set_reason: None,
 })?;
 
         // A blank slug is not an identifier, and §5.2.1 rule 2 makes refusing
@@ -478,6 +479,7 @@ reason: None,
                     .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
         if let Some(OrgIdentifier::Slug(slug)) = &self.org
@@ -489,6 +491,7 @@ reason: None,
                     .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
 
