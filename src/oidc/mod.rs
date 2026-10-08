@@ -63,6 +63,7 @@
 //! ```
 
 pub mod authorize;
+pub mod ciba;
 pub mod device;
 pub mod discovery;
 pub mod exchange;
@@ -76,6 +77,11 @@ pub mod state;
 pub mod token_exchange;
 
 pub use authorize::{AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, OidcBeginParams};
+pub use ciba::{
+    CIBA_GRANT_TYPE, CIBA_SLOW_DOWN_INCREMENT_SECS, CibaAwaitParams, CibaClock, CibaDelivery,
+    CibaInitiateParams, CibaInitiateResponse, CibaPollParams, CibaRequestSigner, CibaSigningAlg,
+    CibaUserHint, DEFAULT_CIBA_INTERVAL_SECS, SystemCibaClock,
+};
 pub use device::{
     DEFAULT_POLL_INTERVAL_SECS, DEVICE_CODE_GRANT_TYPE, DeviceAuthorization, DeviceAuthorizeParams,
     DeviceLoginParams, DevicePollParams, SLOW_DOWN_INCREMENT_SECS,
