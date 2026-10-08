@@ -502,7 +502,7 @@ reason: None,
         // for and silently not received (custom CA, client certificate) are
         // refused at the builder methods above rather than dropped here.
         #[cfg(not(target_arch = "wasm32"))]
-        let client_builder = {
+        let (client_builder, bare_builder) = {
             // Host-isolation (3A, defense in depth): never follow a redirect that
             // leaves our own origin. reqwest strips Authorization/Cookie on a
             // cross-host redirect but forwards custom headers (X-Tenant-ID /
@@ -535,11 +535,23 @@ reason: None,
                 }
             });
 
+            let connect_timeout = self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
+            let request_timeout = self.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
             let mut client_builder = reqwest::Client::builder()
                 .cookie_provider(jar.provider())
                 .redirect(redirect_policy)
-                .connect_timeout(self.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT))
-                .timeout(self.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
+                .connect_timeout(connect_timeout)
+                .timeout(request_timeout);
+            // CONTRACT.md §28.12.2 rules 2-3: the RFC 7592 calls carry their own
+            // bearer and MUST NOT carry the SDK's session. This twin shares the
+            // TLS configuration below (custom CA, client identity) but has no
+            // cookie jar, so no session cookie can ride along, and follows no
+            // redirect, so the registration token cannot be re-sent anywhere the
+            // caller did not name.
+            let mut bare_builder = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(connect_timeout)
+                .timeout(request_timeout);
 
             if let Some(pem) = &self.custom_ca_pem {
                 let cert =
@@ -547,6 +559,7 @@ reason: None,
                         message: format!("invalid custom CA PEM: {e}"),
                         source: None,
                     })?;
+                bare_builder = bare_builder.add_root_certificate(cert.clone());
                 client_builder = client_builder.add_root_certificate(cert);
             }
 
@@ -562,18 +575,24 @@ reason: None,
                         message: format!("invalid client certificate / key PEM: {e}"),
                         source: None,
                     })?;
+                bare_builder = bare_builder.identity(identity.clone());
                 client_builder = client_builder.identity(identity);
             }
-            client_builder
+            (client_builder, bare_builder)
         };
 
         // The browser build takes reqwest's defaults, which are the browser's
         // defaults: same-origin credentials, browser redirect handling, no
         // configurable deadline.
         #[cfg(target_arch = "wasm32")]
-        let client_builder = reqwest::Client::builder();
+        let (client_builder, bare_builder) =
+            (reqwest::Client::builder(), reqwest::Client::builder());
 
         let http = client_builder.build().map_err(|e| AxiamError::Network {
+            message: format!("failed to construct HTTP client: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+        let http_bare = bare_builder.build().map_err(|e| AxiamError::Network {
             message: format!("failed to construct HTTP client: {e}"),
             source: Some(Box::new(e)),
         })?;
@@ -609,6 +628,7 @@ reason: None,
         Ok(AxiamClient {
             inner: Arc::new(AxiamClientInner {
                 http,
+                http_bare,
                 jar,
                 base_url,
                 tenant,
@@ -708,6 +728,11 @@ pub(crate) struct AxiamClientInner {
     /// `/oauth2/introspect` produces zero `/api/v1/auth/refresh` calls.
     /// Cross-SDK conformance review follow-up F-14.
     pub(crate) http: reqwest::Client,
+    /// The same TLS configuration as [`Self::http`] with no cookie jar and no
+    /// redirect following: the transport for requests that carry a credential
+    /// of their own and MUST NOT carry the session (CONTRACT.md §28.12.2
+    /// rules 2-3).
+    pub(crate) http_bare: reqwest::Client,
     pub(crate) jar: crate::cookies::CookieJar,
     pub(crate) base_url: url::Url,
     pub(crate) tenant: TenantIdentifier,
@@ -1055,6 +1080,12 @@ impl AxiamClient {
     /// adding such an interceptor here would break CONTRACT.md §12 silently.
     pub(crate) fn http(&self) -> &reqwest::Client {
         &self.inner.http
+    }
+
+    /// The session-free transport (no cookie jar, no redirects) — see
+    /// `AxiamClientInner::http_bare`.
+    pub(crate) fn http_bare(&self) -> &reqwest::Client {
+        &self.inner.http_bare
     }
 
     /// Access the token manager (crate-internal use by `rest`/`grpc`).

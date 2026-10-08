@@ -70,6 +70,7 @@ pub mod federation;
 pub mod id_token;
 pub mod logout;
 pub mod par;
+pub mod registration;
 pub(crate) mod single_flight;
 pub mod state;
 pub mod token_exchange;
@@ -96,6 +97,7 @@ pub use logout::{
     BACKCHANNEL_LOGOUT_EVENT, LogoutUrlParams, MAX_LOGOUT_TOKEN_AGE_SECS, VerifiedLogoutToken,
 };
 pub use par::{OidcParParams, PushedAuthorizationRequest};
+pub use registration::ClientRegistration;
 pub use state::{MemoryOidcStateStore, OIDC_STATE_TTL, OidcStateEntry, OidcStateStore};
 pub use token_exchange::{
     ACCESS_TOKEN_TYPE, ExchangedToken, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE,
