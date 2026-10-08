@@ -82,6 +82,9 @@ impl<'c> ScimTargets<'c> {
     }
 
     /// `POST /api/v1/scim-targets`
+    ///
+    /// `credential` is required here (§31.3 rule 2). It is write-only: no
+    /// response ever carries it, and the SDK keeps no copy.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn create(
@@ -123,6 +126,15 @@ impl<'c> ScimTargets<'c> {
     /// body is required, and what you do not carry over from a prior read is not
     /// preserved -- it is overwritten. Read first, change the field you mean,
     /// send the whole thing back.
+    ///
+    /// **The credential is bound to its URL** (§31.3 rule 2): absent `credential`
+    /// keeps the stored one -- except that changing `base_url` of a bearer
+    /// target, `auth.token_url` or `base_url` of a client-credentials target, or
+    /// `auth.type`, without `credential` in the same write is refused `400` and
+    /// changes nothing. The SDK holds no credential to re-send. Every other
+    /// member left out takes its default. An update overtaken by another
+    /// administrator's write is `409` (§31.3 rule 4): reload, then retry
+    /// yourself.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn update(
@@ -146,6 +158,11 @@ impl<'c> ScimTargets<'c> {
     }
 
     /// `DELETE /api/v1/scim-targets/{id}`
+    ///
+    /// **Deprovisions nothing downstream** (§31.3 rule 8): the users and groups
+    /// AXIAM created in the service provider stay there, and AXIAM no longer
+    /// knows them. To remove them, set `deprovision` to `delete`, let AXIAM push,
+    /// and only then delete the target.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn delete(&self, id: Uuid) -> Result<(), AxiamError> {
@@ -163,6 +180,10 @@ impl<'c> ScimTargets<'c> {
     }
 
     /// `POST /api/v1/scim-targets/{id}/reconcile`
+    ///
+    /// Starts a reconciliation in the background and answers `202`; its outcome
+    /// is on the target's `state` (§31.3 rule 7). `409` while a run holds the
+    /// claim, within five minutes of the last one, or for a disabled target.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn reconcile(&self, id: Uuid) -> Result<models::ScimReconcileAccepted, AxiamError> {

@@ -77,6 +77,12 @@ DEFAULT_TRUE_WHEN_ABSENT = {"inherit"}
 
 def skip_attr(ident: str, ty: str, indent: str) -> str:
     """The `serde` attribute for an optional field, honouring OMIT_WHEN_EMPTY."""
+    if ty.startswith("Option<Option<"):
+        # EXPLICIT_NULL_FIELDS: absent -> `None`, `null` -> `Some(None)`.
+        return (
+            f'{indent}#[serde(default, skip_serializing_if = "Option::is_none", '
+            'deserialize_with = "crate::management::checks::explicit_null")]'
+        )
     if ident in OMIT_WHEN_EMPTY and ty.startswith("Option<Vec<"):
         return f'{indent}#[serde(default, skip_serializing_if = "skip_empty_list")]'
     return f'{indent}#[serde(default, skip_serializing_if = "Option::is_none")]'
@@ -89,6 +95,150 @@ RUST_KEYWORDS = {
     "super", "trait", "true", "type", "unsafe", "use", "where", "while", "async",
     "await", "abstract", "become", "box", "do", "final", "macro", "override",
     "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
+}
+
+# Sparse-body members where an explicit `null` is a different request from an
+# absent member (§27.4 rule 5, "null is not absent"). §30.2 names exactly two:
+# on `UpdateDirectoryConfig`, `null` clears the value and absence keeps it. They
+# are generated as `Option<Option<T>>`: `None` omits the key, `Some(None)` sends
+# `null`. A name list rather than a schema rule, because the export spells every
+# optional member `["string", "null"]` and cannot say which ones `null` clears.
+#
+# §29.8 test 8 asks the same of a *response*: `SamlIdpInfo`'s two credential ids
+# are null when the slot is empty, and that null must stay distinct from an
+# absent member, so a server that stopped sending the member is noticed.
+EXPLICIT_NULL_FIELDS = {
+    ("UpdateDirectoryConfig", "group_base_dn"),
+    ("UpdateDirectoryConfig", "group_filter"),
+    ("SamlIdpInfo", "active_credential_id"),
+    ("SamlIdpInfo", "next_credential_id"),
+}
+
+# Call-site documentation the contract makes an SDK repeat (§29.3, §30.3, §31.3,
+# §32.2). Generated rather than hand-written because the methods are generated;
+# keyed by the registry's namespace-qualified operation name.
+CALL_SITE_NOTES: dict[str, str] = {
+    "directory.set": (
+        "**Moving the connection requires the secret again** (§30.3 rule 2): a "
+        "`set` that changes `url`, `start_tls`, `bind_dn` or `trust_anchors_pem` "
+        "without `bind_secret` is refused `400` and changes nothing. The SDK holds "
+        "no copy of the secret and cannot re-send one for you. `bind_secret` is "
+        "required while the tenant has no configuration; otherwise absent keeps the "
+        "stored secret. Every other optional member left out is **reset to its "
+        "default**. An enabled directory and an effective `opaque_mode = required` "
+        "never coexist (`409`); without the deployment's directory key a write "
+        "carrying a secret is `503`."
+    ),
+    "directory.update": (
+        "**Moving the connection requires the secret again** (§30.3 rule 2): an "
+        "`update` that changes `url`, `start_tls`, `bind_dn` or `trust_anchors_pem` "
+        "without `bind_secret` is refused `400` and changes nothing; the SDK holds no "
+        "copy of the secret to re-send. A member left `None` is not sent and stays "
+        "as stored; `group_base_dn` / `group_filter` set to `Some(None)` are sent as "
+        "`null` and clear the value. An enabled directory and an effective "
+        "`opaque_mode = required` never coexist (`409`)."
+    ),
+    "directory.delete": (
+        "**Deleting stops the directory, and only that** (§30.3 rule 5): directory "
+        "accounts can no longer sign in with a password -- there is no fallback to a "
+        "local hash -- and the sync stops. Sessions, refresh tokens and passkeys those "
+        "accounts already hold keep working until they expire or the accounts are "
+        "deactivated. There is no unlink: a linked account stays a directory account."
+    ),
+    "directory.link_account": (
+        "**Signs the account's owner out everywhere** (§30.3 rule 6): linking "
+        "deletes the account's WebAuthn credentials and federation links, revokes "
+        "its `User` certificates, all its sessions and its OAuth2 refresh tokens "
+        "(TOTP is kept). The entry is found by the account's own username; a repeat "
+        "on an already-linked account answers `was_already_linked` and repeats the "
+        "revocations."
+    ),
+    "saml.create_service_provider": (
+        "`sp_signing_cert_pem` must be RSA (2048 bits or more) or ECDSA on P-256, "
+        "P-384 or P-521; an **ECDSA certificate verifies HTTP-POST requests only** -- "
+        "the HTTP-Redirect binding is RSA-only (§29.3 rule 2). `encrypt_assertions: "
+        "true` is refused while encryption is unimplemented. `entity_id` is unique "
+        "per tenant (`409`) and immutable once created."
+    ),
+    "saml.update_service_provider": (
+        "An omitted member takes its **default**, not its stored value: `enabled` "
+        "and `sign_responses` default to `true`, `name_id_format` to `persistent`, "
+        "the other flags to `false`, certificates and `slo_url` / `slo_binding` to "
+        "null, the lists to empty (§29.2). Start from `get_service_provider`. "
+        "`entity_id` is immutable: changing it is `400` -- register a new service "
+        "provider instead (§29.3 rule 3). An ECDSA `sp_signing_cert_pem` verifies "
+        "HTTP-POST requests only; HTTP-Redirect is RSA-only."
+    ),
+    "saml.delete_service_provider": (
+        "Ends no session: users already signed in to the SP stay signed in there "
+        "until their SP session ends (§29.3 rule 5)."
+    ),
+    "saml.parse_sp_metadata": (
+        "**Parses and stores nothing** (§29.3 rule 6): the result is a draft to "
+        "review and pass to `create_service_provider`. Exactly one of "
+        "`metadata_xml` and `metadata_url` must be set; both or neither is refused "
+        "locally, before any request. The metadata's own signature is not "
+        "evaluated. `503` in a server built without SAML."
+    ),
+    "saml.issue_idp_credential": (
+        "Generates an RSA-4096 key on the server, which takes seconds; the key is "
+        "never returned. An occupied slot is `409` (§29.3 rule 7)."
+    ),
+    "saml.promote_idp_credential": (
+        "`credential_id` must be the tenant's current `next` credential; in one "
+        "transaction the old `active` is retired -- its key destroyed -- and `next` "
+        "becomes `active` (§29.3 rule 7)."
+    ),
+    "saml.retire_idp_credential": (
+        "**Retiring the `active` credential with no successor stops SAML sign-on "
+        "for the whole tenant at once** (§29.3 rule 7) -- it is the incident "
+        "response to a leaked key. The key is destroyed. The safe rotation is: issue "
+        "into `next`, wait until every SP has refreshed the metadata, then promote."
+    ),
+    "ssf.update_stream": (
+        "An omitted optional member takes its default (§32.2) -- **except "
+        "`authorization_header`, which absent keeps the stored one** -- unless the "
+        "update moves `endpoint_url` to another scheme, host or port while a header "
+        "is stored: then it must carry `authorization_header` again or "
+        "`clear_authorization_header: true`, else `400` (§32.3 rule 5). An update "
+        "overtaken by the receiver's own write is `409`: read the stream again."
+    ),
+    "scim_targets.create": (
+        "`credential` is required here (§31.3 rule 2). It is write-only: no "
+        "response ever carries it, and the SDK keeps no copy."
+    ),
+    "scim_targets.update": (
+        "**The credential is bound to its URL** (§31.3 rule 2): absent `credential` "
+        "keeps the stored one -- except that changing `base_url` of a bearer "
+        "target, `auth.token_url` or `base_url` of a client-credentials target, or "
+        "`auth.type`, without `credential` in the same write is refused `400` and "
+        "changes nothing. The SDK holds no credential to re-send. Every other member "
+        "left out takes its default. An update overtaken by another administrator's "
+        "write is `409` (§31.3 rule 4): reload, then retry yourself."
+    ),
+    "scim_targets.delete": (
+        "**Deprovisions nothing downstream** (§31.3 rule 8): the users and groups "
+        "AXIAM created in the service provider stay there, and AXIAM no longer knows "
+        "them. To remove them, set `deprovision` to `delete`, let AXIAM push, and "
+        "only then delete the target."
+    ),
+    "scim_targets.reconcile": (
+        "Starts a reconciliation in the background and answers `202`; its outcome "
+        "is on the target's `state` (§31.3 rule 7). `409` while a run holds the "
+        "claim, within five minutes of the last one, or for a disabled target."
+    ),
+}
+
+# Local checks a generated operation runs before any I/O, by name of a function
+# in `src/management/checks.rs` taking the request body.
+PRECHECKS: dict[str, str] = {
+    "saml.parse_sp_metadata": "parse_sp_metadata_exactly_one",
+}
+
+# The body the generated surface test sends to an operation with a PRECHECK —
+# the defaulted body every other test uses would be refused locally.
+PRECHECK_TEST_BODIES: dict[str, str] = {
+    "saml.parse_sp_metadata": 'models::ParseSamlSpMetadata::from_url("https://sp.example/metadata")',
 }
 
 # Tagged unions whose tag is an open set (CONTRACT §31.2: "An SDK MUST decode an
@@ -737,6 +887,15 @@ def emit_struct(
                 "Option<"
             ):
                 ty = f"Option<{ty}>"
+            if (name, pname) in EXPLICIT_NULL_FIELDS:
+                ty = f"Option<{ty}>"
+                pschema = dict(pschema)
+                pschema["description"] = (
+                    (pschema.get("description") or "")
+                    + "\n\n`None` is an absent member (on a request: the key is not "
+                    "sent, the value is left unchanged); `Some(None)` is an explicit "
+                    "`null` (on a request: it clears the value; §27.4 rule 5)."
+                )
         fields.append((ident, rename, ty, pname in secrets, pschema.get("description")))
 
     all_optional = all(ty.startswith("Option<") for _, _, ty, _, _ in fields)
@@ -1113,6 +1272,9 @@ def emit_operation(
             "this call and by no other; no later `get` will return it again. "
             "Discarding the result destroys the credential (§27.5 rule 3).",
             "    "))
+    if canonical in CALL_SITE_NOTES:
+        lines.append("    ///")
+        lines.extend(doc_lines(CALL_SITE_NOTES[canonical], "    "))
     if op["method"] != "GET":
         lines.extend(doc_lines(
             "\nNot retried on failure (§27.4 rule 8): every write on this "
@@ -1124,6 +1286,8 @@ def emit_operation(
         signature += ", " + ", ".join(args)
     signature += f") -> Result<{public_ty}, AxiamError> {{"
     lines.append(signature)
+    if canonical in PRECHECKS:
+        lines.append(f"        crate::management::checks::{PRECHECKS[canonical]}(body)?;")
     lines.extend(prelude)
     lines.extend(query_lines)
     lines.append("        let call = Call {")
@@ -1458,7 +1622,12 @@ def call_arguments(
         args.append("PageRequest::first(50)")
 
     if op["request_body"] == "schema":
-        args.append(f"&{struct_literal(op['request_schema'], types, secrets.get(op['request_schema'], set()))}")
+        canonical = f"{namespace}.{opname}"
+        if canonical in PRECHECK_TEST_BODIES:
+            # A body the operation's local check accepts (PRECHECKS).
+            args.append(f"&{PRECHECK_TEST_BODIES[canonical]}")
+        else:
+            args.append(f"&{struct_literal(op['request_schema'], types, secrets.get(op['request_schema'], set()))}")
     elif op["request_body"] == "untyped":
         args.append("&serde_json::json!({})")
     return args, route

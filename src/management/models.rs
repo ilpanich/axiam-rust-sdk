@@ -4187,8 +4187,16 @@ pub enum SamlIdpCredentialStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SamlIdpInfo {
     /// The `active` credential, or null.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_credential_id: Option<Uuid>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub active_credential_id: Option<Option<Uuid>>,
     /// The IdP's entity id (the metadata URL itself).
     pub entity_id: String,
     /// Whether `metadata_url` answers now: SAML is available, enabled for the
@@ -4197,8 +4205,16 @@ pub struct SamlIdpInfo {
     /// Where the IdP metadata is served.
     pub metadata_url: String,
     /// The `next` credential, or null.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_credential_id: Option<Uuid>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub next_credential_id: Option<Option<Uuid>>,
     /// Whether this server build serves SAML at all (it was built with the `saml`
     /// feature).
     pub saml_available: bool,
@@ -5822,9 +5838,17 @@ pub struct UpdateDirectoryConfig {
     /// See \[`SetDirectoryConfig::enabled`\].
     pub enabled: Option<bool>,
     /// Explicit `null` clears it.
-    pub group_base_dn: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub group_base_dn: Option<Option<String>>,
     /// Explicit `null` clears it.
-    pub group_filter: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub group_filter: Option<Option<String>>,
     /// Replaces the whole table when present.
     pub group_mappings: Option<Vec<GroupMapping>>,
     /// See \[`SetDirectoryConfig::group_member_attribute`\].
@@ -5860,10 +5884,18 @@ pub(crate) struct UpdateDirectoryConfigWire {
     pub(crate) bind_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) group_base_dn: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) group_filter: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) group_base_dn: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) group_filter: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) group_mappings: Option<Vec<GroupMapping>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

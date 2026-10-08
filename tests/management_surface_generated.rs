@@ -2163,7 +2163,9 @@ async fn saml_surface() {
     mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/saml/parse-sp-metadata"), 200, r#"{"service_provider": {"acs_urls": [], "display_name": "example", "entity_id": "example"}, "warnings": []}"#).await;
     client
         .saml()
-        .parse_sp_metadata(&models::ParseSamlSpMetadata::default())
+        .parse_sp_metadata(&models::ParseSamlSpMetadata::from_url(
+            "https://sp.example/metadata",
+        ))
         .await
         .expect("saml.parse_sp_metadata");
 

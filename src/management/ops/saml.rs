@@ -115,6 +115,12 @@ impl<'c> Saml<'c> {
     }
 
     /// `POST /api/v1/tenants/{tenant_id}/saml/service-providers`
+    ///
+    /// `sp_signing_cert_pem` must be RSA (2048 bits or more) or ECDSA on P-256,
+    /// P-384 or P-521; an **ECDSA certificate verifies HTTP-POST requests only**
+    /// -- the HTTP-Redirect binding is RSA-only (§29.3 rule 2).
+    /// `encrypt_assertions: true` is refused while encryption is unimplemented.
+    /// `entity_id` is unique per tenant (`409`) and immutable once created.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn create_service_provider(
@@ -163,6 +169,14 @@ impl<'c> Saml<'c> {
     /// body is required, and what you do not carry over from a prior read is not
     /// preserved -- it is overwritten. Read first, change the field you mean,
     /// send the whole thing back.
+    ///
+    /// An omitted member takes its **default**, not its stored value: `enabled`
+    /// and `sign_responses` default to `true`, `name_id_format` to `persistent`,
+    /// the other flags to `false`, certificates and `slo_url` / `slo_binding` to
+    /// null, the lists to empty (§29.2). Start from `get_service_provider`.
+    /// `entity_id` is immutable: changing it is `400` -- register a new service
+    /// provider instead (§29.3 rule 3). An ECDSA `sp_signing_cert_pem` verifies
+    /// HTTP-POST requests only; HTTP-Redirect is RSA-only.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn update_service_provider(
@@ -187,6 +201,9 @@ impl<'c> Saml<'c> {
     }
 
     /// `DELETE /api/v1/tenants/{tenant_id}/saml/service-providers/{sp_id}`
+    ///
+    /// Ends no session: users already signed in to the SP stay signed in there
+    /// until their SP session ends (§29.3 rule 5).
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn delete_service_provider(&self, sp_id: Uuid) -> Result<(), AxiamError> {
@@ -207,12 +224,19 @@ impl<'c> Saml<'c> {
     }
 
     /// `POST /api/v1/tenants/{tenant_id}/saml/parse-sp-metadata`
+    ///
+    /// **Parses and stores nothing** (§29.3 rule 6): the result is a draft to
+    /// review and pass to `create_service_provider`. Exactly one of
+    /// `metadata_xml` and `metadata_url` must be set; both or neither is refused
+    /// locally, before any request. The metadata's own signature is not
+    /// evaluated. `503` in a server built without SAML.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn parse_sp_metadata(
         &self,
         body: &models::ParseSamlSpMetadata,
     ) -> Result<models::SamlSpMetadataDraft, AxiamError> {
+        crate::management::checks::parse_sp_metadata_exactly_one(body)?;
         let tenant_id = self.scope.tenant(self.client, "saml.parse_sp_metadata")?;
         let query: Vec<(&'static str, String)> = Vec::new();
         let call = Call {
@@ -246,6 +270,9 @@ impl<'c> Saml<'c> {
     }
 
     /// `POST /api/v1/tenants/{tenant_id}/saml/idp-credentials`
+    ///
+    /// Generates an RSA-4096 key on the server, which takes seconds; the key is
+    /// never returned. An occupied slot is `409` (§29.3 rule 7).
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn issue_idp_credential(
@@ -270,6 +297,10 @@ impl<'c> Saml<'c> {
 
     /// `POST /api/v1/tenants/{tenant_id}/saml/idp-
     /// credentials/{credential_id}/promote`
+    ///
+    /// `credential_id` must be the tenant's current `next` credential; in one
+    /// transaction the old `active` is retired -- its key destroyed -- and `next`
+    /// becomes `active` (§29.3 rule 7).
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn promote_idp_credential(
@@ -296,6 +327,12 @@ impl<'c> Saml<'c> {
 
     /// `POST /api/v1/tenants/{tenant_id}/saml/idp-
     /// credentials/{credential_id}/retire`
+    ///
+    /// **Retiring the `active` credential with no successor stops SAML sign-on
+    /// for the whole tenant at once** (§29.3 rule 7) -- it is the incident
+    /// response to a leaked key. The key is destroyed. The safe rotation is:
+    /// issue into `next`, wait until every SP has refreshed the metadata, then
+    /// promote.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn retire_idp_credential(

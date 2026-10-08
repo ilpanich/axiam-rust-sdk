@@ -86,6 +86,7 @@
 //! hand-maintained table of 147 names is wrong by the next release. Everything
 //! else here is written by hand. CI regenerates and diffs.
 
+pub(crate) mod checks;
 pub mod error;
 pub mod manifest;
 pub mod models;
