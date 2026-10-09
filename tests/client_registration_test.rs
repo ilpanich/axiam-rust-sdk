@@ -323,6 +323,82 @@ async fn update_drops_the_five_server_stated_members_and_returns_the_rotated_tok
     );
 }
 
+/// §28.12.2 rule 4 as contract 1.59 reads it (§34.2 P12.4): the replacement
+/// is built from what the read carried. A list the read lacked is not sent —
+/// never as `[]` — and a member of an unexpected shape is sent back as read.
+#[tokio::test]
+async fn update_sends_no_list_the_read_lacked_and_keeps_an_unexpected_shape() {
+    let server = MockServer::start().await;
+    let puts = record(
+        &server,
+        "PUT",
+        ResponseTemplate::new(200).set_body_json(registration_body(
+            &server,
+            json!({ "registration_access_token": fresh_token() }),
+        )),
+    )
+    .await;
+    let client = oidc_support::build_client(&server.uri(), false);
+
+    let mut read = registration_body(
+        &server,
+        json!({
+            // An item of an unexpected type, and a string where a list belongs.
+            "redirect_uris": ["https://agent.example.test/cb", 42],
+            "response_types": "code",
+        }),
+    );
+    read.as_object_mut().unwrap().remove("grant_types");
+    let metadata = ClientRegistration::from_json(read).unwrap();
+    client
+        .update_client_registration(
+            &registration_uri(&server),
+            &Sensitive::new(fresh_token()),
+            &metadata,
+        )
+        .await
+        .expect("update");
+
+    // An explicitly empty list is carried, and so is sent back.
+    let mut read = registration_body(&server, json!({ "grant_types": [] }));
+    read.as_object_mut().unwrap().remove("response_types");
+    let metadata = ClientRegistration::from_json(read).unwrap();
+    client
+        .update_client_registration(
+            &registration_uri(&server),
+            &Sensitive::new(fresh_token()),
+            &metadata,
+        )
+        .await
+        .expect("update");
+
+    let seen = puts.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let first: Value = serde_json::from_slice(&seen[0].body).unwrap();
+    assert!(
+        first.get("grant_types").is_none(),
+        "a list the read lacked is not sent: {}",
+        first.get("grant_types").unwrap_or(&Value::Null)
+    );
+    assert_eq!(
+        first["redirect_uris"],
+        json!(["https://agent.example.test/cb", 42]),
+        "a list with an item of an unexpected type is kept as read"
+    );
+    assert_eq!(
+        first["response_types"],
+        json!("code"),
+        "a member of an unexpected shape is kept as read"
+    );
+    let second: Value = serde_json::from_slice(&seen[1].body).unwrap();
+    assert_eq!(second["grant_types"], json!([]));
+    assert!(second.get("response_types").is_none());
+    assert_eq!(
+        second["redirect_uris"],
+        json!(["https://agent.example.test/cb"])
+    );
+}
+
 #[tokio::test]
 async fn an_update_answered_503_is_not_retried() {
     let server = MockServer::start().await;
