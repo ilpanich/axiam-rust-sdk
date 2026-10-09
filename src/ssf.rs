@@ -93,14 +93,30 @@ pub type AccessTokenProvider = Arc<dyn Fn() -> AccessTokenFuture + Send + Sync>;
 ///
 /// Pluggable so a receiver running several instances can share one store
 /// (§32.7). [`MemoryReplayStore`] is the default.
+///
+/// **A store that cannot answer must fail closed** (§32.7 step 9, contract
+/// 1.59 P4). [`Self::check_and_record`] has no way to report a failure, so
+/// when yours cannot answer — its backend unreachable, a timeout, an error of
+/// any kind — return `false`, "already seen": the SET is then refused as
+/// `replayed`, never accepted. Returning `true` for a `jti` you could not
+/// check accepts a replay. A refusal for that reason looks exactly like a real
+/// replay to the caller, so make the outage visible from inside the store
+/// (a log line, a metric) rather than letting it pass as one.
 pub trait ReplayStore: Send + Sync {
     /// Record `jti` for `window` and return `true`, or return `false` without
-    /// recording when it is already held. Must be atomic: two concurrent calls
-    /// with one `jti` must not both see `true`.
+    /// recording when it is already held — or when the store cannot answer
+    /// (fail closed, above). Must be atomic: two concurrent calls with one
+    /// `jti` must not both see `true`.
     fn check_and_record(&self, jti: &str, window: Duration) -> bool;
 }
 
 /// The in-memory [`ReplayStore`]: one process, lost on restart.
+///
+/// Bounded in time, **unbounded in count**: every accepted `jti` is kept for
+/// the replay window (seven days by default) and dropped once it expires, with
+/// no cap on how many are held meanwhile (§34.2 P4 permits this). A receiver
+/// that expects a high event rate, or runs several instances, supplies its own
+/// store.
 #[derive(Debug, Default)]
 pub struct MemoryReplayStore {
     seen: Mutex<HashMap<String, crate::time::Instant>>,
@@ -194,7 +210,9 @@ pub struct RefusedSet {
     /// The key the transmitter returned the SET under.
     pub jti: String,
     /// Why it was refused. Pass [`SetErr::from_reason`] of it in the next
-    /// poll's `set_errs`.
+    /// poll's `set_errs` — unless it is [`SetFailureReason::Replayed`]: this
+    /// receiver accepted that SET earlier, so acknowledge it in `ack`
+    /// (§32.7, contract 1.59 P2).
     pub reason: SetFailureReason,
 }
 
@@ -397,10 +415,23 @@ impl SsfReceiver {
     /// [`AxiamError::Network`] when the JWKS could not be fetched — which is
     /// not a verdict on the SET.
     pub async fn verify_set(&self, set: &str) -> Result<SecurityEvent, AxiamError> {
-        self.verify_inner(set, None).await
+        let event = self.judge(set, None).await?;
+        self.record(event)
     }
 
-    async fn verify_inner(
+    /// Step 9: record the `jti` of a SET that passed steps 1–8.
+    fn record(&self, event: SecurityEvent) -> Result<SecurityEvent, AxiamError> {
+        if !self
+            .replay_store
+            .check_and_record(&event.jti, self.replay_window)
+        {
+            return Err(refuse(SetFailureReason::Replayed, "jti already seen"));
+        }
+        Ok(event)
+    }
+
+    /// Steps 1–8, recording nothing.
+    async fn judge(
         &self,
         set: &str,
         expected_jti: Option<&str>,
@@ -486,10 +517,7 @@ impl SsfReceiver {
             return Err(refuse(InvalidRequest, "the poll key is not the SET's jti"));
         }
         let (event_type, event) = events.iter().next().expect("one member");
-        // 9.
-        if !self.replay_store.check_and_record(jti, self.replay_window) {
-            return Err(refuse(Replayed, "jti already seen"));
-        }
+        // 9 is the caller's: `verify_set` and `poll` record through `record`.
         Ok(SecurityEvent {
             jti: jti.to_string(),
             iat,
@@ -508,13 +536,20 @@ impl SsfReceiver {
     /// `ack` and `set_errs` are sent exactly as given. **Nothing is
     /// acknowledged on your behalf**: acknowledge, on the next call, the
     /// `jti`s you processed, and pass each refused one in `set_errs`
-    /// ([`SetErr::from_reason`]). A SET you neither acknowledge nor refuse is
+    /// ([`SetErr::from_reason`]) — except a `replayed` one, which this
+    /// receiver accepted on an earlier poll: acknowledge that one in `ack`
+    /// (§32.7, contract 1.59 P2). A SET you neither acknowledge nor refuse is
     /// re-offered, and — having been recorded when it verified — then reads as
     /// `replayed`.
     ///
-    /// Retried per §16 on a transport failure or `5xx`, never on a `4xx`. A
-    /// JWKS fetch failure aborts the poll with that error rather than refusing
-    /// SETs it could not judge.
+    /// **All or nothing** (§32.7, contract 1.59 P1): steps 1–8 run over the
+    /// whole batch before any `jti` is recorded. A failure that is no verdict
+    /// on a SET — the JWKS or discovery fetch failing — aborts the poll with
+    /// that error having recorded nothing, so every SET of the batch is offered
+    /// again and none is lost as a false `replayed`.
+    ///
+    /// Retried per §16 on a transport failure, a `5xx`, a `408` or a `429`;
+    /// never on another `4xx`.
     pub async fn poll(
         &self,
         stream_id: &str,
@@ -591,27 +626,35 @@ impl SsfReceiver {
             .get("moreAvailable")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let mut events = Vec::new();
-        let mut refused = Vec::new();
+        // Steps 1–8 over the whole batch first: a non-verdict failure on any
+        // SET returns here, before a single `jti` is recorded (P1).
+        let mut judged = Vec::new();
         if let Some(sets) = reply.get("sets").and_then(Value::as_object) {
             for (jti, set) in sets {
-                let Some(set) = set.as_str() else {
-                    refused.push(RefusedSet {
-                        jti: jti.clone(),
-                        reason: SetFailureReason::Malformed,
-                    });
-                    continue;
+                let verdict = match set.as_str() {
+                    Some(set) => self.judge(set, Some(jti)).await,
+                    None => Err(refuse(SetFailureReason::Malformed, "not a string")),
                 };
-                match self.verify_inner(set, Some(jti)).await {
-                    Ok(event) => events.push(event),
-                    Err(e) => match e.set_failure_reason() {
-                        Some(reason) => refused.push(RefusedSet {
-                            jti: jti.clone(),
-                            reason,
-                        }),
-                        None => return Err(e),
-                    },
+                if let Err(e) = &verdict
+                    && e.set_failure_reason().is_none()
+                {
+                    return Err(verdict.unwrap_err());
                 }
+                judged.push((jti, verdict));
+            }
+        }
+        // Step 9, in the transmitter's order.
+        let mut events = Vec::new();
+        let mut refused = Vec::new();
+        for (jti, verdict) in judged {
+            match verdict.and_then(|event| self.record(event)) {
+                Ok(event) => events.push(event),
+                Err(e) => refused.push(RefusedSet {
+                    jti: jti.clone(),
+                    reason: e
+                        .set_failure_reason()
+                        .expect("every remaining failure is a verdict"),
+                }),
             }
         }
         Ok(SsfPollResult {

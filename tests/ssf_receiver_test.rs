@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::ssf::{
-    SetErr, SsfKeySource, SsfPollOptions, SsfReceiver, SsfReceiverConfig, event_types,
+    ReplayStore, SetErr, SsfKeySource, SsfPollOptions, SsfReceiver, SsfReceiverConfig, event_types,
 };
 use axiam_sdk::{AxiamError, Sensitive, SetFailureReason};
 use base64::Engine as _;
@@ -397,6 +397,186 @@ async fn poll_passes_ack_and_set_errs_through_and_sorts_the_answer() {
         .await
         .expect("again");
     assert_eq!(seen.lock().unwrap()[1].0, json!({}));
+}
+
+/// A [`ReplayStore`] the test can look into.
+#[derive(Default)]
+struct InspectableStore {
+    seen: Mutex<Vec<String>>,
+}
+
+impl ReplayStore for InspectableStore {
+    fn check_and_record(&self, jti: &str, _window: Duration) -> bool {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.iter().any(|j| j == jti) {
+            return false;
+        }
+        seen.push(jti.to_string());
+        true
+    }
+}
+
+// ── 8, the two-SET batch (contract 1.59, §34.2 P1) ──
+//
+// The second SET names a `kid` the cached JWKS lacks, and the refetch that
+// unknown `kid` triggers fails. That failure is no verdict on either SET, so
+// `poll` may not leave the first SET's `jti` recorded unless it returns it:
+// recorded and unreturned, the event is refused `replayed` when the
+// transmitter offers it again, and lost.
+#[tokio::test]
+async fn poll_never_keeps_a_jti_it_does_not_return_when_a_later_key_fetch_fails() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    let jwks_hits = Arc::new(Mutex::new(0usize));
+    let sink = Arc::clone(&jwks_hits);
+    let keys = vec![key.jwk()];
+    // The first fetch serves the key; every later one fails.
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(move |_: &Request| {
+            let mut hits = sink.lock().unwrap();
+            *hits += 1;
+            if *hits == 1 {
+                ResponseTemplate::new(200).set_body_json(json!({"keys": keys}))
+            } else {
+                ResponseTemplate::new(503)
+            }
+        })
+        .mount(&server)
+        .await;
+    let stream = Uuid::new_v4().to_string();
+    // `a-` and `b-` keep the batch's order the same whatever map the
+    // transmitter's JSON is read into.
+    let first = with(
+        claims(),
+        "jti",
+        json!(format!("a-{}", Uuid::new_v4().simple())),
+    );
+    let second = with(
+        claims(),
+        "jti",
+        json!(format!("b-{}", Uuid::new_v4().simple())),
+    );
+    let first_jti = first["jti"].as_str().unwrap().to_string();
+    let second_jti = second["jti"].as_str().unwrap().to_string();
+    let stranger = Key::generate();
+    let reply = json!({
+        "sets": {
+            first_jti.clone(): key.sign_set(&first),
+            second_jti.clone(): stranger.sign_set(&second),
+        },
+        "moreAvailable": false,
+    });
+    Mock::given(method("POST"))
+        .and(path(format!("/ssf/v1/poll/{stream}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+
+    let store = Arc::new(InspectableStore::default());
+    let token = format!("cc-{}", Uuid::new_v4().simple());
+    let mut config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::JwksUri(format!("{}/oauth2/jwks", server.uri())),
+    );
+    config.access_token_provider = Some(Arc::new(move || {
+        let t = token.clone();
+        Box::pin(async move { Ok(Sensitive::new(t)) })
+    }));
+    config.replay_store = Some(store.clone());
+    let r = SsfReceiver::new(&client(&server), config).unwrap();
+
+    let outcome = r.poll(&stream, SsfPollOptions::default()).await;
+    assert_eq!(
+        *jwks_hits.lock().unwrap(),
+        2,
+        "the cold fill, then the one refetch the unknown kid costs"
+    );
+    let recorded = store.seen.lock().unwrap().clone();
+    match outcome {
+        Ok(result) => {
+            let returned: Vec<&str> = result.events.iter().map(|e| e.jti.as_str()).collect();
+            for jti in &recorded {
+                assert!(
+                    returned.contains(&jti.as_str()),
+                    "{jti} is recorded but not returned"
+                );
+            }
+            assert!(
+                !result.refused.iter().any(|r| r.jti == second_jti),
+                "a failed key fetch is no verdict on the second SET"
+            );
+        }
+        Err(e) => {
+            assert!(
+                e.set_failure_reason().is_none(),
+                "a failed key fetch is no verdict: {e}"
+            );
+            assert!(
+                !recorded.contains(&first_jti),
+                "the first SET's jti is recorded, but the poll returned nothing"
+            );
+        }
+    }
+    assert!(
+        !recorded.contains(&second_jti),
+        "the unjudged SET is not recorded"
+    );
+}
+
+// ── §32.7 step 9 and §34.2 P4: a store that cannot answer fails closed ──
+//
+// `ReplayStore::check_and_record` returns `bool` and cannot report a failure,
+// which conforms only if its documentation tells an implementer to answer
+// "already seen" when it cannot answer. The documentation is pinned here, and
+// so is what that answer does: a refusal, never an acceptance.
+
+/// A store whose backend is down, answering as the trait's documentation says.
+struct UnreachableStore;
+
+impl ReplayStore for UnreachableStore {
+    fn check_and_record(&self, _jti: &str, _window: Duration) -> bool {
+        false
+    }
+}
+
+#[test]
+fn the_replay_store_documentation_says_fail_closed() {
+    let source = include_str!("../src/ssf.rs");
+    let start = source
+        .find("pub trait ReplayStore")
+        .expect("the trait is declared");
+    let doc_start = source[..start]
+        .rfind("\n\n")
+        .expect("the trait's documentation");
+    let doc = &source[doc_start..start];
+    for needle in ["cannot answer", "return `false`", "fail closed"] {
+        assert!(doc.contains(needle), "ReplayStore's docs lack {needle:?}");
+    }
+    let readme = include_str!("../README.md");
+    assert!(
+        readme.contains("unbounded in count"),
+        "the README says the in-memory store is unbounded in count (§34.2 P4)"
+    );
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_answer_refuses_and_never_accepts() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    jwks(&server, vec![key.jwk()]).await;
+    let mut config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::JwksUri(format!("{}/oauth2/jwks", server.uri())),
+    );
+    config.replay_store = Some(Arc::new(UnreachableStore));
+    let r = SsfReceiver::new(&client(&server), config).unwrap();
+    assert_eq!(
+        reason(&r, &key.sign_set(&claims())).await,
+        SetFailureReason::Replayed
+    );
 }
 
 #[tokio::test]

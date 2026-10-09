@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Contract **1.59** (CONTRACT.md §34, the cross-SDK review of the 1.53 – 1.58 ports: its
+clarifications P1 – P12 amend §32.7, §33.4, §33.7 and §28.12.2 rule 4; follow-up F-59-01,
+ilpanich/axiam#576). The vendored `CONTRACT.md` comes from axiam `fe369eb`; `openapi.json`,
+`management-registry.json` and `proto/` are unchanged. No section is added, so the statement
+names the same sections at 1.59.
+
+### Fixed
+
+- `SsfReceiver::poll` no longer loses events (R-1, §34.2 P1): it runs steps 1 – 8 over the
+  whole batch before recording any `jti`, so a JWKS or discovery fetch that fails part-way
+  returns that error **having recorded nothing** — P1's first form — and the transmitter offers
+  the batch again. Before, the earlier SETs' `jti`s stayed recorded and read `replayed` when
+  re-offered. §32.8 helper test 8 gains the two-SET batch.
+- `ciba_await` stops on a decisive answer (R-12, P9): a `4xx` without an `error` member and any
+  failure after a `200` — a body that does not decode, an ID token that does not validate or
+  whose key cannot be fetched — end the loop; only a transport failure, `408`, `429` and `5xx`
+  are waited out. Before, the loop re-polled a spent redemption into `invalid_grant`.
+- `ciba_poll` retries a `5xx` whatever its body (P8) — AXIAM answers
+  `500 {"error":"server_error"}` — and surfaces it as a `NetworkError`; it never ends
+  `ciba_await`. §33.8 test 8's `500` carries that body.
+- `update_client_registration` sends no list its read lacked (R-23, P12.4), where it sent `[]`,
+  and sends a member of an unexpected shape back as read rather than trimming or dropping it.
+  `ClientRegistration::{redirect_uris, grant_types, response_types}` are
+  `Option<Vec<String>>` (the type is new in this release).
+- No crate-private wire struct holding a secret derives `Debug` (R-19, §7 rule 1): the eighteen
+  generated management twins and six hand-written response wires.
+- Generated documentation (R-28): a replace operation with optional members no longer says
+  "every field of the body is required", `ParseSamlSpMetadata` is documented as exactly one
+  member rather than a sparse body, and `MtlsEndpointAliases` names seven endpoints.
+
+### Changed
+
+- `ReplayStore` documents that a store that cannot answer must **fail closed** — return
+  `false` — the documentation route P4 gives an interface that cannot report a failure (R-4).
+  The README states that the default `MemoryReplayStore` is bounded in time and unbounded in
+  count.
+- A `replayed` refusal from `poll` is acknowledged, not reported in `set_errs` (P2): the poll
+  documentation, `RefusedSet` and the README say so.
+- §21.3.1 vector A is read from the vendored `CONTRACT.md` by the tests, CIBA's alias row
+  included (R-31). The `ciba_await` deadline stays anchored at the initiate response's receipt,
+  one of the two anchors P10 allows.
+
 Contract **1.58** (CONTRACT.md §28.12, §29, §30, §31, §32, §32.7, §33, §21.3.1). The vendored
 `CONTRACT.md`, `openapi.json` and `management-registry.json` come from axiam `21a9c22`;
 `proto/` was already identical.

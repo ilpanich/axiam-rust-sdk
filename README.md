@@ -56,7 +56,7 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.58**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.59**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -76,7 +76,15 @@ the four namespaces contract 1.54–1.57 added, by the contract's design.)
 claimed §1–§13: widening the range silently would turn a statement that was true when written
 into a different claim without anyone editing it. The §21.3.1 amendment of contract 1.58 (the
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
-honoured on an mTLS CIBA call.
+honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
+"§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.59 adds no section: its §34 records the cross-SDK review of the 1.53 – 1.58 ports
+and twelve clarifications, P1 – P12. This SDK follows them — `SsfReceiver::poll` records no
+`jti` it does not return (P1), a `replayed` refusal is acknowledged (P2), a custom
+`ReplayStore` fails closed (P4), `ciba_await` ends on a decisive answer or any failure after a
+`200` and survives a `5xx` whatever its body (P8, P9), and an RFC 7592 update sends no list its
+read lacked (P12.4).
 
 ### Contract 1.53 – 1.58 — what this SDK ships
 
@@ -2058,6 +2066,7 @@ For the relying party that *receives* AXIAM's CAEP and RISC events:
 
 ```rust
 use std::sync::Arc;
+use axiam_sdk::SetFailureReason;
 use axiam_sdk::ssf::{SsfKeySource, SsfPollOptions, SsfReceiver, SsfReceiverConfig, SetErr};
 
 let mut config = SsfReceiverConfig::new(
@@ -2068,12 +2077,16 @@ let mut config = SsfReceiverConfig::new(
 config.access_token_provider = Some(Arc::new(move || Box::pin(fetch_ssf_manage_token())));
 let receiver = SsfReceiver::new(&client, config)?;
 
-// Push: verify, then answer 202 — or 400 {"err": reason.push_error_code()}.
+// Push: verify, then answer 202 — or 400 {"err": reason.push_error_code()} for a
+// refusal. An error with no `set_failure_reason` (the JWKS fetch failed) is no
+// verdict on the SET: answer 5xx, so the transmitter retries.
 let event = receiver.verify_set(&body).await?;
 
-// Poll: acknowledge what you processed on the next call; refuse the rest by setErrs.
+// Poll: acknowledge what you processed on the next call; refuse the rest by setErrs —
+// except a `replayed` one, which you accepted on an earlier poll: acknowledge it.
 let result = receiver.poll(stream_id, SsfPollOptions { return_immediately: Some(true), ..Default::default() }).await?;
 let set_errs = result.refused.iter()
+    .filter(|r| r.reason != SetFailureReason::Replayed)
     .map(|r| (r.jti.clone(), SetErr::from_reason(r.reason)))
     .collect();
 ```
@@ -2081,6 +2094,18 @@ let set_errs = result.refused.iter()
 The verification order, the reason codes (`AxiamError::set_failure_reason`) and the
 seven-day replay window are the contract's. A replay window below seven days is refused
 at configuration.
+
+`poll` is all or nothing (contract 1.59, §34.2 P1): it checks every SET of a batch before
+it records any `jti`, so a key fetch that fails part-way returns that error with nothing
+recorded, and the transmitter offers the whole batch again. It never keeps a `jti` it does
+not return.
+
+The replay store is pluggable (`SsfReceiverConfig::replay_store`). The default
+`MemoryReplayStore` is one process's memory, bounded in time — each `jti` is kept for the
+replay window — and **unbounded in count**: nothing caps how many it holds meanwhile. A
+store of your own cannot report a failure through `ReplayStore::check_and_record`, so it
+must **fail closed**: when it cannot answer, it returns `false` ("already seen"), and the
+SET is refused rather than accepted (§34.2 P4).
 
 ## CIBA (§33)
 

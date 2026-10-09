@@ -55,7 +55,8 @@ struct DeviceTokenForm<'a> {
     client_id: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
+/// Not `Debug`: it holds the `device_code` until it is wrapped (§7 rule 1).
+#[derive(Deserialize)]
 struct DeviceAuthorizationResponseWire {
     device_code: String,
     user_code: String,
@@ -548,5 +549,18 @@ mod tests {
         // Classified Terminal, but the loop consults `is_retryable_transport`
         // for exactly this case (§14.2 rule 6) and keeps polling.
         assert_eq!(classify(&err), PollOutcome::Terminal);
+    }
+}
+
+/// CONTRACT.md §7 rule 1: these wire structs hold the plaintext of a value
+/// the public type wraps in `Sensitive`, so none of them may be `Debug`.
+#[cfg(test)]
+mod wire_redaction_tests {
+    #[test]
+    fn no_wire_struct_holding_a_secret_is_debug() {
+        assert!(
+            !crate::sensitive::implements_debug!(super::DeviceAuthorizationResponseWire),
+            "DeviceAuthorizationResponseWire is Debug"
+        );
     }
 }

@@ -65,12 +65,15 @@ pub struct ClientRegistration {
     pub client_id_issued_at: Option<i64>,
     /// The registered display name.
     pub client_name: Option<String>,
-    /// The registered redirect URIs.
-    pub redirect_uris: Vec<String>,
-    /// The registered grant types.
-    pub grant_types: Vec<String>,
-    /// The registered response types.
-    pub response_types: Vec<String>,
+    /// The registered redirect URIs. `None` when the response did not carry
+    /// the member as a list of strings — then an update does not send it,
+    /// rather than sending `[]` (§28.12.2 rule 4); a member of another shape
+    /// is kept in [`Self::extra`] and sent back as read.
+    pub redirect_uris: Option<Vec<String>>,
+    /// The registered grant types; `None` as for [`Self::redirect_uris`].
+    pub grant_types: Option<Vec<String>>,
+    /// The registered response types; `None` as for [`Self::redirect_uris`].
+    pub response_types: Option<Vec<String>>,
     /// How the client authenticates at the token endpoint. The server refuses
     /// an update that changes it.
     pub token_endpoint_auth_method: Option<String>,
@@ -126,13 +129,25 @@ impl ClientRegistration {
                 _ => None,
             }
         }
-        fn take_list(map: &mut Map<String, Value>, key: &str) -> Vec<String> {
+        fn take_list(map: &mut Map<String, Value>, key: &str) -> Option<Vec<String>> {
             match map.remove(key) {
-                Some(Value::Array(items)) => items
-                    .into_iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect(),
-                _ => Vec::new(),
+                Some(Value::Array(items)) if items.iter().all(Value::is_string) => Some(
+                    items
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                Some(other) if !other.is_null() => {
+                    // A list with an item of another type, or not a list at
+                    // all: kept as read, never trimmed or dropped
+                    // (§28.12.2 rule 4, contract 1.59 P12.4).
+                    map.insert(key.to_string(), other);
+                    None
+                }
+                _ => None,
             }
         }
 
@@ -165,7 +180,8 @@ impl ClientRegistration {
 
     /// The RFC 7592 §2.2 replacement body: every member but the five the
     /// server states (§28.12.2 rule 4), with `client_id` set to this
-    /// registration's own.
+    /// registration's own. Built from what the read carried: a list it lacked
+    /// is not sent, never as `[]` (contract 1.59 P12.4).
     fn update_body(&self) -> Value {
         let mut body = self.extra.clone();
         for key in SERVER_STATED_MEMBERS {
@@ -178,9 +194,15 @@ impl ClientRegistration {
             }
         };
         put("client_name", self.client_name.clone().map(Value::String));
-        put("redirect_uris", Some(string_list(&self.redirect_uris)));
-        put("grant_types", Some(string_list(&self.grant_types)));
-        put("response_types", Some(string_list(&self.response_types)));
+        put(
+            "redirect_uris",
+            self.redirect_uris.as_deref().map(string_list),
+        );
+        put("grant_types", self.grant_types.as_deref().map(string_list));
+        put(
+            "response_types",
+            self.response_types.as_deref().map(string_list),
+        );
         put(
             "token_endpoint_auth_method",
             self.token_endpoint_auth_method.clone().map(Value::String),

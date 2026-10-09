@@ -319,24 +319,43 @@ enum Step {
     Pending,
     /// `slow_down` — add 5 s to the interval, for good.
     SlowDown,
-    /// A transport failure, a `5xx` or a `429` that outlived §16's retries —
-    /// not terminal; wait one interval (§33.7 rule 5).
+    /// A transport failure, a `408`, a `429` or a `5xx` (whatever its body)
+    /// that outlived §16's retries — not terminal; wait one interval (§33.7
+    /// rule 5, contract 1.59 P8, P9).
     Transient,
-    /// Anything else — `access_denied`, `expired_token`, `invalid_grant`, the
-    /// call refused — is the answer.
+    /// Anything else is the answer: `access_denied`, `expired_token`,
+    /// `invalid_grant`, a `4xx` without an `error` member, the call refused
+    /// locally — and **any failure after a `2xx`** (a body that does not
+    /// decode, an ID token that does not validate or whose key cannot be
+    /// fetched), because the redemption is spent (§33.7 rule 7, P9).
     Terminal,
 }
 
-fn classify(err: &AxiamError) -> Step {
+/// A failed [`AxiamClient::ciba_poll`], with what it means for the loop.
+struct PollFailure {
+    err: AxiamError,
+    step: Step,
+}
+
+impl PollFailure {
+    fn terminal(err: AxiamError) -> Self {
+        Self {
+            err,
+            step: Step::Terminal,
+        }
+    }
+}
+
+/// The step a decisive (not retried) non-`2xx` answer means.
+fn decisive_step(err: &AxiamError, status: u16) -> Step {
     match err.oauth_error_code() {
         Some("authorization_pending") => Step::Pending,
         Some("slow_down") => Step::SlowDown,
         // §33.3 rule 13: a 429's body is `rate_limit_exceeded`, never terminal
-        // for a poll.
+        // for a poll; P9: a `408` and a `429` are transient, whatever they say.
         Some("rate_limit_exceeded") => Step::Transient,
-        Some(_) => Step::Terminal,
-        None if err.is_retryable_transport() => Step::Transient,
-        None => Step::Terminal,
+        _ if status == 408 || status == 429 => Step::Transient,
+        _ => Step::Terminal,
     }
 }
 
@@ -475,27 +494,45 @@ impl AxiamClient {
     /// distinct — [`AxiamError::is_access_denied`],
     /// [`AxiamError::is_expired_token`]), `invalid_grant`.
     ///
-    /// Retried per §16 on a transport failure, a `5xx` or a bodiless `429`.
-    /// **Store the returned tokens before anything else**: a request is
-    /// redeemed once, and a second `ciba_poll` for it is `invalid_grant`
-    /// (§33.7 rule 7).
+    /// Retried per §16 on a transport failure, a bodiless `408` or `429`, and
+    /// a `5xx` **whatever its body** — AXIAM answers an internal failure
+    /// `500 {"error":"server_error"}` — which then surfaces as a
+    /// `NetworkError`, never as that `OAuthProtocolError` (§33.7 rule 5,
+    /// contract 1.59 P8). **Store the returned tokens before anything else**:
+    /// a request is redeemed once, and a second `ciba_poll` for it is
+    /// `invalid_grant` (§33.7 rule 7).
     pub async fn ciba_poll(&self, params: CibaPollParams) -> Result<OidcTokenSet, AxiamError> {
+        self.ciba_poll_step(params).await.map_err(|f| f.err)
+    }
+
+    /// [`Self::ciba_poll`], keeping what a failure means for
+    /// [`Self::ciba_await`]'s loop.
+    async fn ciba_poll_step(&self, params: CibaPollParams) -> Result<OidcTokenSet, PollFailure> {
         use crate::retry::{
             Attempt, RetryRunner, ThreadRngJitter, TokioSleeper, parse_retry_after,
         };
-        self.ensure_open()?;
-        let auth = self.ciba_client_auth("ciba_poll")?;
+        self.ensure_open().map_err(PollFailure::terminal)?;
+        let auth = self
+            .ciba_client_auth("ciba_poll")
+            .map_err(PollFailure::terminal)?;
         let configuration = match params.configuration {
             Some(c) => c,
-            None => self.oidc_discover().await?,
+            None => self.oidc_discover().await.map_err(PollFailure::terminal)?,
         };
-        let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
-        let endpoint = self.mtls_preferred(
-            &configuration,
-            |a| a.token_endpoint.as_deref(),
-            &configuration.token_endpoint,
-        )?;
-        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
+        let tenant_id = self
+            .resolve_oidc_tenant_id(params.tenant_id)
+            .await
+            .map_err(PollFailure::terminal)?;
+        let endpoint = self
+            .mtls_preferred(
+                &configuration,
+                |a| a.token_endpoint.as_deref(),
+                &configuration.token_endpoint,
+            )
+            .map_err(PollFailure::terminal)?;
+        let url = self
+            .oidc_endpoint_url(endpoint, tenant_id)
+            .map_err(PollFailure::terminal)?;
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", CIBA_GRANT_TYPE),
             ("auth_req_id", params.auth_req_id.expose().as_str()),
@@ -534,25 +571,46 @@ impl AxiamClient {
                         .and_then(|v| v.to_str().ok())
                         .and_then(parse_retry_after);
                     let status = response.status().as_u16();
+                    // P8: on this operation a 5xx is transient whatever its
+                    // body, so it maps by status (§2) rather than by `error`.
+                    if status >= 500 {
+                        let text = response.text().await.unwrap_or_default();
+                        let err = AxiamError::from_http_status(status, text);
+                        return Err(Attempt { err, retry_after });
+                    }
                     let err = oauth2_error_or_fallback(response).await;
                     // The protocol answers (`authorization_pending`, …) are
-                    // decisive, and so is any other 4xx but 408 / 429.
+                    // decisive, and so is any other 4xx but a bodiless 408 /
+                    // 429.
                     if err.oauth_error_code().is_some()
                         || !crate::retry::status_is_retryable(status)
                     {
-                        return Ok(Err(err));
+                        let step = decisive_step(&err, status);
+                        return Ok(Err(PollFailure { err, step }));
                     }
                     return Err(Attempt { err, retry_after });
                 }
                 // §33.7 rule 7: consume the 200 before anything else — and a
                 // body that does not parse is not retried, since the server
-                // may already have redeemed the request.
+                // may already have redeemed the request: it is terminal.
                 Ok(response.json::<TokenResponseWire>().await.map_err(|e| {
-                    AxiamError::network(format!("failed to parse the ciba_poll response: {e}"))
+                    PollFailure::terminal(AxiamError::network(format!(
+                        "failed to parse the ciba_poll response: {e}"
+                    )))
                 }))
             })
-            .await??;
-        self.to_token_set(wire, &configuration, None).await
+            .await
+            // What outlived §16's retries is a transport failure, a 5xx or a
+            // bodiless 408 / 429: transient for the loop.
+            .map_err(|err| PollFailure {
+                err,
+                step: Step::Transient,
+            })??;
+        // After the 2xx: a failure here — the ID token, or the key fetch its
+        // validation needs — is terminal; the redemption is spent (P9).
+        self.to_token_set(wire, &configuration, None)
+            .await
+            .map_err(PollFailure::terminal)
     }
 
     /// Poll for `initiated`'s outcome until it is decided or expires (§33.1,
@@ -562,8 +620,14 @@ impl AxiamClient {
     ///   `slow_down` and a longer wait.
     /// * `slow_down` adds [`CIBA_SLOW_DOWN_INCREMENT_SECS`] to the interval,
     ///   cumulatively and permanently; `authorization_pending` never lowers it.
-    /// * A transport failure, `5xx` or `429` is not terminal: the loop waits
-    ///   the interval and polls again.
+    /// * A transport failure, a `408`, a `429` or a `5xx` (whatever its body)
+    ///   is not terminal: the loop waits the interval and polls again.
+    /// * Anything else ends the loop: a `4xx` without an `error` member, and
+    ///   any failure **after** a `200` — a body that does not decode, an ID
+    ///   token that does not validate or whose key cannot be fetched. The
+    ///   redemption is spent, so polling again could only answer
+    ///   `invalid_grant` (§33.7 rule 7, contract 1.59 P9); such tokens are
+    ///   not returned (§12.4), and the application starts a new request.
     /// * Polling stops at `received_at + expires_in`, even if the server has
     ///   not said `expired_token`; the same `expired_token` is then raised
     ///   locally.
@@ -603,7 +667,7 @@ impl AxiamClient {
             }
             clock.sleep(wait).await;
             match self
-                .ciba_poll(CibaPollParams {
+                .ciba_poll_step(CibaPollParams {
                     auth_req_id: initiated.auth_req_id.clone(),
                     tenant_id: params.tenant_id,
                     configuration: Some(configuration.clone()),
@@ -611,10 +675,10 @@ impl AxiamClient {
                 .await
             {
                 Ok(tokens) => return Ok(tokens),
-                Err(e) => match classify(&e) {
+                Err(PollFailure { err, step }) => match step {
                     Step::Pending | Step::Transient => continue,
                     Step::SlowDown => interval += CIBA_SLOW_DOWN_INCREMENT_SECS,
-                    Step::Terminal => return Err(e),
+                    Step::Terminal => return Err(err),
                 },
             }
         }
@@ -804,13 +868,24 @@ mod tests {
         ];
         for (code, step) in cases {
             assert_eq!(
-                classify(&AxiamError::oauth_protocol_error(code, "d")),
+                decisive_step(&AxiamError::oauth_protocol_error(code, "d"), 400),
                 step,
                 "{code}"
             );
         }
-        assert_eq!(classify(&AxiamError::network("reset")), Step::Transient);
-        assert_eq!(classify(&AxiamError::auth("no")), Step::Terminal);
+        // P9: a 408 and a 429 are transient whatever they carry; a 4xx
+        // without an `error` member is decisive.
+        let unknown = AxiamError::oauth_protocol_error("something_new", "d");
+        assert_eq!(decisive_step(&unknown, 429), Step::Transient);
+        assert_eq!(decisive_step(&unknown, 408), Step::Transient);
+        assert_eq!(
+            decisive_step(&AxiamError::from_http_status(400, "x"), 400),
+            Step::Terminal
+        );
+        assert_eq!(
+            decisive_step(&AxiamError::from_http_status(404, "x"), 404),
+            Step::Terminal
+        );
     }
 
     #[test]

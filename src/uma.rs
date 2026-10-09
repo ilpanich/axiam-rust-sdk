@@ -141,7 +141,8 @@ impl RequestedPermission {
     }
 }
 
-#[derive(Debug, Deserialize)]
+/// Not `Debug`: it holds the ticket until it is wrapped (§7 rule 1).
+#[derive(Deserialize)]
 struct TicketResponseWire {
     ticket: String,
 }
@@ -162,7 +163,8 @@ pub struct RptPermission {
     pub exp: i64,
 }
 
-#[derive(Debug, Deserialize)]
+/// Not `Debug`: it holds the RPT until it is wrapped (§7 rule 1).
+#[derive(Deserialize)]
 struct RptResponseWire {
     access_token: String,
     token_type: String,
@@ -580,5 +582,22 @@ mod tests {
         let set = ResourceSet::new("invoice").with_scopes(["view"]);
         let json = serde_json::to_value(&set).unwrap();
         assert_eq!(json["resource_scopes"], serde_json::json!(["view"]));
+    }
+}
+
+/// CONTRACT.md §7 rule 1: these wire structs hold the plaintext of a value
+/// the public type wraps in `Sensitive`, so none of them may be `Debug`.
+#[cfg(test)]
+mod wire_redaction_tests {
+    #[test]
+    fn no_wire_struct_holding_a_secret_is_debug() {
+        assert!(
+            !crate::sensitive::implements_debug!(super::TicketResponseWire),
+            "TicketResponseWire is Debug"
+        );
+        assert!(
+            !crate::sensitive::implements_debug!(super::RptResponseWire),
+            "RptResponseWire is Debug"
+        );
     }
 }

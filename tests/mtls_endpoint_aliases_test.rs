@@ -25,8 +25,8 @@ mod oidc_support;
 use axiam_sdk::AxiamError;
 use axiam_sdk::Sensitive;
 use axiam_sdk::oidc::{
-    DeviceAuthorizeParams, IntrospectParams, LogoutUrlParams, OidcBeginParams, OidcExchangeParams,
-    OidcParParams, RevokeParams,
+    CibaInitiateParams, CibaUserHint, DeviceAuthorizeParams, IntrospectParams, LogoutUrlParams,
+    OidcBeginParams, OidcExchangeParams, OidcParParams, RevokeParams,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -783,5 +783,270 @@ async fn an_alias_query_component_is_displaced_and_never_duplicated() {
             .any(|(k, v)| k == "deployment" && v == "eu-west"),
         "every other parameter must survive as the server wrote it: {}",
         call.url
+    );
+}
+
+// ── §21.3.1 vector A, read from the vendored CONTRACT.md ──────────────────
+//
+// The vector lives in the contract "rather than in a separate fixture file
+// because this document is already vendored byte-for-byte by every SDK
+// repository and already drift-gated in CI" (§21.3.1). So it is read from
+// there, not retyped: a re-vendored contract that amends the vector — as 1.58
+// did, adding the seventh alias — changes what these tests assert without
+// anyone editing them.
+
+/// The seven aliased endpoints vector A names (contract 1.58).
+const VECTOR_A_ALIASES: [&str; 7] = [
+    "token_endpoint",
+    "userinfo_endpoint",
+    "revocation_endpoint",
+    "introspection_endpoint",
+    "device_authorization_endpoint",
+    "pushed_authorization_request_endpoint",
+    "backchannel_authentication_endpoint",
+];
+
+/// Vector A, parsed from the first ```json block after its heading in the
+/// vendored `CONTRACT.md`.
+///
+/// The vector is "abridged to the members that matter" (§21.3.1): it names
+/// every endpoint and the issuer, and none of the `*_supported` lists a whole
+/// discovery document carries. Those — and only those — come from the
+/// fixture; every endpoint, the issuer and the alias object are the vector's.
+fn vector_a() -> serde_json::Value {
+    let contract = include_str!("../CONTRACT.md");
+    let heading = contract
+        .find("**Vector A")
+        .expect("CONTRACT.md §21.3.1 carries vector A");
+    let rest = &contract[heading..];
+    let open = rest.find("```json").expect("vector A's JSON block") + "```json".len();
+    let close = open + rest[open..].find("```").expect("the block closes");
+    let vector: serde_json::Value =
+        serde_json::from_str(&rest[open..close]).expect("vector A is JSON");
+
+    let mut document = discovery_document("https://unused.invalid");
+    let map = document.as_object_mut().expect("an object");
+    map.retain(|key, _| key.ends_with("_supported"));
+    for (key, value) in vector.as_object().expect("vector A is an object") {
+        map.insert(key.clone(), value.clone());
+    }
+    document
+}
+
+/// Vector A with its two origins moved onto the two mock listeners. Only the
+/// endpoints move: `issuer` stays the vector's own string.
+fn vector_a_on(conventional: &str, mtls: &str) -> serde_json::Value {
+    let mut doc = vector_a();
+    let map = doc.as_object_mut().expect("vector A is an object");
+    for (key, value) in map.iter_mut() {
+        if key == "issuer" {
+            continue;
+        }
+        if let Some(s) = value.as_str() {
+            *value = json!(s.replacen("https://iam.example.test", conventional, 1));
+        }
+    }
+    for value in map["mtls_endpoint_aliases"]
+        .as_object_mut()
+        .expect("the alias object")
+        .values_mut()
+    {
+        let s = value.as_str().expect("an alias is a string").to_string();
+        *value = json!(s.replacen("https://mtls.iam.example.test", mtls, 1));
+    }
+    doc
+}
+
+async fn mount_bc_authorize(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/oauth2/bc-authorize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "auth_req_id": uuid::Uuid::new_v4().simple().to_string(),
+            "expires_in": 120,
+        })))
+        .mount(server)
+        .await;
+}
+
+/// How many `tenant_id` parameters the request to `endpoint_path` carried.
+async fn tenant_ids_sent(server: &MockServer, endpoint_path: &str) -> usize {
+    let requests = server.received_requests().await.unwrap_or_default();
+    let call = requests
+        .iter()
+        .find(|r| r.url.path() == endpoint_path)
+        .unwrap_or_else(|| panic!("{endpoint_path} was not called here"));
+    call.url
+        .query_pairs()
+        .filter(|(k, _)| k == "tenant_id")
+        .count()
+}
+
+#[test]
+fn vector_a_from_the_contract_has_seven_aliases_and_decodes_whole() {
+    let vector = vector_a();
+    let aliases = vector["mtls_endpoint_aliases"]
+        .as_object()
+        .expect("vector A carries the member");
+    let mut keys: Vec<&str> = aliases.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut expected = VECTOR_A_ALIASES.to_vec();
+    expected.sort_unstable();
+    assert_eq!(keys, expected, "vector A aliases exactly these seven");
+
+    let configuration: axiam_sdk::oidc::OidcConfiguration =
+        serde_json::from_value(vector.clone()).expect("vector A decodes");
+    assert_eq!(configuration.issuer, "https://iam.example.test");
+    let decoded = serde_json::to_value(&configuration).expect("serializes");
+    assert_eq!(
+        decoded["mtls_endpoint_aliases"], vector["mtls_endpoint_aliases"],
+        "every alias survives, its query component intact"
+    );
+    assert_eq!(
+        configuration.backchannel_authentication_endpoint.as_deref(),
+        vector["backchannel_authentication_endpoint"].as_str()
+    );
+}
+
+/// The assertions table beside vector A, for an SDK configured with a client
+/// certificate — every row this SDK has a call for, the CIBA row included.
+#[tokio::test]
+async fn vector_a_with_a_certificate_every_aliased_call_uses_its_alias() {
+    let conventional = MockServer::start().await;
+    let mtls = MockServer::start().await;
+    mount_discovery(&conventional, vector_a_on(&conventional.uri(), &mtls.uri())).await;
+    for server in [&conventional, &mtls] {
+        mount_oauth2_endpoints(server).await;
+        mount_bc_authorize(server).await;
+    }
+    let client = build_mtls_client(&conventional.uri(), true);
+
+    client
+        .oidc_exchange(exchange_params())
+        .await
+        .expect("token");
+    client
+        .introspect(IntrospectParams {
+            token: Sensitive::new(uuid::Uuid::new_v4().to_string()),
+            token_type_hint: None,
+            tenant_id: None,
+            configuration: None,
+        })
+        .await
+        .expect("introspect");
+    client
+        .revoke(RevokeParams {
+            token: Sensitive::new(uuid::Uuid::new_v4().to_string()),
+            token_type_hint: None,
+            tenant_id: None,
+            configuration: None,
+        })
+        .await
+        .expect("revoke");
+    client
+        .device_authorize(DeviceAuthorizeParams::default())
+        .await
+        .expect("device authorization");
+    let configuration = client.oidc_discover().await.expect("discovery");
+    let request = client
+        .oidc_begin(
+            &configuration,
+            OidcBeginParams {
+                redirect_uri: REDIRECT_URI.into(),
+                scope: Some("openid".into()),
+                extra_params: Vec::new(),
+            },
+        )
+        .expect("oidc_begin");
+    let authorize_url = request.url.clone();
+    client
+        .oidc_par(OidcParParams {
+            request,
+            redirect_uri: REDIRECT_URI.into(),
+            scope: Some("openid".into()),
+            tenant_id: None,
+            configuration: None,
+            dpop_jkt: None,
+        })
+        .await
+        .expect("PAR");
+    client
+        .ciba_initiate(CibaInitiateParams::new(
+            "openid",
+            CibaUserHint::LoginHint("ada".into()),
+        ))
+        .await
+        .expect("CIBA backchannel authentication");
+
+    for p in [
+        "/oauth2/token",
+        "/oauth2/introspect",
+        "/oauth2/revoke",
+        "/oauth2/device_authorization",
+        "/oauth2/par",
+        "/oauth2/bc-authorize",
+    ] {
+        assert_eq!(
+            receiving_origin(&conventional, &mtls, p).await,
+            mtls.uri(),
+            "{p} must go to its alias"
+        );
+        assert_eq!(
+            tenant_ids_sent(&mtls, p).await,
+            1,
+            "{p}: the alias's tenant_id is kept or displaced, never dropped or duplicated"
+        );
+    }
+    // Never aliased, never synthesised.
+    assert!(
+        authorize_url.starts_with(&format!("{}/oauth2/authorize", conventional.uri())),
+        "authorization stays on the front-channel host: {authorize_url}"
+    );
+    let logout = client
+        .logout_url(
+            &configuration,
+            LogoutUrlParams::new(Sensitive::new(uuid::Uuid::new_v4().to_string())),
+        )
+        .expect("logout_url");
+    assert!(
+        logout.starts_with(&format!("{}/oauth2/logout", conventional.uri())),
+        "end session stays on the front-channel host: {logout}"
+    );
+    assert_eq!(
+        configuration.jwks_uri,
+        format!("{}/oauth2/jwks", conventional.uri())
+    );
+    assert_eq!(
+        configuration.issuer, "https://iam.example.test",
+        "iss is compared against the vector's issuer, unchanged"
+    );
+}
+
+/// The same vector for an SDK with **no** certificate: the CIBA call goes to
+/// the top-level `backchannel_authentication_endpoint`.
+#[tokio::test]
+async fn vector_a_without_a_certificate_ciba_keeps_the_top_level_endpoint() {
+    let conventional = MockServer::start().await;
+    let mtls = MockServer::start().await;
+    mount_discovery(&conventional, vector_a_on(&conventional.uri(), &mtls.uri())).await;
+    for server in [&conventional, &mtls] {
+        mount_bc_authorize(server).await;
+    }
+    let client = build_client(&conventional.uri(), true);
+
+    client
+        .ciba_initiate(CibaInitiateParams::new(
+            "openid",
+            CibaUserHint::LoginHint("ada".into()),
+        ))
+        .await
+        .expect("CIBA backchannel authentication");
+
+    assert_eq!(
+        receiving_origin(&conventional, &mtls, "/oauth2/bc-authorize").await,
+        conventional.uri()
+    );
+    assert_eq!(
+        tenant_ids_sent(&conventional, "/oauth2/bc-authorize").await,
+        1
     );
 }

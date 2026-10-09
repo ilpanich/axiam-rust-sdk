@@ -25,9 +25,10 @@ pub const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 /// sets a floor of 5 minutes; a smaller configured value is raised to it.
 pub const MIN_DISCOVERY_TTL: Duration = Duration::from_secs(300);
 
-/// RFC 8705 §5 `mtls_endpoint_aliases` — the six endpoints re-based on the
+/// RFC 8705 §5 `mtls_endpoint_aliases` — the seven endpoints re-based on the
 /// host that performs the mutual-TLS handshake (wire schema
-/// `MtlsEndpointAliases`, contract 1.40).
+/// `MtlsEndpointAliases`, contract 1.40; the seventh, CIBA's
+/// `backchannel_authentication_endpoint`, contract 1.58).
 ///
 /// A TLS listener decides whether to request a client certificate during the
 /// handshake, before it has seen any HTTP, so "ask for a certificate on
@@ -35,7 +36,7 @@ pub const MIN_DISCOVERY_TTL: Duration = Duration::from_secs(300);
 /// listener can do. A deployment wanting both runs two, and this object names
 /// the second.
 ///
-/// Only these six are ever aliased. `authorization_endpoint` and
+/// Only these seven are ever aliased. `authorization_endpoint` and
 /// `end_session_endpoint` are front-channel and `jwks_uri` is public key
 /// material, so CONTRACT.md §21.3 rule 2 forbids synthesising an alias for any
 /// of them — sending a browser to an mTLS host raises a native
@@ -44,9 +45,9 @@ pub const MIN_DISCOVERY_TTL: Duration = Duration::from_secs(300);
 /// against it by exact string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 ///
-/// # Why every field is `Option`, though the schema marks all six required
+/// # Why every field is `Option`, though the schema marks all seven required
 ///
-/// AXIAM builds all six from one path through a shared macro, so a real AXIAM
+/// AXIAM builds all seven from one path through a shared macro, so a real AXIAM
 /// deployment always publishes the complete set and this type accepts every
 /// document it serves. Modelling them as required would additionally make a
 /// *partial* object — which RFC 8705 §5 permits, and which another OP may well

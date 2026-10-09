@@ -1164,7 +1164,9 @@ pub struct CreateFederationConfigRequest {
 }
 
 /// Wire twin of [`CreateFederationConfigRequest`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CreateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allow_tenant_inheritance: Option<bool>,
@@ -1508,7 +1510,9 @@ pub struct CreateRegistrationTokenResponse {
 }
 
 /// Wire twin of [`CreateRegistrationTokenResponse`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CreateRegistrationTokenResponseWire {
     pub(crate) initial_access_token: String,
     pub(crate) token: RegistrationTokenResponse,
@@ -1599,7 +1603,9 @@ pub struct CreateScimTokenResponse {
 }
 
 /// Wire twin of [`CreateScimTokenResponse`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CreateScimTokenResponseWire {
     pub(crate) created_at: String,
     pub(crate) created_by: Uuid,
@@ -1689,7 +1695,9 @@ pub struct CreateUserRequest {
 }
 
 /// Wire twin of [`CreateUserRequest`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CreateUserRequestWire {
     pub(crate) email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1733,7 +1741,9 @@ pub struct CreateWebhookRequest {
 }
 
 /// Wire twin of [`CreateWebhookRequest`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CreateWebhookRequestWire {
     pub(crate) events: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2240,7 +2250,9 @@ pub struct GeneratedCaCertificate {
 }
 
 /// Wire twin of [`GeneratedCaCertificate`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GeneratedCaCertificateWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) chain_pem: Option<String>,
@@ -2349,7 +2361,9 @@ pub struct GeneratedCertificate {
 }
 
 /// Wire twin of [`GeneratedCertificate`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GeneratedCertificateWire {
     pub(crate) cert_type: CertificateType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2425,7 +2439,9 @@ pub struct GeneratedPgpKey {
 }
 
 /// Wire twin of [`GeneratedPgpKey`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GeneratedPgpKeyWire {
     pub(crate) algorithm: PgpKeyAlgorithm,
     pub(crate) created_at: String,
@@ -2588,7 +2604,9 @@ pub struct ImportCaCertificateRequest {
 }
 
 /// Wire twin of [`ImportCaCertificateRequest`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ImportCaCertificateRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) private_key_pem: Option<String>,
@@ -3038,7 +3056,9 @@ pub struct OAuth2ClientCreatedResponse {
 }
 
 /// Wire twin of [`OAuth2ClientCreatedResponse`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct OAuth2ClientCreatedResponseWire {
     pub(crate) client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3472,10 +3492,10 @@ pub struct Organization {
 }
 
 /// `POST …/saml/parse-sp-metadata` body: **exactly one** of the two members.
-/// Every field is optional, so this is a **sparse** body: what you leave
-/// `None` is left unchanged, and is omitted from the wire request entirely
-/// rather than sent as `null` (§27.4 rule 5). Construct it with
-/// `..Default::default()`.
+/// Every field is `Option` only because the body is a choice: set **exactly
+/// one** (§29.2), most simply with `ParseSamlSpMetadata::from_url` or
+/// `ParseSamlSpMetadata::from_xml`. Both or neither is refused locally,
+/// before a request is sent. Nothing is stored: the result is a draft.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ParseSamlSpMetadata {
     /// An `https` URL the server fetches the document from, once, through its
@@ -4060,7 +4080,9 @@ pub struct RotateSecretResponse {
 }
 
 /// Wire twin of [`RotateSecretResponse`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct RotateSecretResponseWire {
     pub(crate) client_secret: String,
 }
@@ -4488,7 +4510,9 @@ pub struct ScimTargetInput {
 }
 
 /// Wire twin of [`ScimTargetInput`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ScimTargetInputWire {
     pub(crate) auth: ScimTargetAuth,
     pub(crate) base_url: String,
@@ -4732,7 +4756,9 @@ pub struct ServiceAccountCreatedResponse {
 }
 
 /// Wire twin of [`ServiceAccountCreatedResponse`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ServiceAccountCreatedResponseWire {
     pub(crate) client_id: String,
     pub(crate) client_secret: String,
@@ -4877,7 +4903,9 @@ pub struct SetDirectoryConfig {
 }
 
 /// Wire twin of [`SetDirectoryConfig`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SetDirectoryConfigWire {
     pub(crate) base_dn: String,
     pub(crate) bind_dn: String,
@@ -5373,7 +5401,9 @@ pub struct SsfStreamInput {
 }
 
 /// Wire twin of [`SsfStreamInput`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SsfStreamInputWire {
     pub(crate) audience: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5874,7 +5904,9 @@ pub struct UpdateDirectoryConfig {
 }
 
 /// Wire twin of [`UpdateDirectoryConfig`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Default, Deserialize)]
 pub(crate) struct UpdateDirectoryConfigWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) base_dn: Option<String>,
@@ -6006,7 +6038,9 @@ pub struct UpdateFederationConfigRequest {
 }
 
 /// Wire twin of [`UpdateFederationConfigRequest`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Default, Deserialize)]
 pub(crate) struct UpdateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allow_tenant_inheritance: Option<bool>,
@@ -6418,7 +6452,9 @@ pub struct UpdateWebhookRequest {
 }
 
 /// Wire twin of [`UpdateWebhookRequest`] -- plain strings, private, never logged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).
+#[derive(Clone, Serialize, Default, Deserialize)]
 pub(crate) struct UpdateWebhookRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
@@ -6630,4 +6666,92 @@ pub struct WebhookResponse {
     pub updated_at: String,
     /// `url`.
     pub url: String,
+}
+
+/// CONTRACT.md §7 rule 1: a wire twin holds the plaintext its public type
+/// wraps in `Sensitive`, so no twin may be `Debug`.
+#[cfg(test)]
+mod wire_twin_tests {
+    #[test]
+    fn no_wire_twin_is_debug() {
+        let debug: Vec<&str> = [
+            (
+                "CreateFederationConfigRequestWire",
+                crate::sensitive::implements_debug!(super::CreateFederationConfigRequestWire),
+            ),
+            (
+                "CreateRegistrationTokenResponseWire",
+                crate::sensitive::implements_debug!(super::CreateRegistrationTokenResponseWire),
+            ),
+            (
+                "CreateScimTokenResponseWire",
+                crate::sensitive::implements_debug!(super::CreateScimTokenResponseWire),
+            ),
+            (
+                "CreateUserRequestWire",
+                crate::sensitive::implements_debug!(super::CreateUserRequestWire),
+            ),
+            (
+                "CreateWebhookRequestWire",
+                crate::sensitive::implements_debug!(super::CreateWebhookRequestWire),
+            ),
+            (
+                "GeneratedCaCertificateWire",
+                crate::sensitive::implements_debug!(super::GeneratedCaCertificateWire),
+            ),
+            (
+                "GeneratedCertificateWire",
+                crate::sensitive::implements_debug!(super::GeneratedCertificateWire),
+            ),
+            (
+                "GeneratedPgpKeyWire",
+                crate::sensitive::implements_debug!(super::GeneratedPgpKeyWire),
+            ),
+            (
+                "ImportCaCertificateRequestWire",
+                crate::sensitive::implements_debug!(super::ImportCaCertificateRequestWire),
+            ),
+            (
+                "OAuth2ClientCreatedResponseWire",
+                crate::sensitive::implements_debug!(super::OAuth2ClientCreatedResponseWire),
+            ),
+            (
+                "RotateSecretResponseWire",
+                crate::sensitive::implements_debug!(super::RotateSecretResponseWire),
+            ),
+            (
+                "ScimTargetInputWire",
+                crate::sensitive::implements_debug!(super::ScimTargetInputWire),
+            ),
+            (
+                "ServiceAccountCreatedResponseWire",
+                crate::sensitive::implements_debug!(super::ServiceAccountCreatedResponseWire),
+            ),
+            (
+                "SetDirectoryConfigWire",
+                crate::sensitive::implements_debug!(super::SetDirectoryConfigWire),
+            ),
+            (
+                "SsfStreamInputWire",
+                crate::sensitive::implements_debug!(super::SsfStreamInputWire),
+            ),
+            (
+                "UpdateDirectoryConfigWire",
+                crate::sensitive::implements_debug!(super::UpdateDirectoryConfigWire),
+            ),
+            (
+                "UpdateFederationConfigRequestWire",
+                crate::sensitive::implements_debug!(super::UpdateFederationConfigRequestWire),
+            ),
+            (
+                "UpdateWebhookRequestWire",
+                crate::sensitive::implements_debug!(super::UpdateWebhookRequestWire),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, is_debug)| *is_debug)
+        .map(|(name, _)| name)
+        .collect();
+        assert!(debug.is_empty(), "wire twins deriving Debug: {debug:?}");
+    }
 }

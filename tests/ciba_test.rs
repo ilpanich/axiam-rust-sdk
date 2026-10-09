@@ -589,7 +589,10 @@ async fn t08_a_500_and_a_429_mid_loop_are_survived() {
         Some(clock.clone()),
         vec![
             oauth_error(400, "authorization_pending"),
-            ResponseTemplate::new(500),
+            // Contract 1.59 (§34.2 P8): the 500 carries the body AXIAM's own
+            // token endpoint sends on an internal failure, and is transient
+            // all the same.
+            ResponseTemplate::new(500).set_body_json(json!({"error": "server_error"})),
             oauth_error(429, "rate_limit_exceeded"),
             tokens,
         ],
@@ -609,6 +612,93 @@ async fn t08_a_500_and_a_429_mid_loop_are_survived() {
     assert!(!set.access_token.expose().is_empty());
     assert!(set.id_token.is_some() && set.id_claims.is_some());
     assert_eq!(seen.lock().unwrap().len(), 4);
+}
+
+// ── 5 and 7, the loop's end (contract 1.59, §34.2 P9) ─────────────────────
+//
+// Only a transport failure, `408`, `429` and a `5xx` are transient. A `4xx`
+// without an `error` member is decisive, and anything that fails after a
+// `200` is terminal: the redemption is spent, and polling again could only
+// return `invalid_grant`.
+
+#[tokio::test]
+async fn t05b_a_bodiless_4xx_or_a_failure_after_the_200_ends_ciba_await() {
+    let undecodable = ResponseTemplate::new(200).set_body_json(json!({"token_type": "Bearer"}));
+    let not_json = ResponseTemplate::new(200).set_body_string("<html>");
+    let cases: Vec<(&str, ResponseTemplate, bool)> = vec![
+        ("400 without error", ResponseTemplate::new(400), false),
+        (
+            "404 without error",
+            ResponseTemplate::new(404).set_body_string("not found"),
+            false,
+        ),
+        (
+            "403 without error",
+            ResponseTemplate::new(403).set_body_json(json!({"message": "no"})),
+            false,
+        ),
+        ("200 that does not decode", undecodable, false),
+        ("200 that is not JSON", not_json, false),
+        // A 200 whose ID token cannot be validated: the key fetch fails.
+        (
+            "200 whose ID-token key fetch fails",
+            ResponseTemplate::new(200),
+            true,
+        ),
+    ];
+    for (label, template, id_token_case) in cases {
+        let server = MockServer::start().await;
+        let (client, _) = make_client(&server);
+        let template = if id_token_case {
+            let key = oidc_support::generate_signing_key("ciba-unfetchable-key");
+            Mock::given(method("GET"))
+                .and(path("/oauth2/jwks"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+            let id_token = oidc_support::sign_id_token(
+                &key,
+                oidc_support::IdTokenOptions {
+                    nonce: Some(None),
+                    ..Default::default()
+                },
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": random(), "token_type": "Bearer", "expires_in": 900,
+                "id_token": id_token,
+            }))
+        } else {
+            template
+        };
+        let clock = TestClock::new();
+        let seen = token_script(
+            &server,
+            Some(clock.clone()),
+            vec![template, oauth_error(400, "invalid_grant")],
+        )
+        .await;
+        let e = client
+            .ciba_await(
+                &initiated(&random(), 600, 5, clock.start),
+                CibaAwaitParams {
+                    configuration: Some(configuration(&server)),
+                    clock: Some(clock.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(
+            e.oauth_error_code(),
+            Some("invalid_grant"),
+            "{label}: the loop polled a spent or refused request again"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "{label} ends ciba_await: no second poll"
+        );
+    }
 }
 
 // ── 9. Single use ───────────────────────────────────────────────────────────

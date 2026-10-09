@@ -104,3 +104,39 @@ impl<T> fmt::Display for Sensitive<T> {
 // Debug/Display impls above (RESEARCH.md Pitfall 4). `Clone` is implemented
 // (by hand, above) because duplicating a redacting wrapper cannot leak
 // anything — only `expose()` can — and CONTRACT.md §9 rule 2 needs it.
+
+/// Test-only: whether `$t` implements `Debug`, decided at compile time.
+///
+/// A wire twin — the crate-private struct that carries a [`Sensitive`]
+/// field's plaintext to or from the serializer — must not, or one `{:?}`
+/// prints the secret (CONTRACT.md §7 rule 1). The probe's inherent constant
+/// applies only when the bound holds; otherwise the blanket trait's does.
+#[cfg(test)]
+macro_rules! implements_debug {
+    ($t:ty) => {{
+        #[allow(dead_code)]
+        trait NotDebug {
+            const IMPLS: bool = false;
+        }
+        impl<T: ?Sized> NotDebug for T {}
+        struct Probe<T: ?Sized>(::core::marker::PhantomData<T>);
+        #[allow(dead_code)]
+        impl<T: ?Sized + ::core::fmt::Debug> Probe<T> {
+            const IMPLS: bool = true;
+        }
+        <Probe<$t>>::IMPLS
+    }};
+}
+#[cfg(test)]
+pub(crate) use implements_debug;
+
+#[cfg(test)]
+mod probe_tests {
+    #[test]
+    fn the_probe_tells_debug_from_not_debug() {
+        struct Plain;
+        assert!(super::implements_debug!(String));
+        assert!(super::implements_debug!(super::Sensitive<String>));
+        assert!(!super::implements_debug!(Plain));
+    }
+}

@@ -720,6 +720,7 @@ pub(crate) fn default_true() -> bool {
 }
 """]
 
+    twins: list[str] = []
     for name in names:
         schema = types.schemas[name]
         rname = pascal(name)
@@ -734,6 +735,8 @@ pub(crate) fn default_true() -> bool {
         if external:
             out.append(emit_external_union(rname, schema, external, types))
             continue
+        if secrets.get(name):
+            twins.append(f"{rname}Wire")
         out.append(
             emit_struct(
                 rname,
@@ -744,6 +747,39 @@ pub(crate) fn default_true() -> bool {
                 projections.get(name, []),
             )
         )
+    out.append(emit_twin_debug_test(twins))
+    return "\n".join(out)
+
+
+def emit_twin_debug_test(twins: list[str]) -> str:
+    """A test that no wire twin is `Debug` (CONTRACT.md §7 rule 1).
+
+    A twin holds the plaintext of the `Sensitive` field it mirrors, so a
+    derived `Debug` on it is one `{:?}` away from printing a secret.
+    """
+    out = [
+        "/// CONTRACT.md §7 rule 1: a wire twin holds the plaintext its public type",
+        "/// wraps in `Sensitive`, so no twin may be `Debug`.",
+        "#[cfg(test)]",
+        "mod wire_twin_tests {",
+        "    #[test]",
+        "    fn no_wire_twin_is_debug() {",
+        "        let debug: Vec<&str> = [",
+    ]
+    for twin in twins:
+        out.append(
+            f'            ("{twin}", crate::sensitive::implements_debug!(super::{twin})),'
+        )
+    out.extend([
+        "        ]",
+        "        .into_iter()",
+        "        .filter(|(_, is_debug)| *is_debug)",
+        "        .map(|(name, _)| name)",
+        "        .collect();",
+        '        assert!(debug.is_empty(), "wire twins deriving Debug: {debug:?}");',
+        "    }",
+        "}",
+    ])
     return "\n".join(out)
 
 
@@ -844,6 +880,19 @@ def emit_union(rname: str, schema: dict[str, Any], arms: list, types: Types) -> 
     return "\n".join(lines)
 
 
+# All-optional types that are NOT sparse update bodies: exactly one member is
+# set, and "what you leave `None` is left unchanged" would be false of them
+# (§29.2). The note replaces the generic sparse-body paragraph.
+EXACTLY_ONE_BODIES: dict[str, str] = {
+    "ParseSamlSpMetadata": (
+        "Every field is `Option` only because the body is a choice: set "
+        "**exactly one** (§29.2), most simply with `ParseSamlSpMetadata::from_url` "
+        "or `ParseSamlSpMetadata::from_xml`. Both or neither is refused locally, "
+        "before a request is sent. Nothing is stored: the result is a draft."
+    ),
+}
+
+
 def emit_struct(
     rname: str,
     name: str,
@@ -900,7 +949,9 @@ def emit_struct(
 
     all_optional = all(ty.startswith("Option<") for _, _, ty, _, _ in fields)
     lines = doc_lines(desc or f"`{rname}` (generated from openapi.json).")
-    if all_optional and fields:
+    if name in EXACTLY_ONE_BODIES:
+        lines.extend(doc_lines("\n" + EXACTLY_ONE_BODIES[name]))
+    elif all_optional and fields:
         lines.extend(doc_lines(
             "\nEvery field is optional, so this is a **sparse** body: what you "
             "leave `None` is left unchanged, and is omitted from the wire "
@@ -973,7 +1024,9 @@ def emit_sensitive_struct(
 
     wire = f"{rname}Wire"
     out.append(f"/// Wire twin of [`{rname}`] -- plain strings, private, never logged.")
-    wire_derives = ["Debug", "Clone", "Serialize", "Deserialize"]
+    out.append("///")
+    out.append("/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).")
+    wire_derives = ["Clone", "Serialize", "Deserialize"]
     if all_optional:
         wire_derives.insert(2, "Default")
     out.append(f"#[derive({', '.join(wire_derives)})]")
@@ -1165,6 +1218,36 @@ def emit_namespace(
     return body, test_cases
 
 
+def replace_note(op: dict[str, Any], types: Types) -> str:
+    """The read-modify-write note on a `replace` operation (§27.4 rule 5).
+
+    "Every field of the body is required" is true of the four §27.4 replace
+    bodies and false of a body with optional members (§29 – §32), where it
+    would contradict the type and the call-site note beside it.
+    """
+    head = "\n**This is a replacement, not a patch** (§27.4 rule 5). "
+    tail = (
+        "Read first, change the field you mean, send the whole thing back."
+    )
+    props, required, _ = (
+        types.flatten(op["request_schema"])
+        if op["request_body"] == "schema"
+        else ({}, [], None)
+    )
+    if set(props) - set(required):
+        return head + (
+            "Its required fields must all be given, and what you do not carry "
+            "over from a prior read is not preserved: an optional member left "
+            "`None` is omitted, and the server applies that member's default "
+            "rather than keeping the stored value -- unless a note below says "
+            "otherwise. "
+        ) + tail
+    return head + (
+        "Every field of the body is required, and what you do not carry over "
+        "from a prior read is not preserved -- it is overwritten. "
+    ) + tail
+
+
 def emit_operation(
     namespace: str,
     opname: str,
@@ -1259,12 +1342,7 @@ def emit_operation(
     # doc line already says. Repeating it just pushes the useful text down.
     lines = doc_lines(f"`{op['method']} {op['path']}`", "    ")
     if op["update_style"] == "replace":
-        lines.extend(doc_lines(
-            "\n**This is a replacement, not a patch** (§27.4 rule 5). Every "
-            "field of the body is required, and what you do not carry over "
-            "from a prior read is not preserved -- it is overwritten. Read "
-            "first, change the field you mean, send the whole thing back.",
-            "    "))
+        lines.extend(doc_lines(replace_note(op, types), "    "))
     if op["sensitive_response_fields"]:
         lines.extend(doc_lines(
             "\n**Returns secret material, once.** "
