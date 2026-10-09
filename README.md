@@ -56,7 +56,7 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.58**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.59**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -76,7 +76,15 @@ the four namespaces contract 1.54–1.57 added, by the contract's design.)
 claimed §1–§13: widening the range silently would turn a statement that was true when written
 into a different claim without anyone editing it. The §21.3.1 amendment of contract 1.58 (the
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
-honoured on an mTLS CIBA call.
+honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
+"§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.59 adds no section: its §34 records the cross-SDK review of the 1.53 – 1.58 ports
+and twelve clarifications, P1 – P12. This SDK follows them — `SsfReceiver::poll` records no
+`jti` it does not return (P1), a `replayed` refusal is acknowledged (P2), a custom
+`ReplayStore` fails closed (P4), `ciba_await` ends on a decisive answer or any failure after a
+`200` and survives a `5xx` whatever its body (P8, P9), and an RFC 7592 update sends no list its
+read lacked (P12.4).
 
 ### Contract 1.53 – 1.58 — what this SDK ships
 
