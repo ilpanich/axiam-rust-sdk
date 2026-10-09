@@ -56,6 +56,25 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+/// One `AssertionConsumerService` endpoint of a service provider.
+///
+/// The list of these is an **allow-list**, checked the way OAuth2 redirect
+/// URIs are: an `AuthnRequest` naming an ACS URL is honoured only when the
+/// URL equals one registered here, byte for byte. No globs, no prefix match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcsEndpoint {
+    /// The binding the endpoint accepts.
+    pub binding: SamlBinding,
+    /// The `index` an `AuthnRequest` may use instead of a URL. Unique per SP.
+    pub index: i32,
+    /// Whether this is the SP's default endpoint. At most one is; when none is
+    /// marked, the first listed is the default (SAML Metadata §2.4.4.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_default: Option<bool>,
+    /// The endpoint URL.
+    pub url: String,
+}
+
 /// `ActorType` (generated from openapi.json).
 /// An **open** enum. A value this SDK does not know decodes to
 /// \[`ActorType::Unknown`\] carrying the string, rather than failing the
@@ -247,6 +266,67 @@ pub enum AttestationMode {
     /// `direct_required`
     #[serde(rename = "direct_required")]
     DirectRequired,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// One entry of an SP's attribute mapping table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttributeMapping {
+    /// The `NameFormat`, one of \[`ATTRIBUTE_NAME_FORMATS`\]. `None` leaves the
+    /// attribute unqualified (`unspecified`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_format: Option<String>,
+    /// The `Name` of the emitted `\<saml:Attribute>`. Unique within one SP,
+    /// compared exactly (SAML attribute names are case-sensitive).
+    pub saml_name: String,
+    /// Where the value comes from.
+    pub source: AttributeSource,
+}
+
+/// Where an attribute's value comes from.
+///
+/// Every variant has a real source today; a variant with none (a telephone
+/// number the OIDC `phone` scope gates behind its own consent, say) is
+/// deliberately absent rather than mapped to an empty value.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`AttributeSource::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AttributeSource {
+    /// `username`
+    #[serde(rename = "username")]
+    Username,
+    /// `email`
+    #[serde(rename = "email")]
+    Email,
+    /// `display_name`
+    #[serde(rename = "display_name")]
+    DisplayName,
+    /// `given_name`
+    #[serde(rename = "given_name")]
+    GivenName,
+    /// `family_name`
+    #[serde(rename = "family_name")]
+    FamilyName,
+    /// `groups`
+    #[serde(rename = "groups")]
+    Groups,
+    /// `roles`
+    #[serde(rename = "roles")]
+    Roles,
     /// A value not in this SDK's copy of the spec, kept verbatim.
     ///
     /// Reachable only by decoding; nothing in this SDK constructs it. Re-
@@ -618,6 +698,73 @@ pub enum CertificationLevel {
     L3,
     /// `L3Plus`
     L3Plus,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// How a CIBA client learns that a request has been decided (CIBA Core §5).
+///
+/// `push` is deliberately absent: AXIAM does not offer it, and the FAPI-CIBA
+/// profile forbids it — push delivers the tokens themselves to a client
+/// endpoint, which makes the notification endpoint a token sink.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`CibaDeliveryMode::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum CibaDeliveryMode {
+    /// `poll`
+    #[serde(rename = "poll")]
+    Poll,
+    /// `ping`
+    #[serde(rename = "ping")]
+    Ping,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// The JWS algorithm a CIBA client signs its authentication requests with
+/// (CIBA Core §4 `backchannel_authentication_request_signing_alg`, §7.1.1).
+///
+/// Exactly the three algorithms AXIAM verifies on any client-signed JWT
+/// (`axiam_oauth2::jose::PERMITTED_ALGORITHMS`): FAPI 2.0 §5.3.1.1's list. A
+/// registration naming anything else — `RS256`, `HS256`, `none` — is refused
+/// rather than stored, so no row can hold an algorithm the verifier would not
+/// honour (D-61).
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`CibaRequestSigningAlg::Unknown`\] carrying the string, rather than
+/// failing the response it arrived in -- CONTRACT §27.11 rule 1. A closed
+/// enum here turns the next value the server adds into a parse error on the
+/// whole `list`, taking down every record on the page over one field of one
+/// of them. `#\[non_exhaustive\]` is what makes adding a known variant later
+/// non-breaking for callers; this is what makes *not* knowing it survivable
+/// at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum CibaRequestSigningAlg {
+    /// `PS256`
+    PS256,
+    /// `ES256`
+    ES256,
+    /// `EdDSA`
+    EdDSA,
     /// A value not in this SDK's copy of the spec, kept verbatim.
     ///
     /// Reachable only by decoding; nothing in this SDK constructs it. Re-
@@ -1158,10 +1305,34 @@ pub struct CreateOAuth2ClientRequest {
     /// this client means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authn_request_params: Option<AuthnRequestParamsMode>,
+    /// G-7 — CIBA Core §4: `PS256`, `ES256` or `EdDSA`. When set, every
+    /// backchannel authentication request must be a signed `request` JWT under
+    /// this algorithm, verified against `jwks` or `jwks_uri` (exactly one is
+    /// required; an inline `jwks` must hold a key of the algorithm). Required for
+    /// a `fapi2` client holding the CIBA grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_request_signing_alg: Option<String>,
+    /// G-7 — CIBA Core §4: where a ping-mode client is notified. Required in ping
+    /// mode and refused in poll mode; an absolute `https` URL held to the webhook
+    /// address policy (no credentials, no fragment, no private, loopback or
+    /// internal host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_client_notification_endpoint: Option<String>,
     /// B5 — where OIDC back-channel logout tokens are delivered. Omit for a
     /// client that does not participate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backchannel_logout_uri: Option<String>,
+    /// G-7 — CIBA Core §4 `backchannel_token_delivery_mode`: `poll` or `ping`.
+    /// Required when `grant_types` holds `urn:openid:params:grant-type:ciba`,
+    /// refused otherwise; `push` is not offered. A CIBA client must be
+    /// confidential; a `fapi2` one must also register
+    /// `backchannel_authentication_request_signing_alg`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_token_delivery_mode: Option<String>,
+    /// G-7 — CIBA Core §4. `true` is **refused**: this server holds no user code
+    /// to verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_user_code_parameter: Option<bool>,
     /// X7.3 — whether an unauthenticated authorization request from this client
     /// may be answered with a redirect to the login page rather than the `401`
     /// AXIAM answers today.
@@ -1580,6 +1751,163 @@ impl From<&CreateWebhookRequest> for CreateWebhookRequestWire {
             url: v.url.clone(),
         }
     }
+}
+
+/// What happens downstream to a user who falls out of scope or is no longer
+/// active. Erasure always deletes, whatever this says.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`DeprovisionPolicy::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum DeprovisionPolicy {
+    /// `deactivate`
+    #[serde(rename = "deactivate")]
+    Deactivate,
+    /// `delete`
+    #[serde(rename = "delete")]
+    Delete,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// A tenant's directory configuration, as stored and as read back.
+///
+/// Carries no secret: see the module documentation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryConfig {
+    /// Where users are searched for.
+    pub base_dn: String,
+    /// The service account AXIAM binds as to search. It should hold read-only
+    /// rights: AXIAM never writes to a directory.
+    pub bind_dn: String,
+    /// When the row was created.
+    pub created_at: String,
+    /// Whether the directory is used for sign-in and sync.
+    pub enabled: bool,
+    /// Where groups are searched for (reverse-`member` lookups, group sync).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_base_dn: Option<String>,
+    /// Restricts which entries under \[`Self::group_base_dn`\] are groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_filter: Option<String>,
+    /// The group-mapping table (D-30): which directory groups put a user into
+    /// which AXIAM groups. Empty means no directory group maps to anything, and a
+    /// sign-in then removes every directory-sourced membership the user held.
+    pub group_mappings: Vec<GroupMapping>,
+    /// `memberOf` (user-side, AD) or `member` (group-side, OpenLDAP).
+    pub group_member_attribute: String,
+    /// How many levels of nested groups are followed, `0..=10`.
+    pub group_nesting_depth: i32,
+    /// Row identifier.
+    pub id: Uuid,
+    /// Provision an AXIAM user on first successful directory sign-in.
+    pub jit_provisioning: bool,
+    /// The kind of directory, which selects defaults.
+    pub kind: DirectoryKind,
+    /// Upgrade an `ldap://` connection with StartTLS before any bind.
+    pub start_tls: bool,
+    /// Seconds between incremental sync runs.
+    pub sync_interval_secs: i64,
+    /// The owning tenant. At most one configuration exists per tenant.
+    pub tenant_id: Uuid,
+    /// PEM CA certificates that anchor trust in the directory's server
+    /// certificate. Empty means the platform roots used by the rest of the
+    /// workspace's outbound TLS. An organisation CA's PEM can be pasted here.
+    pub trust_anchors_pem: Vec<String>,
+    /// When the row was last written.
+    pub updated_at: String,
+    /// `ldaps://host\[:port\]` or `ldap://host\[:port\]` together with
+    /// \[`Self::start_tls`\]. A plaintext URL is refused at configuration time.
+    pub url: String,
+    /// Which attribute feeds which user field.
+    pub user_attribute_map: UserAttributeMap,
+    /// The user-lookup filter template. It contains exactly one `{username}`
+    /// placeholder, which the bind path replaces with the RFC 4515-escaped login
+    /// name; the template itself is never formatted with raw input.
+    pub user_filter: String,
+}
+
+/// Which kind of directory server a configuration points at.
+///
+/// It drives **defaults only**: the external-id attribute, the group-
+/// membership strategy and the change attribute the sync job reads. Every one
+/// of them is still an explicit, editable field of the configuration (or, for
+/// the strategy and change attribute, derived from this value at the point of
+/// use); nothing about the kind changes what is *allowed*.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`DirectoryKind::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum DirectoryKind {
+    /// `open_ldap`
+    #[serde(rename = "open_ldap")]
+    OpenLdap,
+    /// `active_directory`
+    #[serde(rename = "active_directory")]
+    ActiveDirectory,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// What linking did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryLinkResult {
+    /// `User`-type certificates revoked.
+    pub certificates_revoked: i64,
+    /// The entry's `entryUUID` or `objectGUID` as text: an identifier, not a
+    /// secret.
+    pub directory_external_id: String,
+    /// The account that was linked.
+    pub user_id: Uuid,
+    /// `true` when the account was already linked to that very entry and the call
+    /// only re-ran the revocations (an interrupted link completed).
+    pub was_already_linked: bool,
+    /// Passkeys and security keys deleted.
+    pub webauthn_credentials_deleted: i64,
+}
+
+/// A read-only view of the sync job's state for one tenant. Counts of what a
+/// run did are in its audit rows, and no account id is here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectorySyncStatus {
+    /// The next run must be a full reconciliation.
+    pub full_required: bool,
+    /// An incremental run has a starting point.
+    pub has_watermark: bool,
+    /// When the last attempt started, or null before the first run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<String>,
+    /// When the last complete full run finished, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_full_run_at: Option<String>,
+    /// `ok`, `partial`, `failed` or `safety_valve` (an open set: decode another
+    /// value without failing), or null before the first run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<String>,
 }
 
 /// Fully resolved email configuration (all fields present).
@@ -2194,11 +2522,44 @@ pub struct Group {
     pub updated_at: String,
 }
 
-/// `HealthResponse` (generated from openapi.json).
+/// One row of the group-mapping table (G-3, T23.3.4, D-30): a directory
+/// group, named by its distinguished name, and the AXIAM group a member of it
+/// is put into.
+///
+/// **The table is the only way a directory group reaches an AXIAM group.**
+/// There is no match by name, no prefix or wildcard, and no AXIAM group is
+/// ever created from a directory one: a directory administrator who names a
+/// group `admins` gains nothing unless a tenant administrator mapped it here.
+///
+/// The DN is stored as the administrator typed it and compared after RFC 4514
+/// normalisation (`axiam_directory::dn`), so `CN=Staff, OU=Groups` and
+/// `cn=staff,ou=groups` are the same row. One DN may map to several AXIAM
+/// groups; the same (DN, group) pair twice is refused as redundant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupMapping {
+    /// The directory group's distinguished name.
+    pub directory_group_dn: String,
+    /// The AXIAM group of the same tenant a member of that directory group is put
+    /// into. Checked to exist in the tenant when the configuration is written.
+    pub group_id: Uuid,
+}
+
+/// Response body for `GET /health`.
+///
+/// `profile` and `unavailable` are additive (G-8, D-59): a client that reads
+/// only `status` is unaffected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthResponse {
+    /// The messaging profile this process runs: `full` (RabbitMQ is used) or
+    /// `minimal` (`AXIAM__AMQP__ENABLED=false`, no broker).
+    pub profile: String,
     /// `status`.
     pub status: String,
+    /// Present only in the `minimal` profile: the capabilities it does not
+    /// provide — `reactors`, `amqp_authz`, `amqp_audit_ingestion` and
+    /// `decision_cache_broadcast`. Absent in `full`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Vec<String>>,
 }
 
 /// Body of `POST /api/v1/organizations/{org_id}/ca-certificates/import`.
@@ -2246,6 +2607,18 @@ impl From<&ImportCaCertificateRequest> for ImportCaCertificateRequestWire {
     }
 }
 
+/// `POST …/saml/idp-credentials` body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueSamlIdpCredential {
+    /// An active signing CA the caller may issue from.
+    pub issuer_ca_id: Uuid,
+    /// The slot to fill; it must be empty.
+    pub slot: SamlIdpSlot,
+    /// 1 to 730, default 365; never beyond the CA's own expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity_days: Option<i64>,
+}
+
 /// The type of key algorithm used for a certificate.
 /// An **open** enum. A value this SDK does not know decodes to
 /// \[`KeyAlgorithm::Unknown`\] carrying the string, rather than failing the
@@ -2270,6 +2643,14 @@ pub enum KeyAlgorithm {
     /// understand.
     #[serde(untagged)]
     Unknown(String),
+}
+
+/// `POST /api/v1/tenants/{tenant_id}/directory/links` body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkDirectoryAccount {
+    /// The local account to link. The directory entry is found by the directory,
+    /// from the account's own username; the caller names no entry.
+    pub user_id: Uuid,
 }
 
 /// Account lockout rules.
@@ -2482,6 +2863,34 @@ pub struct MtlsTrustAnchorResponse {
     pub trusted_anchors: Option<i64>,
 }
 
+/// How the assertion's `NameID` is formed (per service provider).
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`NameIdFormat::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum NameIdFormat {
+    /// `persistent`
+    #[serde(rename = "persistent")]
+    Persistent,
+    /// `email_address`
+    #[serde(rename = "email_address")]
+    EmailAddress,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
 /// Events that can trigger an admin notification.
 /// An **open** enum. A value this SDK does not know decodes to
 /// \[`NotificationEventType::Unknown`\] carrying the string, rather than
@@ -2545,6 +2954,9 @@ pub enum NotificationEventType {
     /// `service_account_deleted`
     #[serde(rename = "service_account_deleted")]
     ServiceAccountDeleted,
+    /// `scim_delivery_failed`
+    #[serde(rename = "scim_delivery_failed")]
+    ScimDeliveryFailed,
     /// A value not in this SDK's copy of the spec, kept verbatim.
     ///
     /// Reachable only by decoding; nothing in this SDK constructs it. Re-
@@ -2671,6 +3083,15 @@ pub struct OAuth2ClientResponse {
     /// authentication-request parameters, from this endpoint rather than from the
     /// database.
     pub authn_request_params: AuthnRequestParamsMode,
+    /// `backchannel_authentication_request_signing_alg`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_request_signing_alg: Option<CibaRequestSigningAlg>,
+    /// G-7 — the ping-mode notification endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_client_notification_endpoint: Option<String>,
+    /// `backchannel_token_delivery_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_token_delivery_mode: Option<CibaDeliveryMode>,
     /// X7.3 — echoed for the same reason.
     pub browser_sso: bool,
     /// `client_id`.
@@ -2813,6 +3234,10 @@ pub struct OidcCallbackResponse {
 ///   mirror image of `mfa_enforced`, because releasing personal data is the
 ///   less-restrictive direction, so a tenant can turn its organization's
 ///   decision off but never on.
+/// * \[`Self::saml_idp_enabled`\], validated **disable-only** exactly like
+///   \[`Self::sensitive_scopes_enabled`\] (D-20): a tenant may turn its
+///   organization's `true` off and never its `false` on.
+/// * \[`Self::ssf_enabled`\], validated **disable-only** the same way (D-45).
 /// * \[`Self::dynamic_registration`\], on the ladder `disabled` →
 ///   `initial_access_token` → `anonymous`: a tenant may move down it and
 ///   never up.
@@ -2930,6 +3355,27 @@ pub struct OidcPolicy {
     /// Shared with T5 (CIMD), which inherits the same list for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_client_allowed_resources: Option<Vec<String>>,
+    /// G-2 / D-20 — whether this tenant may act as a SAML 2.0 identity provider:
+    /// publish IdP metadata and accept `AuthnRequest`s on
+    /// `/saml/v2/{tenant}/{metadata,sso,slo}`.
+    ///
+    /// **Off unless an organization turns it on.** A SAML IdP issues assertions
+    /// that other systems accept as proof of identity, so a deployment that has
+    /// never decided to be one issues none, and the three endpoints answer `404`
+    /// as if they did not exist. The switch lives on this policy, beside the
+    /// other OpenID Provider surface controls, because the SSO endpoint is the
+    /// same browser login hop and OP session with a different wire format.
+    ///
+    /// **Disable-only**, with the shape of \[`Self::sensitive_scopes_enabled`\]: a
+    /// tenant may turn its organization's `true` off but never its `false` on,
+    /// because the decision to issue identity assertions on behalf of the
+    /// organization's tenants is the organization's.
+    ///
+    /// A deployment built without the `saml` feature answers `404` whatever this
+    /// says; the setting is a capability, not a grant (each SP must still be
+    /// registered, and `allow_idp_initiated` is its own opt-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml_idp_enabled: Option<bool>,
     /// Whether `address` and `phone` may be registered on a client, requested at
     /// the authorization endpoint, and released at UserInfo (X7 G8).
     ///
@@ -2945,6 +3391,22 @@ pub struct OidcPolicy {
     /// still has to have consented. It is the first of four gates, and it is the
     /// only one an operator can close for everybody at once.
     pub sensitive_scopes_enabled: bool,
+    /// G-5 / D-45 — whether the tenant is a Shared Signals Framework transmitter:
+    /// its `/.well-known/ssf-configuration` is served, its receivers can use the
+    /// stream management API, and events are signed and transmitted on its
+    /// streams. Default **`false`**.
+    ///
+    /// **Disable-only**, with the shape of \[`Self::saml_idp_enabled`\]: sending
+    /// security events about the organization's users to third parties is the
+    /// organization's decision. Streams can be registered while it is off; they
+    /// carry nothing until it is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssf_enabled: Option<bool>,
+    /// **Read-only**, D-55: set on a settings response when `ssf_enabled` is on
+    /// but the transmitter is inactive anyway, saying why — the deployment holds
+    /// more than one tenant and serves no per-tenant issuers. Never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssf_inactive_reason: Option<String>,
 }
 
 /// The client-supplied half of an OPAQUE enrolment, as it appears inside
@@ -3007,6 +3469,22 @@ pub struct Organization {
     pub slug: String,
     /// `updated_at`.
     pub updated_at: String,
+}
+
+/// `POST …/saml/parse-sp-metadata` body: **exactly one** of the two members.
+/// Every field is optional, so this is a **sparse** body: what you leave
+/// `None` is left unchanged, and is omitted from the wire request entirely
+/// rather than sent as `null` (§27.4 rule 5). Construct it with
+/// `..Default::default()`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ParseSamlSpMetadata {
+    /// An `https` URL the server fetches the document from, once, through its
+    /// SSRF guard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_url: Option<String>,
+    /// A metadata document, at most 512 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_xml: Option<String>,
 }
 
 /// Password complexity and history requirements.
@@ -3595,6 +4073,517 @@ impl From<RotateSecretResponseWire> for RotateSecretResponse {
     }
 }
 
+/// A SAML 2.0 protocol binding (SAML Bindings §3).
+///
+/// The response binding for Web Browser SSO is always \[`Self::HttpPost`\], but
+/// the enum keeps both because SP metadata carries both, and an `slo_url` may
+/// use either.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SamlBinding::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SamlBinding {
+    /// `http_post`
+    #[serde(rename = "http_post")]
+    HttpPost,
+    /// `http_redirect`
+    #[serde(rename = "http_redirect")]
+    HttpRedirect,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// The tenant's IdP signing credential, **public facts only**.
+///
+/// There is no key on it and no field a key could be put in: the private key
+/// is generated by the server, sealed at rest, never returned by any route
+/// and destroyed on retirement (D-21).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamlIdpCredential {
+    /// The leaf certificate, PEM. Public: it is what the metadata publishes.
+    pub certificate_pem: String,
+    /// When the credential was issued.
+    pub created_at: String,
+    /// Lower-case hex SHA-256 of the certificate's DER — what an SP administrator
+    /// compares out of band.
+    pub fingerprint: String,
+    /// Credential id.
+    pub id: Uuid,
+    /// The signing CA that issued the leaf.
+    pub issuer_ca_id: Uuid,
+    /// End of the certificate's validity (at most 730 days after the start).
+    pub not_after: String,
+    /// Start of the certificate's validity.
+    pub not_before: String,
+    /// When it was retired, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<String>,
+    /// The certificate's serial, lower-case hex.
+    pub serial: String,
+    /// `active`, `next` or `retired`. At most one `active` and one `next` per
+    /// tenant.
+    pub status: SamlIdpCredentialStatus,
+    /// The tenant it signs for.
+    pub tenant_id: Uuid,
+}
+
+/// What promoting the `next` credential did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamlIdpCredentialPromotion {
+    /// The credential that is now `active`.
+    pub active: SamlIdpCredential,
+    /// `retired`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<SamlIdpCredential>,
+}
+
+/// Where a signing credential is in its life. An open set: an SDK decodes a
+/// value it does not know without failing.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SamlIdpCredentialStatus::Unknown`\] carrying the string, rather than
+/// failing the response it arrived in -- CONTRACT §27.11 rule 1. A closed
+/// enum here turns the next value the server adds into a parse error on the
+/// whole `list`, taking down every record on the page over one field of one
+/// of them. `#\[non_exhaustive\]` is what makes adding a known variant later
+/// non-breaking for callers; this is what makes *not* knowing it survivable
+/// at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SamlIdpCredentialStatus {
+    /// `active`
+    #[serde(rename = "active")]
+    Active,
+    /// `next`
+    #[serde(rename = "next")]
+    Next,
+    /// `retired`
+    #[serde(rename = "retired")]
+    Retired,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// The tenant's SAML IdP, as the administrator needs to see it before and
+/// while switching it on: what an SP will be given, and whether it answers
+/// yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamlIdpInfo {
+    /// The `active` credential, or null.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub active_credential_id: Option<Option<Uuid>>,
+    /// The IdP's entity id (the metadata URL itself).
+    pub entity_id: String,
+    /// Whether `metadata_url` answers now: SAML is available, enabled for the
+    /// tenant, and an `active` or `next` credential exists (D-40).
+    pub metadata_served: bool,
+    /// Where the IdP metadata is served.
+    pub metadata_url: String,
+    /// The `next` credential, or null.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub next_credential_id: Option<Option<Uuid>>,
+    /// Whether this server build serves SAML at all (it was built with the `saml`
+    /// feature).
+    pub saml_available: bool,
+    /// The tenant's **effective** `saml_idp_enabled` setting (D-20). Written
+    /// through the `settings` operations, not here.
+    pub saml_idp_enabled: bool,
+    /// The single-logout endpoint.
+    pub slo_url: String,
+    /// The single-sign-on endpoint.
+    pub sso_url: String,
+    /// The tenant.
+    pub tenant_id: Uuid,
+}
+
+/// Which slot a credential is issued into.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SamlIdpSlot::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SamlIdpSlot {
+    /// `active`
+    #[serde(rename = "active")]
+    Active,
+    /// `next`
+    #[serde(rename = "next")]
+    Next,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// A registered service provider, as stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamlServiceProvider {
+    /// See \[`SamlServiceProviderInput::acs_urls`\].
+    pub acs_urls: Vec<AcsEndpoint>,
+    /// See \[`SamlServiceProviderInput::allow_idp_initiated`\].
+    pub allow_idp_initiated: bool,
+    /// See \[`SamlServiceProviderInput::allowed_groups`\].
+    pub allowed_groups: Vec<Uuid>,
+    /// See \[`SamlServiceProviderInput::attribute_mappings`\].
+    pub attribute_mappings: Vec<AttributeMapping>,
+    /// When the SP was registered.
+    pub created_at: String,
+    /// See \[`SamlServiceProviderInput::display_name`\].
+    pub display_name: String,
+    /// See \[`SamlServiceProviderInput::enabled`\].
+    pub enabled: bool,
+    /// See \[`SamlServiceProviderInput::encrypt_assertions`\].
+    pub encrypt_assertions: bool,
+    /// See \[`SamlServiceProviderInput::entity_id`\].
+    pub entity_id: String,
+    /// Record id.
+    pub id: Uuid,
+    /// See \[`SamlServiceProviderInput::name_id_format`\].
+    pub name_id_format: NameIdFormat,
+    /// See \[`SamlServiceProviderInput::sign_responses`\].
+    pub sign_responses: bool,
+    /// `slo_binding`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slo_binding: Option<SamlBinding>,
+    /// See \[`SamlServiceProviderInput::slo_url`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slo_url: Option<String>,
+    /// See \[`SamlServiceProviderInput::sp_encryption_cert_pem`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sp_encryption_cert_pem: Option<String>,
+    /// See \[`SamlServiceProviderInput::sp_signing_cert_pem`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sp_signing_cert_pem: Option<String>,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// When it was last replaced.
+    pub updated_at: String,
+    /// See \[`SamlServiceProviderInput::want_authn_requests_signed`\].
+    pub want_authn_requests_signed: bool,
+}
+
+/// Everything an administrator supplies when registering or replacing a
+/// service provider (`create` and `update` both take it; `update` is a full
+/// replacement).
+///
+/// Every field but `entity_id`, `display_name` and `acs_urls` has a default,
+/// so a client written against a later revision of this struct keeps working.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamlServiceProviderInput {
+    /// The ACS allow-list. At least one, at most one default.
+    pub acs_urls: Vec<AcsEndpoint>,
+    /// Whether IdP-initiated SSO is allowed for this SP (D-3). A per-SP opt-in,
+    /// off by default: an unsolicited assertion has no `InResponseTo` to bind it
+    /// to a request the SP made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_idp_initiated: Option<bool>,
+    /// Groups whose members may sign in to this SP. **Empty means every active
+    /// user of the tenant may.** Evaluated by the SSO endpoint (T23.2.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_groups: Option<Vec<Uuid>>,
+    /// Attribute mapping table, at most \[`MAX_ATTRIBUTE_MAPPINGS`\] entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribute_mappings: Option<Vec<AttributeMapping>>,
+    /// Human-readable name for the console.
+    pub display_name: String,
+    /// Whether the SP may sign in at all. A disabled SP stays registered but
+    /// every SSO request for it is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Encrypt assertions to the SP's encryption certificate (D-2). Off by
+    /// default; requires \[`Self::sp_encryption_cert_pem`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt_assertions: Option<bool>,
+    /// The SP's `entityID`, unique per tenant. At most \[`MAX_ENTITY_ID_BYTES`\].
+    pub entity_id: String,
+    /// `NameID` policy. Default: persistent, pairwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_id_format: Option<NameIdFormat>,
+    /// Sign the `\<samlp:Response>` envelope as well as the assertion (which is
+    /// signed always). Default **`true`**: it costs nothing and many SPs require
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_responses: Option<bool>,
+    /// `slo_binding`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slo_binding: Option<SamlBinding>,
+    /// Single-logout endpoint, if the SP supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slo_url: Option<String>,
+    /// PEM certificate assertions are encrypted to. Required when
+    /// `encrypt_assertions` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sp_encryption_cert_pem: Option<String>,
+    /// PEM certificate the SP signs its `AuthnRequest`s with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sp_signing_cert_pem: Option<String>,
+    /// Refuse an `AuthnRequest` that is not signed by `sp_signing_cert_pem`.
+    /// Requires that certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub want_authn_requests_signed: Option<bool>,
+}
+
+/// A parse of SP metadata: **a draft, not a registration**. Nothing is stored
+/// until the caller submits `service_provider` to `create_service_provider`
+/// or `update_service_provider`, and nothing in it is trusted because it came
+/// from a document (D-41).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SamlSpMetadataDraft {
+    /// Lower-case hex SHA-256 of the encryption certificate's DER the draft
+    /// carries, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_certificate_fingerprint: Option<String>,
+    /// A body `create_service_provider` accepts unchanged (bar the rules that
+    /// need the datastore). `encrypt_assertions` is never set.
+    pub service_provider: SamlServiceProviderInput,
+    /// Lower-case hex SHA-256 of the signing certificate's DER the draft carries,
+    /// or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_certificate_fingerprint: Option<String>,
+    /// What to know before submitting it. Human text; do not parse it.
+    pub warnings: Vec<String>,
+}
+
+/// The body of a started reconciliation's `202`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScimReconcileAccepted {
+    /// Always `started`.
+    pub status: String,
+    /// The target being reconciled.
+    pub target_id: Uuid,
+}
+
+/// How AXIAM authenticates to the downstream service provider, without the
+/// credential itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[non_exhaustive]
+pub enum ScimTargetAuth {
+    /// `type = "bearer"`
+    #[serde(rename = "bearer")]
+    Bearer {},
+    /// `type = "oauth2_client_credentials"`
+    #[serde(rename = "oauth2_client_credentials")]
+    Oauth2ClientCredentials {
+        /// The OAuth2 client id.
+        client_id: String,
+        /// The scope requested, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// The token endpoint the client secret is sent to.
+        token_url: String,
+    },
+    /// A `type` this SDK does not know (CONTRACT §31.2, §27.13: an open set,
+    /// decoded without failing).
+    ///
+    /// Reachable only by decoding. It is never sent: serializing it is an error,
+    /// because §27.13 forbids sending a value the SDK does not know and the
+    /// members it arrived with are not kept.
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
+/// A target's delivery state, as `GET` projects it. Fixed vocabulary only:
+/// the failure reason is one of the deliverer's phrases, never a URL, a
+/// response body or a value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScimTargetDeliveryState {
+    /// Failed attempts since the last success.
+    pub consecutive_failures: i64,
+    /// Deliveries dead-lettered over the target's lifetime.
+    pub dead_lettered_total: i64,
+    /// When a delivery attempt last failed or was dead-lettered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_at: Option<String>,
+    /// Why, in the deliverer's fixed vocabulary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_reason: Option<String>,
+    /// When reconciliation last ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reconciled_at: Option<String>,
+    /// When a delivery last succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<String>,
+}
+
+/// `create` and `update` (a **replacement**) body.
+/// This type carries secret material (§27.5), so the field is
+/// \[`Sensitive`\](crate::Sensitive) and the type derives neither `Serialize`
+/// nor `Deserialize`. Read the secret with `.expose()`, deliberately, at the
+/// point you need it.
+#[derive(Debug, Clone)]
+pub struct ScimTargetInput {
+    /// `bearer`, or `oauth2_client_credentials` with `token_url` (the same URL
+    /// policy), `client_id` (1–256 bytes) and an optional `scope`.
+    pub auth: ScimTargetAuth,
+    /// The downstream's SCIM service root: an `https` URL under the outbound
+    /// address policy (no credentials or fragment, at most 2 048 bytes, no non-
+    /// public address, no local name).
+    pub base_url: String,
+    /// **Write-only.** The bearer token or the OAuth2 client secret, 1–4 096
+    /// bytes. Required on create. On update, absent keeps the stored one — except
+    /// that moving it to another URL (`base_url` of a bearer target, `token_url`
+    /// or `base_url` of a client-credentials one) or switching `auth.type`
+    /// requires it again.
+    ///
+    /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
+    /// to read it.
+    pub credential: Option<Sensitive<String>>,
+    /// `deactivate` (default: `PATCH active=false`) or `delete`.
+    pub deprovision: Option<DeprovisionPolicy>,
+    /// `true` by default. A disabled target receives nothing.
+    pub enabled: Option<bool>,
+    /// 1–128 bytes.
+    pub name: String,
+    /// Push groups too (every group for `all_users`, the listed ones for
+    /// `groups`). `false` by default.
+    pub push_groups: Option<bool>,
+    /// `all_users`, or `groups` with 1–100 `group_ids` of this tenant: users who
+    /// are direct members of any listed group.
+    pub scope: ScimTargetScope,
+    /// `username` (default) or `email`.
+    pub user_name_from: Option<UserNameSource>,
+}
+
+/// Wire twin of [`ScimTargetInput`] -- plain strings, private, never logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ScimTargetInputWire {
+    pub(crate) auth: ScimTargetAuth,
+    pub(crate) base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) credential: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) deprovision: Option<DeprovisionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push_groups: Option<bool>,
+    pub(crate) scope: ScimTargetScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) user_name_from: Option<UserNameSource>,
+}
+
+impl From<&ScimTargetInput> for ScimTargetInputWire {
+    fn from(v: &ScimTargetInput) -> Self {
+        Self {
+            auth: v.auth.clone(),
+            base_url: v.base_url.clone(),
+            credential: v
+                .credential
+                .as_ref()
+                .map(crate::management::error::expose_for_wire),
+            deprovision: v.deprovision.clone(),
+            enabled: v.enabled,
+            name: v.name.clone(),
+            push_groups: v.push_groups,
+            scope: v.scope.clone(),
+            user_name_from: v.user_name_from.clone(),
+        }
+    }
+}
+
+/// A registered SCIM target, as the management API returns it. **The
+/// credential is never returned**, and there is no member that says anything
+/// about it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScimTargetResponse {
+    /// How AXIAM authenticates to it (no credential).
+    pub auth: ScimTargetAuth,
+    /// The downstream's SCIM service root.
+    pub base_url: String,
+    /// When the target was registered.
+    pub created_at: String,
+    /// What happens downstream to a user who leaves scope or is no longer active
+    /// (erasure always deletes).
+    pub deprovision: DeprovisionPolicy,
+    /// Whether AXIAM pushes to it.
+    pub enabled: bool,
+    /// The target id.
+    pub id: Uuid,
+    /// The name.
+    pub name: String,
+    /// Whether groups are pushed too.
+    pub push_groups: bool,
+    /// Which users it provisions.
+    pub scope: ScimTargetScope,
+    /// `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<ScimTargetDeliveryState>,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// When it was last written: the version an update is conditional on.
+    pub updated_at: String,
+    /// Which attribute becomes `userName`.
+    pub user_name_from: UserNameSource,
+}
+
+/// Which users a target provisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[non_exhaustive]
+pub enum ScimTargetScope {
+    /// `type = "all_users"`
+    #[serde(rename = "all_users")]
+    AllUsers {},
+    /// `type = "groups"`
+    #[serde(rename = "groups")]
+    Groups {
+        /// Users who are direct members of any listed group.
+        group_ids: Vec<Uuid>,
+    },
+    /// A `type` this SDK does not know (CONTRACT §31.2, §27.13: an open set,
+    /// decoded without failing).
+    ///
+    /// Reachable only by decoding. It is never sent: serializing it is an error,
+    /// because §27.13 forbids sending a value the SDK does not know and the
+    /// members it arrived with are not kept.
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
 /// Metadata only. The handle is never in a list response — it exists in
 /// plaintext exactly once, in \[`CreateScimTokenResponse`\].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3833,6 +4822,119 @@ pub struct SessionResponse {
     pub user_agent: Option<String>,
 }
 
+/// `PUT /api/v1/tenants/{tenant_id}/directory` — a **replacement**.
+///
+/// Every `DirectoryConfig` member except `id`, `tenant_id` and the two
+/// timestamps, plus the write-only `bind_secret`. An omitted optional member
+/// is **reset to its default**, not kept.
+/// This type carries secret material (§27.5), so the field is
+/// \[`Sensitive`\](crate::Sensitive) and the type derives neither `Serialize`
+/// nor `Deserialize`. Read the secret with `.expose()`, deliberately, at the
+/// point you need it.
+#[derive(Debug, Clone)]
+pub struct SetDirectoryConfig {
+    /// Where users are searched for.
+    pub base_dn: String,
+    /// The service account the search runs as.
+    pub bind_dn: String,
+    /// The service account's password: **write-only**, 1 to 4096 octets. Required
+    /// when the tenant has no configuration yet; on a replacement, absent means
+    /// *keep the stored secret* — unless the write moves the connection (`url`,
+    /// `start_tls`, `bind_dn` or `trust_anchors_pem`), which then requires it
+    /// (`400`, P23W2-01).
+    ///
+    /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
+    /// to read it.
+    pub bind_secret: Option<Sensitive<String>>,
+    /// A disabled directory serves no sign-in and is not synced.
+    pub enabled: bool,
+    /// Defaults to null.
+    pub group_base_dn: Option<String>,
+    /// Defaults to null.
+    pub group_filter: Option<String>,
+    /// At most 500; every `group_id` a group of the tenant. Default empty.
+    pub group_mappings: Option<Vec<GroupMapping>>,
+    /// Defaults by `kind`.
+    pub group_member_attribute: Option<String>,
+    /// `0..=10`, default 5.
+    pub group_nesting_depth: Option<i32>,
+    /// Default false.
+    pub jit_provisioning: Option<bool>,
+    /// Chooses defaults only.
+    pub kind: DirectoryKind,
+    /// Upgrade an `ldap://` connection with StartTLS before any bind.
+    pub start_tls: bool,
+    /// `300..=86400`, default 3600.
+    pub sync_interval_secs: Option<i64>,
+    /// At most 16 CA certificates in PEM. Default empty (the public roots).
+    pub trust_anchors_pem: Option<Vec<String>>,
+    /// `ldaps://host\[:port\]`, or `ldap://host\[:port\]` with `start_tls`.
+    pub url: String,
+    /// `user_attribute_map`.
+    pub user_attribute_map: Option<UserAttributeMap>,
+    /// One `{username}` placeholder in value position.
+    pub user_filter: String,
+}
+
+/// Wire twin of [`SetDirectoryConfig`] -- plain strings, private, never logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SetDirectoryConfigWire {
+    pub(crate) base_dn: String,
+    pub(crate) bind_dn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bind_secret: Option<String>,
+    pub(crate) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_base_dn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_mappings: Option<Vec<GroupMapping>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_member_attribute: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_nesting_depth: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jit_provisioning: Option<bool>,
+    pub(crate) kind: DirectoryKind,
+    pub(crate) start_tls: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sync_interval_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trust_anchors_pem: Option<Vec<String>>,
+    pub(crate) url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) user_attribute_map: Option<UserAttributeMap>,
+    pub(crate) user_filter: String,
+}
+
+impl From<&SetDirectoryConfig> for SetDirectoryConfigWire {
+    fn from(v: &SetDirectoryConfig) -> Self {
+        Self {
+            base_dn: v.base_dn.clone(),
+            bind_dn: v.bind_dn.clone(),
+            bind_secret: v
+                .bind_secret
+                .as_ref()
+                .map(crate::management::error::expose_for_wire),
+            enabled: v.enabled,
+            group_base_dn: v.group_base_dn.clone(),
+            group_filter: v.group_filter.clone(),
+            group_mappings: v.group_mappings.clone(),
+            group_member_attribute: v.group_member_attribute.clone(),
+            group_nesting_depth: v.group_nesting_depth,
+            jit_provisioning: v.jit_provisioning,
+            kind: v.kind.clone(),
+            start_tls: v.start_tls,
+            sync_interval_secs: v.sync_interval_secs,
+            trust_anchors_pem: v.trust_anchors_pem.clone(),
+            url: v.url.clone(),
+            user_attribute_map: v.user_attribute_map.clone(),
+            user_filter: v.user_filter.clone(),
+        }
+    }
+}
+
 /// Body for `PUT .../ca-certificates/{id}/mtls-trust-anchor`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetMtlsTrustAnchor {
@@ -3937,6 +5039,11 @@ pub struct SetOrgSettings {
     pub require_symbols: bool,
     /// `require_uppercase`.
     pub require_uppercase: bool,
+    /// G-2 / D-20 — defaulted, so an API client written before the SAML identity
+    /// provider existed lands on `false`, which is what every deployment did
+    /// before (I1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml_idp_enabled: Option<bool>,
     /// `sensitive_scopes_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive_scopes_enabled: Option<bool>,
@@ -3944,6 +5051,11 @@ pub struct SetOrgSettings {
     /// on "no `Server` certificate is issued" (I1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_cert_allowed_names: Option<Vec<String>>,
+    /// G-5 / D-45 — defaulted, so an API client written before the SSF
+    /// transmitter existed lands on `false`, which is what every deployment did
+    /// before (I1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssf_enabled: Option<bool>,
     /// `webauthn_user_verification`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_user_verification: Option<String>,
@@ -4060,6 +5172,312 @@ pub struct SmtpConfig {
     pub starttls: bool,
     /// `username`.
     pub username: String,
+}
+
+/// How SETs reach the receiver.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SsfDeliveryMethod::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SsfDeliveryMethod {
+    /// `push`
+    #[serde(rename = "push")]
+    Push,
+    /// `poll`
+    #[serde(rename = "poll")]
+    Poll,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// The six event types AXIAM transmits (G-5).
+///
+/// Stored and sent as their event-type URIs; \[`Self::ALL`\] is the canonical
+/// order every list AXIAM returns is sorted in.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SsfEventType::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SsfEventType {
+    /// `https://schemas.openid.net/secevent/caep/event-type/session-revoked`
+    #[serde(rename = "https://schemas.openid.net/secevent/caep/event-type/session-revoked")]
+    SessionRevoked,
+    /// `https://schemas.openid.net/secevent/caep/event-type/credential-change`
+    #[serde(rename = "https://schemas.openid.net/secevent/caep/event-type/credential-change")]
+    CredentialChange,
+    /// `https://schemas.openid.net/secevent/caep/event-type/assurance-level-
+    /// change`
+    #[serde(rename = "https://schemas.openid.net/secevent/caep/event-type/assurance-level-change")]
+    AssuranceLevelChange,
+    /// `https://schemas.openid.net/secevent/risc/event-type/account-disabled`
+    #[serde(rename = "https://schemas.openid.net/secevent/risc/event-type/account-disabled")]
+    AccountDisabled,
+    /// `https://schemas.openid.net/secevent/risc/event-type/account-enabled`
+    #[serde(rename = "https://schemas.openid.net/secevent/risc/event-type/account-enabled")]
+    AccountEnabled,
+    /// `https://schemas.openid.net/secevent/risc/event-type/account-purged`
+    #[serde(rename = "https://schemas.openid.net/secevent/risc/event-type/account-purged")]
+    AccountPurged,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// Who set a stream's current status. A status an administrator set to
+/// anything but `enabled` cannot be changed by the receiver (D-51).
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SsfStatusActor::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SsfStatusActor {
+    /// `admin`
+    #[serde(rename = "admin")]
+    Admin,
+    /// `receiver`
+    #[serde(rename = "receiver")]
+    Receiver,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// A registered SSF stream, as the management API returns it. **The push
+/// `Authorization` header is never returned**; `authorization_header_set`
+/// says whether one is stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SsfStream {
+    /// The SET `aud`. Unique across the deployment.
+    pub audience: String,
+    /// Whether a push `Authorization` header is stored.
+    pub authorization_header_set: bool,
+    /// When the stream was registered.
+    pub created_at: String,
+    /// `push` (RFC 8935) or `poll` (RFC 8936).
+    pub delivery_method: SsfDeliveryMethod,
+    /// A description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The push endpoint, or null for a poll stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_url: Option<String>,
+    /// The event types the receiver may have.
+    pub events_allowed: Vec<SsfEventType>,
+    /// What the stream carries: the intersection of the two.
+    pub events_delivered: Vec<SsfEventType>,
+    /// The event types the receiver asked for (a subset of `events_allowed`).
+    pub events_requested: Vec<SsfEventType>,
+    /// The stream id, also the SSF `stream_id`.
+    pub id: Uuid,
+    /// When the receiver last asked for a verification event, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verification_at: Option<String>,
+    /// The OAuth2 `client_id` whose client-credentials token (scope `ssf.manage`)
+    /// is this stream's receiver on the stream management API.
+    pub receiver_client_id: String,
+    /// `enabled`, `paused` or `disabled`.
+    pub status: SsfStreamStatus,
+    /// Who set the status: `admin` or `receiver`.
+    pub status_actor: SsfStatusActor,
+    /// Why, if anyone said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    /// `iss_sub` (default) or `email`.
+    pub subject_format: SsfSubjectFormat,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// Whether the tenant's transmitter is active: its `ssf_enabled` is on and
+    /// the deployment does not make every tenant share one issuer (D-55). A
+    /// stream of an inactive transmitter is kept, and carries nothing.
+    pub transmitter_active: bool,
+    /// Why the transmitter is inactive, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmitter_inactive_reason: Option<String>,
+    /// When it was last written.
+    pub updated_at: String,
+}
+
+/// `create_stream` and `update_stream` (a **replacement**) body.
+/// This type carries secret material (§27.5), so the field is
+/// \[`Sensitive`\](crate::Sensitive) and the type derives neither `Serialize`
+/// nor `Deserialize`. Read the secret with `.expose()`, deliberately, at the
+/// point you need it.
+#[derive(Debug, Clone)]
+pub struct SsfStreamInput {
+    /// 1–512 bytes; unique across the deployment.
+    pub audience: String,
+    /// **Write-only.** The `Authorization` header value AXIAM sends to a push
+    /// endpoint. On update, absent keeps the stored one — except that moving the
+    /// endpoint to another origin requires it again.
+    ///
+    /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
+    /// to read it.
+    pub authorization_header: Option<Sensitive<String>>,
+    /// On update: remove the stored header. Refused together with
+    /// `authorization_header`.
+    pub clear_authorization_header: Option<bool>,
+    /// `push` or `poll`.
+    pub delivery_method: SsfDeliveryMethod,
+    /// At most 256 bytes.
+    pub description: Option<String>,
+    /// Required for `push` (an `https` URL under the outbound address policy),
+    /// refused for `poll`.
+    pub endpoint_url: Option<String>,
+    /// 1–6 event types.
+    pub events_allowed: Vec<SsfEventType>,
+    /// A subset of `events_allowed`; absent means all of them. The receiver may
+    /// narrow it later, never widen it.
+    pub events_requested: Option<Vec<SsfEventType>>,
+    /// An OAuth2 client of the tenant with the `client_credentials` grant and the
+    /// `ssf.manage` scope.
+    pub receiver_client_id: String,
+    /// `enabled` by default.
+    pub status: Option<SsfStreamStatus>,
+    /// At most 256 bytes.
+    pub status_reason: Option<String>,
+    /// `iss_sub` by default.
+    pub subject_format: Option<SsfSubjectFormat>,
+}
+
+/// Wire twin of [`SsfStreamInput`] -- plain strings, private, never logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SsfStreamInputWire {
+    pub(crate) audience: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) authorization_header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) clear_authorization_header: Option<bool>,
+    pub(crate) delivery_method: SsfDeliveryMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoint_url: Option<String>,
+    pub(crate) events_allowed: Vec<SsfEventType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) events_requested: Option<Vec<SsfEventType>>,
+    pub(crate) receiver_client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<SsfStreamStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) status_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subject_format: Option<SsfSubjectFormat>,
+}
+
+impl From<&SsfStreamInput> for SsfStreamInputWire {
+    fn from(v: &SsfStreamInput) -> Self {
+        Self {
+            audience: v.audience.clone(),
+            authorization_header: v
+                .authorization_header
+                .as_ref()
+                .map(crate::management::error::expose_for_wire),
+            clear_authorization_header: v.clear_authorization_header,
+            delivery_method: v.delivery_method.clone(),
+            description: v.description.clone(),
+            endpoint_url: v.endpoint_url.clone(),
+            events_allowed: v.events_allowed.clone(),
+            events_requested: v.events_requested.clone(),
+            receiver_client_id: v.receiver_client_id.clone(),
+            status: v.status.clone(),
+            status_reason: v.status_reason.clone(),
+            subject_format: v.subject_format.clone(),
+        }
+    }
+}
+
+/// A stream's SSF status (SSF 1.0 §8.1.2), with AXIAM's meaning pinned by
+/// D-51.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SsfStreamStatus::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SsfStreamStatus {
+    /// `enabled`
+    #[serde(rename = "enabled")]
+    Enabled,
+    /// `paused`
+    #[serde(rename = "paused")]
+    Paused,
+    /// `disabled`
+    #[serde(rename = "disabled")]
+    Disabled,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// Which RFC 9493 subject identifier names the user in the SETs of a stream
+/// (D-46).
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`SsfSubjectFormat::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SsfSubjectFormat {
+    /// `iss_sub`
+    #[serde(rename = "iss_sub")]
+    IssSub,
+    /// `email`
+    #[serde(rename = "email")]
+    Email,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// A name to put in a `Server` certificate's `subjectAltName`.
@@ -4249,6 +5667,10 @@ pub struct TenantSettingsOverride {
     /// `require_uppercase`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_uppercase: Option<bool>,
+    /// G-2 / D-20 — disable-only, like `sensitive_scopes_enabled`; see
+    /// \[`OidcPolicy::saml_idp_enabled`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml_idp_enabled: Option<bool>,
     /// `sensitive_scopes_enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive_scopes_enabled: Option<bool>,
@@ -4257,6 +5679,10 @@ pub struct TenantSettingsOverride {
     /// which is different from an absent field (inherit the organization's list).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_cert_allowed_names: Option<Vec<String>>,
+    /// G-5 / D-45 — disable-only, like `saml_idp_enabled`; see
+    /// \[`OidcPolicy::ssf_enabled`\].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssf_enabled: Option<bool>,
     /// `webauthn_user_verification`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_user_verification: Option<String>,
@@ -4383,6 +5809,142 @@ pub enum UnknownAaguidAction {
     /// understand.
     #[serde(untagged)]
     Unknown(String),
+}
+
+/// `PATCH /api/v1/tenants/{tenant_id}/directory` — a **sparse** update.
+///
+/// Every member optional: absent leaves the stored value, and for the two
+/// nullable members an explicit `null` clears it.
+/// Every field is optional, so this is a **sparse** body: what you leave
+/// `None` is left unchanged, and is omitted from the wire request entirely
+/// rather than sent as `null` (§27.4 rule 5). Construct it with
+/// `..Default::default()`.
+/// This type carries secret material (§27.5), so the field is
+/// \[`Sensitive`\](crate::Sensitive) and the type derives neither `Serialize`
+/// nor `Deserialize`. Read the secret with `.expose()`, deliberately, at the
+/// point you need it.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateDirectoryConfig {
+    /// See \[`SetDirectoryConfig::base_dn`\].
+    pub base_dn: Option<String>,
+    /// See \[`SetDirectoryConfig::bind_dn`\].
+    pub bind_dn: Option<String>,
+    /// See \[`SetDirectoryConfig::bind_secret`\]; absent keeps the stored secret,
+    /// subject to the same P23W2-01 rule.
+    ///
+    /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
+    /// to read it.
+    pub bind_secret: Option<Sensitive<String>>,
+    /// See \[`SetDirectoryConfig::enabled`\].
+    pub enabled: Option<bool>,
+    /// Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub group_base_dn: Option<Option<String>>,
+    /// Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub group_filter: Option<Option<String>>,
+    /// Replaces the whole table when present.
+    pub group_mappings: Option<Vec<GroupMapping>>,
+    /// See \[`SetDirectoryConfig::group_member_attribute`\].
+    pub group_member_attribute: Option<String>,
+    /// See \[`SetDirectoryConfig::group_nesting_depth`\].
+    pub group_nesting_depth: Option<i32>,
+    /// See \[`SetDirectoryConfig::jit_provisioning`\].
+    pub jit_provisioning: Option<bool>,
+    /// `kind`.
+    pub kind: Option<DirectoryKind>,
+    /// See \[`SetDirectoryConfig::start_tls`\].
+    pub start_tls: Option<bool>,
+    /// See \[`SetDirectoryConfig::sync_interval_secs`\].
+    pub sync_interval_secs: Option<i64>,
+    /// Replaces the whole list when present.
+    pub trust_anchors_pem: Option<Vec<String>>,
+    /// See \[`SetDirectoryConfig::url`\].
+    pub url: Option<String>,
+    /// `user_attribute_map`.
+    pub user_attribute_map: Option<UserAttributeMap>,
+    /// See \[`SetDirectoryConfig::user_filter`\].
+    pub user_filter: Option<String>,
+}
+
+/// Wire twin of [`UpdateDirectoryConfig`] -- plain strings, private, never logged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct UpdateDirectoryConfigWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_dn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bind_dn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bind_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enabled: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) group_base_dn: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) group_filter: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_mappings: Option<Vec<GroupMapping>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_member_attribute: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_nesting_depth: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jit_provisioning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<DirectoryKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) start_tls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sync_interval_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trust_anchors_pem: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) user_attribute_map: Option<UserAttributeMap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) user_filter: Option<String>,
+}
+
+impl From<&UpdateDirectoryConfig> for UpdateDirectoryConfigWire {
+    fn from(v: &UpdateDirectoryConfig) -> Self {
+        Self {
+            base_dn: v.base_dn.clone(),
+            bind_dn: v.bind_dn.clone(),
+            bind_secret: v
+                .bind_secret
+                .as_ref()
+                .map(crate::management::error::expose_for_wire),
+            enabled: v.enabled,
+            group_base_dn: v.group_base_dn.clone(),
+            group_filter: v.group_filter.clone(),
+            group_mappings: v.group_mappings.clone(),
+            group_member_attribute: v.group_member_attribute.clone(),
+            group_nesting_depth: v.group_nesting_depth,
+            jit_provisioning: v.jit_provisioning,
+            kind: v.kind.clone(),
+            start_tls: v.start_tls,
+            sync_interval_secs: v.sync_interval_secs,
+            trust_anchors_pem: v.trust_anchors_pem.clone(),
+            url: v.url.clone(),
+            user_attribute_map: v.user_attribute_map.clone(),
+            user_filter: v.user_filter.clone(),
+        }
+    }
 }
 
 /// `UpdateFederationConfigRequest` (generated from openapi.json).
@@ -4574,10 +6136,22 @@ pub struct UpdateOAuth2ClientRequest {
     /// `authn_request_params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authn_request_params: Option<AuthnRequestParamsMode>,
+    /// G-7 — see the create DTO. `""` clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_request_signing_alg: Option<String>,
+    /// G-7 — see the create DTO. `""` clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_client_notification_endpoint: Option<String>,
     /// Pass an empty string to clear a previously registered URI — the one edit
     /// an operator makes when an RP is decommissioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backchannel_logout_uri: Option<String>,
+    /// G-7 — see the create DTO. `""` clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_token_delivery_mode: Option<String>,
+    /// G-7 — `true` refused, as on create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_user_code_parameter: Option<bool>,
     /// X7.3 — see \[`CreateOAuth2ClientRequest::browser_sso`\].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_sso: Option<bool>,
@@ -4871,6 +6445,49 @@ impl From<&UpdateWebhookRequest> for UpdateWebhookRequestWire {
             url: v.url.clone(),
         }
     }
+}
+
+/// Which directory attribute feeds each AXIAM user field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserAttributeMap {
+    /// The attribute holding the human-readable name.
+    pub display_name: String,
+    /// The attribute holding the e-mail address.
+    pub email: String,
+    /// The attribute holding the immutable entry identifier (`entryUUID`,
+    /// `objectGUID`).
+    pub external_id: String,
+    /// The attribute holding the login name (`uid`, `sAMAccountName`).
+    pub username: String,
+}
+
+/// Which AXIAM attribute becomes the downstream `userName`. The mapping is a
+/// fixed attribute set, not a mapping language (D-57).
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`UserNameSource::Unknown`\] carrying the string, rather than failing the
+/// response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here turns
+/// the next value the server adds into a parse error on the whole `list`,
+/// taking down every record on the page over one field of one of them.
+/// `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum UserNameSource {
+    /// `username`
+    #[serde(rename = "username")]
+    Username,
+    /// `email`
+    #[serde(rename = "email")]
+    Email,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Public-safe user representation (no password_hash, no mfa_secret).

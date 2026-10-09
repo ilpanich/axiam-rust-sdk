@@ -100,6 +100,11 @@ pub enum AxiamError {
         /// other `Auth` failure. A *code*, never free text, so callers can
         /// branch on it without parsing `message`.
         reason: Option<IdTokenFailureReason>,
+        /// A stable reason code for a refused Security Event Token, populated
+        /// by the CONTRACT.md §32.7 receiver helper
+        /// ([`crate::ssf::SsfReceiver::verify_set`]); `None` for every other
+        /// `Auth` failure. See [`SetFailureReason`].
+        set_reason: Option<SetFailureReason>,
     },
 
     /// Authorization failure: the caller is authenticated but lacks
@@ -152,6 +157,7 @@ impl AxiamError {
             message: message.into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         }
     }
 
@@ -235,6 +241,7 @@ impl AxiamError {
                 message,
                 oauth: None,
                 reason: None,
+                set_reason: None,
             },
             403 | 409 => {
                 let (action, resource_id) = parse_authz_body_fields(&message);
@@ -280,6 +287,7 @@ impl AxiamError {
                 message,
                 oauth: None,
                 reason: None,
+                set_reason: None,
             },
             // gRPC `PERMISSION_DENIED` carries no structured error body (no
             // JSON payload analogous to the REST 403's
@@ -362,6 +370,7 @@ impl AxiamError {
                 error_description,
             }),
             reason: None,
+            set_reason: None,
         }
     }
 
@@ -375,6 +384,7 @@ impl AxiamError {
             message: format!("id_token validation failed ({reason}): {detail}"),
             oauth: None,
             reason: Some(reason),
+            set_reason: None,
         }
     }
 
@@ -425,10 +435,12 @@ impl AxiamError {
                 message,
                 oauth,
                 reason,
+                set_reason,
             } => AxiamError::Auth {
                 message: message.clone(),
                 oauth: oauth.clone(),
                 reason: *reason,
+                set_reason: *set_reason,
             },
             AxiamError::Authz {
                 kind,
@@ -647,5 +659,91 @@ mod tests {
         assert!(matches!(cloned, AxiamError::Network { source: None, .. }));
         // Display is unchanged: the format string reads only `message`.
         assert_eq!(cloned.to_string(), network.to_string());
+    }
+}
+
+/// Why the CONTRACT.md §32.7 receiver helper refused a Security Event Token,
+/// one code per step of its verification order. Surfaced via
+/// [`AxiamError::set_failure_reason`].
+///
+/// Four of the seven are RFC 8935 §2.4 `err` values; `malformed`,
+/// `invalid_type` and `replayed` are not, so a push endpoint answers
+/// `400 {"err": <code>}` with [`Self::push_error_code`], which sends
+/// `invalid_request` for those three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SetFailureReason {
+    /// Not three base64url parts decoding to a JSON header and payload (step 1).
+    Malformed,
+    /// The header `typ` is not `secevent+jwt` / `application/secevent+jwt` (step 2).
+    InvalidType,
+    /// `alg` not `EdDSA`, no key for `kid` after one refetch, or a bad
+    /// signature (steps 3–5).
+    InvalidKey,
+    /// `iss` is not the configured issuer (step 6).
+    InvalidIssuer,
+    /// `aud` does not name the configured audience (step 7).
+    InvalidAudience,
+    /// `exp` or `sub` present, `jti` / `iat` / `sub_id` absent, or `events`
+    /// not exactly one member (step 8).
+    InvalidRequest,
+    /// The `jti` was already seen inside the replay window (step 9).
+    Replayed,
+}
+
+impl SetFailureReason {
+    /// The code as the contract spells it (`"replayed"` included).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SetFailureReason::Malformed => "malformed",
+            SetFailureReason::InvalidType => "invalid_type",
+            SetFailureReason::InvalidKey => "invalid_key",
+            SetFailureReason::InvalidIssuer => "invalid_issuer",
+            SetFailureReason::InvalidAudience => "invalid_audience",
+            SetFailureReason::InvalidRequest => "invalid_request",
+            SetFailureReason::Replayed => "replayed",
+        }
+    }
+
+    /// The RFC 8935 §2.4 `err` value to answer a push with, or to send in a
+    /// poll's `setErrs`: [`Self::as_str`] where RFC 8935 defines the code, and
+    /// `invalid_request` for `replayed`, `malformed` and `invalid_type`, which
+    /// it does not (RFC 8935 §2.4 has `invalid_request`, `invalid_key`,
+    /// `invalid_issuer`, `invalid_audience`, `authentication_failed` and
+    /// `access_denied` only).
+    pub fn push_error_code(self) -> &'static str {
+        match self {
+            SetFailureReason::Replayed
+            | SetFailureReason::Malformed
+            | SetFailureReason::InvalidType => "invalid_request",
+            other => other.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for SetFailureReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AxiamError {
+    /// Build the `Auth` error the §32.7 receiver helper raises for a refused
+    /// SET. `detail` MUST NOT contain the SET or any claim value.
+    pub fn set_refused(reason: SetFailureReason, detail: impl fmt::Display) -> AxiamError {
+        AxiamError::Auth {
+            message: format!("security event token refused ({reason}): {detail}"),
+            oauth: None,
+            reason: None,
+            set_reason: Some(reason),
+        }
+    }
+
+    /// The §32.7 reason code, when this `Auth` failure is a refused SET.
+    pub fn set_failure_reason(&self) -> Option<SetFailureReason> {
+        match self {
+            AxiamError::Auth { set_reason, .. } => *set_reason,
+            _ => None,
+        }
     }
 }

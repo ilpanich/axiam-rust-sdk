@@ -243,6 +243,7 @@ impl AxiamExtractorError {
                 message: message.into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             },
             challenge,
         }

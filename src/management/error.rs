@@ -171,3 +171,33 @@ pub(crate) fn expose_for_wire(value: &Sensitive<String>) -> String {
 pub(crate) fn wrap_from_wire(value: String) -> Sensitive<String> {
     Sensitive::new(value)
 }
+
+/// A local, pre-request refusal raised as §2's `ValidationError` — the same
+/// shape a server `400` takes on this surface ([`ValidationError`] as the
+/// `source` of an [`AxiamError::Network`]), with `status` 400 although no
+/// request was sent.
+///
+/// Used where the contract makes a refusal local: an RFC 7592 URI at another
+/// origin (§28.12.2 rule 1), a `parse_sp_metadata` with both or neither
+/// member (§29.2), a CIBA request the SDK will not send (§33), a malformed
+/// ping body (§33.1). `detail` MUST NOT carry a secret: it is the message.
+pub(crate) fn local_refusal(
+    operation: &'static str,
+    field: &str,
+    detail: impl std::fmt::Display,
+) -> AxiamError {
+    let detail = detail.to_string();
+    let message = format!("{operation}: {field}: {detail}; no request was sent");
+    AxiamError::network_with_source(
+        message.clone(),
+        Box::new(ValidationError {
+            status: 400,
+            operation,
+            message,
+            fields: vec![FieldError {
+                field: field.to_string(),
+                message: detail,
+            }],
+        }),
+    )
+}

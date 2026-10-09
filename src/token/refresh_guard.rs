@@ -72,6 +72,7 @@ impl TokenManager {
                 message: "no refresh token available; re-authentication required".into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             })?
             .expose()
             .clone();

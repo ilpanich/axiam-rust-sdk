@@ -88,9 +88,14 @@ struct IntrospectionResponseWire {
 
 /// The RFC 6749 error body shape (`OAuth2ErrorResponse`) returned by
 /// AXIAM's `/oauth2/*` endpoints. Both fields are required by the schema.
+///
+/// `error_description` is read leniently: §2's `/oauth2/*` row (and §28.12.3)
+/// dispatch on "an error object with a non-empty `error` member", and an
+/// RFC 6749 §5.2 / RFC 7591 §3.2.2 server may omit the description.
 #[derive(Debug, Deserialize)]
 struct OAuth2ErrorResponseWire {
     error: String,
+    #[serde(default)]
     error_description: String,
 }
 
@@ -340,7 +345,9 @@ pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> Axi
         .text()
         .await
         .unwrap_or_else(|_| "no response body".to_string());
-    if let Ok(body) = serde_json::from_str::<OAuth2ErrorResponseWire>(&text) {
+    if let Ok(body) = serde_json::from_str::<OAuth2ErrorResponseWire>(&text)
+        && !body.error.is_empty()
+    {
         return AxiamError::oauth_protocol_error(body.error, body.error_description);
     }
     AxiamError::from_http_status(status, text)
@@ -413,6 +420,7 @@ impl AxiamClient {
                     .into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })
     }
 
@@ -428,6 +436,7 @@ impl AxiamClient {
                 ),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             })
     }
 
@@ -448,6 +457,7 @@ impl AxiamClient {
                     .into(),
             oauth: None,
             reason: None,
+            set_reason: None,
         })
     }
 
@@ -981,6 +991,7 @@ impl AxiamClient {
                         .into(),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
 

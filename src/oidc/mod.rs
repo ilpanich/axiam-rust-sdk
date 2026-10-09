@@ -63,6 +63,7 @@
 //! ```
 
 pub mod authorize;
+pub mod ciba;
 pub mod device;
 pub mod discovery;
 pub mod exchange;
@@ -70,11 +71,17 @@ pub mod federation;
 pub mod id_token;
 pub mod logout;
 pub mod par;
+pub mod registration;
 pub(crate) mod single_flight;
 pub mod state;
 pub mod token_exchange;
 
 pub use authorize::{AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, OidcBeginParams};
+pub use ciba::{
+    CIBA_GRANT_TYPE, CIBA_SLOW_DOWN_INCREMENT_SECS, CibaAwaitParams, CibaClock, CibaDelivery,
+    CibaInitiateParams, CibaInitiateResponse, CibaPollParams, CibaRequestSigner, CibaSigningAlg,
+    CibaUserHint, DEFAULT_CIBA_INTERVAL_SECS, SystemCibaClock,
+};
 pub use device::{
     DEFAULT_POLL_INTERVAL_SECS, DEVICE_CODE_GRANT_TYPE, DeviceAuthorization, DeviceAuthorizeParams,
     DeviceLoginParams, DevicePollParams, SLOW_DOWN_INCREMENT_SECS,
@@ -96,6 +103,7 @@ pub use logout::{
     BACKCHANNEL_LOGOUT_EVENT, LogoutUrlParams, MAX_LOGOUT_TOKEN_AGE_SECS, VerifiedLogoutToken,
 };
 pub use par::{OidcParParams, PushedAuthorizationRequest};
+pub use registration::ClientRegistration;
 pub use state::{MemoryOidcStateStore, OIDC_STATE_TTL, OidcStateEntry, OidcStateStore};
 pub use token_exchange::{
     ACCESS_TOKEN_TYPE, ExchangedToken, JWT_TOKEN_TYPE, TOKEN_EXCHANGE_GRANT_TYPE,

@@ -6,7 +6,7 @@
 //!   * a call going over mTLS prefers the alias;
 //!   * a call NOT going over mTLS keeps the top-level entry;
 //!   * an ABSENT member means "no separate mTLS host", never "unsupported";
-//!   * only the six listed endpoints are ever aliased — not
+//!   * only the seven listed endpoints are ever aliased — not
 //!     `authorization_endpoint`, `end_session_endpoint` or `jwks_uri`;
 //!   * `issuer` is not an endpoint, does not move, and still governs `iss`
 //!     validation by exact string for a token minted at an alias host.
@@ -366,7 +366,7 @@ async fn a_partial_alias_object_falls_back_per_endpoint_instead_of_failing() {
     let conventional = MockServer::start().await;
     let mtls = MockServer::start().await;
     let mut document = discovery_document_with_aliases(&conventional.uri(), &mtls.uri());
-    // RFC 8705 §5 does not require an OP to alias all six, and the shape of
+    // RFC 8705 §5 does not require an OP to alias all seven, and the shape of
     // this member must never be why a client stops working: an alias object
     // naming only `token_endpoint` is a valid document, and every endpoint it
     // does not name falls back to the top-level entry.

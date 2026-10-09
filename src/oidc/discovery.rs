@@ -80,6 +80,11 @@ pub struct MtlsEndpointAliases {
     /// authenticates the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed_authorization_request_endpoint: Option<String>,
+    /// The mTLS CIBA backchannel authentication endpoint — CIBA Core §7,
+    /// which authenticates the client (the seventh alias, contract 1.58,
+    /// §21.3.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backchannel_authentication_endpoint: Option<String>,
 }
 
 /// The OIDC Discovery 1.0 metadata document served by
@@ -171,6 +176,27 @@ pub struct OidcConfiguration {
     /// `<issuer>/oauth2/par` by concatenation.
     #[serde(default)]
     pub pushed_authorization_request_endpoint: Option<String>,
+
+    /// CIBA Core §4 backchannel authentication endpoint, used by
+    /// [`crate::client::AxiamClient::ciba_initiate`] (§33.1). `Option`, and its
+    /// absence is an error at call time, as for the two above.
+    #[serde(default)]
+    pub backchannel_authentication_endpoint: Option<String>,
+
+    /// The CIBA delivery modes the **server** supports (`["poll", "ping"]`).
+    /// A statement about the deployment: which mode a client uses is its
+    /// registration's answer (§21.5).
+    #[serde(default)]
+    pub backchannel_token_delivery_modes_supported: Option<Vec<String>>,
+
+    /// Always `false` at AXIAM: no `user_code` is ever sent (§33.3 rule 3).
+    #[serde(default)]
+    pub backchannel_user_code_parameter_supported: Option<bool>,
+
+    /// The algorithms a signed CIBA request may use (`PS256`, `ES256`,
+    /// `EdDSA`). The one a client signs with is the one it registered.
+    #[serde(default)]
+    pub backchannel_authentication_request_signing_alg_values_supported: Option<Vec<String>>,
 
     /// OIDC RP-Initiated Logout 1.0 `end_session_endpoint`, used by
     /// [`crate::client::AxiamClient::logout_url`] (§12.7.2 rule 1).

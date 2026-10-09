@@ -3,8 +3,8 @@
 //! Every other part of this SDK assumes a populated tenant. [`login`] signs a
 //! user in; [`check_access`] asks about a resource; [`webhook`] verifies a
 //! delivery signature. None of them can create the user, declare the resource
-//! or register the webhook. This module is the part that can: **147 operations
-//! across 24 namespaces**, which is the whole server API minus what other
+//! or register the webhook. This module is the part that can: **190 operations
+//! across 28 namespaces**, which is the whole server API minus what other
 //! contract sections already own and minus organization creation and deletion,
 //! which §27.0 keeps deliberately out of reach of a client library.
 //!
@@ -86,6 +86,7 @@
 //! hand-maintained table of 147 names is wrong by the next release. Everything
 //! else here is written by hand. CI regenerates and diffs.
 
+pub(crate) mod checks;
 pub mod error;
 pub mod manifest;
 pub mod models;

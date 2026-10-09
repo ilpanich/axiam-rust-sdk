@@ -229,6 +229,7 @@ pub fn discovery_document(base_url: &str) -> Value {
         ],
         "device_authorization_endpoint": format!("{base_url}/oauth2/device_authorization"),
         "pushed_authorization_request_endpoint": format!("{base_url}/oauth2/par"),
+        "backchannel_authentication_endpoint": format!("{base_url}/oauth2/bc-authorize"),
         "end_session_endpoint": format!("{base_url}/oauth2/end_session"),
         "backchannel_logout_supported": true,
         "backchannel_logout_session_supported": true,
@@ -270,8 +271,8 @@ pub fn tenant_scoped_discovery_document(base_url: &str, tenant: Uuid) -> Value {
     doc
 }
 
-/// The six RFC 8705 §5 aliases, every one on `mtls_base_url` (CONTRACT.md
-/// §21.3 rule 2, contract 1.40).
+/// The seven RFC 8705 §5 aliases, every one on `mtls_base_url` (CONTRACT.md
+/// §21.3 rule 2, contract 1.40; the seventh, CIBA's, contract 1.58).
 pub fn mtls_endpoint_aliases(mtls_base_url: &str) -> Value {
     json!({
         "token_endpoint": format!("{mtls_base_url}/oauth2/token"),
@@ -280,6 +281,7 @@ pub fn mtls_endpoint_aliases(mtls_base_url: &str) -> Value {
         "introspection_endpoint": format!("{mtls_base_url}/oauth2/introspect"),
         "device_authorization_endpoint": format!("{mtls_base_url}/oauth2/device_authorization"),
         "pushed_authorization_request_endpoint": format!("{mtls_base_url}/oauth2/par"),
+        "backchannel_authentication_endpoint": format!("{mtls_base_url}/oauth2/bc-authorize"),
     })
 }
 

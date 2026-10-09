@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Contract **1.58** (CONTRACT.md §28.12, §29, §30, §31, §32, §32.7, §33, §21.3.1). The vendored
+`CONTRACT.md`, `openapi.json` and `management-registry.json` come from axiam `21a9c22`;
+`proto/` was already identical.
+
+### Added
+
+- RFC 7592 client configuration: `read_client_registration`, `update_client_registration`,
+  `delete_client_registration` and `ClientRegistration` (§28.12). The token is `Sensitive`,
+  sent only as a bearer on a session-free transport; writes are never retried.
+- Management namespaces `directory` (§30), `saml` (§29), `ssf` (§32) and `scim_targets` (§31):
+  190 operations across 28 namespaces. `bind_secret`, `authorization_header` and `credential`
+  are `Sensitive`; `UpdateDirectoryConfig` can send an explicit `null`; call-site documentation
+  of the contract's rules; read-modify-write `From` conversions for the replace updates.
+- `axiam_sdk::ssf::SsfReceiver` — `verify_set` and `poll` (§32.7), with `SetFailureReason` and
+  `AxiamError::set_failure_reason`.
+- CIBA (§33): `ciba_initiate`, `ciba_poll`, `ciba_await`, `ciba_handle_ping`, the signed
+  request form (`CibaRequestSigner`), `AxiamError::is_access_denied` / `is_expired_token`.
+
 ### Changed
 
+- `mtls_endpoint_aliases` decodes the seventh alias, `backchannel_authentication_endpoint`
+  (§21.3.1 amended in contract 1.58); `OidcConfiguration` decodes the four CIBA members.
+- `AxiamError::Auth` gains the additive `set_reason` field (the variant is `#[non_exhaustive]`).
+- An `/oauth2` error body without `error_description` is still an `OAuthProtocolError`.
 - Raise the MSRV from 1.88 to 1.89 (`rust-version`, `supported_versions::MIN_RUST_VERSION`
   and the CI matrix), so the SDK builds against current dependency releases: uuid 1.27
   requires Rust 1.89. The workspace now uses resolver 3, so a dependency raising its own

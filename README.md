@@ -56,8 +56,9 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.52**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
-§21, §22, §23, §24, §25, §26, §27, §28 (including §6.1 mTLS, the §10.1 minimum
+This SDK conforms to **contract 1.58**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
+§33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
 signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
 including the four public "Sign in with X" entry points, on the same host object
@@ -65,14 +66,30 @@ including the four public "Sign in with X" entry points, on the same host object
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§27 is implemented **in full**, both halves: the 162-operation imperative surface *and*
+§27 is implemented **in full**, both halves: the 190-operation imperative surface *and*
 the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
-that ships only one half to say which; this one ships both.
+that ships only one half to say which; this one ships both. (The manifest has no kind for
+the four namespaces contract 1.54–1.57 added, by the contract's design.)
 
-§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26 and §27 are named rather than folded
-into the range because they landed after this SDK already claimed §1–§13: widening the
-range silently would turn a statement that was true when written into a different claim
-without anyone editing it.
+§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26, §27, §28.12, §29, §30, §31, §32, §32.7 and
+§33 are named rather than folded into the range because they landed after this SDK already
+claimed §1–§13: widening the range silently would turn a statement that was true when written
+into a different claim without anyone editing it. The §21.3.1 amendment of contract 1.58 (the
+seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
+honoured on an mTLS CIBA call.
+
+### Contract 1.53 – 1.58 — what this SDK ships
+
+| Section | Here |
+|---|---|
+| §28.12 RFC 7592 client configuration | `read_client_registration`, `update_client_registration`, `delete_client_registration` on `AxiamClient`; `ClientRegistration` |
+| §29 SAML service providers | `client.saml()` — eleven generated operations, call-site notes, `ParseSamlSpMetadata::from_url` / `from_xml` |
+| §30 directory | `client.directory()` — six generated operations; `bind_secret` `Sensitive`; explicit `null` on `update` |
+| §31 outbound SCIM targets | `client.scim_targets()` — six generated operations; `credential` `Sensitive` |
+| §32 SSF streams | `client.ssf()` — five generated operations; `authorization_header` `Sensitive` |
+| §32.7 SSF receiver helper | `axiam_sdk::ssf::SsfReceiver::{verify_set, poll}` |
+| §33 CIBA | `ciba_initiate`, `ciba_poll`, `ciba_await`, `ciba_handle_ping` on `AxiamClient` |
+| §33.2 signed request | `CibaRequestSigner` (PS256, ES256, EdDSA; the caller's key and algorithm) |
 
 ### Contract 1.51 — what this SDK ships, and what it declines
 
@@ -1735,7 +1752,7 @@ why the ~870 lines of group arithmetic the SRP implementation needed are gone.
 Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
 about a resource, `verify_webhook` checks a delivery signature — and none of them can
 create the user, declare the resource or register the webhook. `client.management` is the
-part that can: **162 operations across 24 namespaces**, generated from
+part that can: **190 operations across 28 namespaces**, generated from
 `management-registry.json`, which is the whole server API minus what other contract
 sections own and minus organization creation and deletion (§27.0 keeps those out of reach
 of a client library on purpose).
@@ -1843,7 +1860,7 @@ the whole `list` — taking down every record on the page over one field of one 
 
 ### Declarative manifests (§27.6, §27.7)
 
-Calling 162 operations one at a time is rarely what an application wants. What it does at
+Calling 190 operations one at a time is rarely what an application wants. What it does at
 start-up, in a migration, or in a test fixture is assert a shape:
 
 ```rust
@@ -1973,6 +1990,123 @@ re-vendoring `management-registry.json` or `openapi.json`:
 tools/gen_management.py            # regenerate
 tools/gen_management.py --check    # what CI runs
 ```
+
+## RFC 7592 client configuration (§28.12)
+
+A client that registered itself through `POST /oauth2/register` received a
+`registration_client_uri` and a `registration_access_token`, once. With them it manages its
+own registration — and only at this client's configured AXIAM: a URI at any other origin is
+refused before a request is sent.
+
+```rust
+use axiam_sdk::Sensitive;
+
+let token = Sensitive::new(stored_registration_access_token);
+let mut registration = client.read_client_registration(&registration_client_uri, &token).await?;
+registration.client_name = Some("Agent v2".into());
+// A full replacement: start from the read. The token ROTATES — persist the new one first.
+let updated = client
+    .update_client_registration(&registration_client_uri, &token, &registration)
+    .await?;
+let rotated = updated.registration_access_token.expect("an update returns the rotated token");
+store(rotated);
+```
+
+Neither write is retried: an update whose answer was lost has already rotated the token.
+The token never travels anywhere but `Authorization: Bearer`, these requests carry no SDK
+session, and a `401` from them never triggers the §9 refresh.
+
+## Directory, SAML, SSF and SCIM targets (§29 – §32)
+
+Four management namespaces, generated like the rest of §27, with the contract's call-site
+rules in each method's documentation.
+
+```rust
+use axiam_sdk::Sensitive;
+use axiam_sdk::management::models;
+
+// §30 — moving the connection (url, start_tls, bind_dn, trust_anchors_pem) needs the
+// secret again; the SDK keeps no copy.
+client.directory().update(&models::UpdateDirectoryConfig {
+    url: Some("ldaps://dc2.corp.example".into()),
+    bind_secret: Some(Sensitive::new(secret_from_vault)),
+    group_filter: Some(None), // explicit null: clears it
+    ..Default::default()
+}).await?;
+
+// §29 — a metadata import is a draft; nothing is stored until you create it.
+let draft = client.saml()
+    .parse_sp_metadata(&models::ParseSamlSpMetadata::from_url("https://sp.example/metadata"))
+    .await?;
+let sp = client.saml().create_service_provider(&draft.service_provider).await?;
+
+// §31 / §32 — replace updates: read, convert, change, write. The write-only secret is
+// left absent, which keeps the stored one.
+let target = client.scim_targets().get(target_id).await?;
+let mut body = models::ScimTargetInput::from(&target);
+body.enabled = Some(false);
+client.scim_targets().update(target_id, &body).await?;
+```
+
+`SamlIdpCredential` has no key member and never will; `delete` on a SCIM target deprovisions
+nothing downstream; retiring the active SAML credential with no successor stops SAML sign-on
+for the whole tenant. Every write in these namespaces is issued exactly once.
+
+## SSF receiver (§32.7)
+
+For the relying party that *receives* AXIAM's CAEP and RISC events:
+
+```rust
+use std::sync::Arc;
+use axiam_sdk::ssf::{SsfKeySource, SsfPollOptions, SsfReceiver, SsfReceiverConfig, SetErr};
+
+let mut config = SsfReceiverConfig::new(
+    "https://iam.example.com/t/<tenant>",          // the transmitter's issuer
+    "https://rp.example.com",                       // your stream's audience
+    SsfKeySource::JwksUri("https://iam.example.com/t/<tenant>/oauth2/jwks".into()),
+);
+config.access_token_provider = Some(Arc::new(move || Box::pin(fetch_ssf_manage_token())));
+let receiver = SsfReceiver::new(&client, config)?;
+
+// Push: verify, then answer 202 — or 400 {"err": reason.push_error_code()}.
+let event = receiver.verify_set(&body).await?;
+
+// Poll: acknowledge what you processed on the next call; refuse the rest by setErrs.
+let result = receiver.poll(stream_id, SsfPollOptions { return_immediately: Some(true), ..Default::default() }).await?;
+let set_errs = result.refused.iter()
+    .map(|r| (r.jti.clone(), SetErr::from_reason(r.reason)))
+    .collect();
+```
+
+The verification order, the reason codes (`AxiamError::set_failure_reason`) and the
+seven-day replay window are the contract's. A replay window below seven days is refused
+at configuration.
+
+## CIBA (§33)
+
+Ask AXIAM to authenticate a user on another device, then collect the tokens.
+
+```rust
+use axiam_sdk::oidc::{CibaAwaitParams, CibaInitiateParams, CibaUserHint};
+
+let mut request = CibaInitiateParams::new("openid", CibaUserHint::LoginHint("ada".into()));
+request.binding_message = Some("W4SCT".into());
+let initiated = client.ciba_initiate(request).await?;   // never retried
+match client.ciba_await(&initiated, CibaAwaitParams::default()).await {
+    Ok(tokens) => use_tokens(tokens),
+    Err(e) if e.is_access_denied() => { /* the user refused */ }
+    Err(e) if e.is_expired_token() => { /* nobody answered in time */ }
+    Err(e) => return Err(e),
+}
+```
+
+Ping mode: initiate with `CibaDelivery::Ping { client_notification_token }`, and in the
+handler of your notification endpoint call `client.ciba_handle_ping(headers, body,
+&token)?` — no I/O — answer `204`, then `client.ciba_poll(...)` once. A successful
+`ciba_initiate` proves nothing about the user: AXIAM answers an unknown or locked user
+exactly like a real one, and only `expired_token` says nobody answered. A client
+registered with a request-signing algorithm sends `request.signer =
+Some(CibaRequestSigner::from_pem(alg, &key, kid)?)`.
 
 ## Browser builds (`axiam-sdk-wasm`)
 

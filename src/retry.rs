@@ -113,6 +113,16 @@ pub(crate) fn delay_for(
     }
 }
 
+/// Is an HTTP status worth another attempt? (§16.3: `408`, `429` and `5xx`.)
+///
+/// For the non-management call sites that classify a response themselves
+/// before handing the error to [`RetryRunner`]: §2 folds a bodiless `400`
+/// into `Network` too, and a `4xx` other than `408`/`429` is a decisive answer
+/// that a retry reproduces.
+pub(crate) fn status_is_retryable(status: u16) -> bool {
+    status >= 500 || status == 408 || status == 429
+}
+
 /// Is this failure worth another attempt? (§16.3)
 ///
 /// The §2 taxonomy folds 408/429/5xx/transport all into `Network`, so "retry

@@ -117,6 +117,33 @@ pub async fn logged_in_client(server: &MockServer) -> AxiamClient {
 /// the test — for the fields that describe the principal's reach
 /// (`organization_level`, `reachable_tenant_ids`; CONTRACT.md §5.2, §5.2.3).
 pub async fn logged_in_client_as(server: &MockServer, user: serde_json::Value) -> AxiamClient {
+    login_into(server, user, anonymous_client(&server.uri())).await
+}
+
+/// [`logged_in_client`] with the §16 retry policy **on** — for the tests that
+/// assert a write is *not* retried, which a client with retry disabled would
+/// pass without proving anything.
+pub async fn logged_in_client_with_retry(server: &MockServer) -> AxiamClient {
+    let client = AxiamClient::builder()
+        .base_url(server.uri())
+        .expect("valid base_url")
+        .tenant_id(Uuid::parse_str(TENANT_ID).unwrap())
+        .org_id(Uuid::parse_str(ORG_ID).unwrap())
+        .build()
+        .expect("client builds");
+    login_into(
+        server,
+        json!({ "id": Uuid::new_v4(), "username": "admin", "email": "admin@example.com" }),
+        client,
+    )
+    .await
+}
+
+async fn login_into(
+    server: &MockServer,
+    user: serde_json::Value,
+    client: AxiamClient,
+) -> AxiamClient {
     Mock::given(method("GET"))
         .and(path("/oauth2/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body()))
@@ -142,7 +169,6 @@ pub async fn logged_in_client_as(server: &MockServer, user: serde_json::Value) -
         .mount(server)
         .await;
 
-    let client = anonymous_client(&server.uri());
     client
         .login("admin@example.com", "correct horse battery staple")
         .await

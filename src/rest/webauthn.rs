@@ -647,6 +647,7 @@ impl AxiamClient {
                 ),
                 oauth: None,
                 reason: None,
+                set_reason: None,
             });
         }
         Ok(())

@@ -78,7 +78,9 @@ mod memo;
 /// why `std::time` cannot be used directly.
 pub mod time;
 
-pub use error::{AuthzKind, AxiamError, IdTokenFailureReason, OAuthProtocolError};
+pub use error::{
+    AuthzKind, AxiamError, IdTokenFailureReason, OAuthProtocolError, SetFailureReason,
+};
 pub use sensitive::Sensitive;
 
 // Single owner of all Phase 16 module declarations (this file is final
@@ -123,6 +125,11 @@ pub mod middleware;
 #[cfg(any(feature = "rest", feature = "amqp"))]
 pub mod uma;
 pub mod webhook;
+
+// CONTRACT.md §32.7: the SSF receiver helper (SET verification and RFC 8936
+// polling). REST-only: it fetches the JWKS and polls over the REST transport.
+#[cfg(feature = "rest")]
+pub mod ssf;
 
 // §11 declarative authorization helpers: re-export the proc-macro attributes
 // from the companion `axiam-sdk-macros` crate so consumers write

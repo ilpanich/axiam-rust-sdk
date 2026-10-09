@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 162] = [
+const EXERCISED: [&str; 190] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -164,6 +164,34 @@ const EXERCISED: [&str; 162] = [
     "email_config.set_tenant",
     "email_config.delete_tenant",
     "email_config.test_tenant",
+    "directory.get",
+    "directory.set",
+    "directory.update",
+    "directory.delete",
+    "directory.link_account",
+    "directory.get_sync_status",
+    "saml.get_idp",
+    "saml.list_service_providers",
+    "saml.create_service_provider",
+    "saml.get_service_provider",
+    "saml.update_service_provider",
+    "saml.delete_service_provider",
+    "saml.parse_sp_metadata",
+    "saml.list_idp_credentials",
+    "saml.issue_idp_credential",
+    "saml.promote_idp_credential",
+    "saml.retire_idp_credential",
+    "ssf.list_streams",
+    "ssf.create_stream",
+    "ssf.get_stream",
+    "ssf.update_stream",
+    "ssf.delete_stream",
+    "scim_targets.list",
+    "scim_targets.create",
+    "scim_targets.get",
+    "scim_targets.update",
+    "scim_targets.delete",
+    "scim_targets.reconcile",
     "settings.get_org",
     "settings.set_org",
     "settings.get_effective",
@@ -1543,7 +1571,11 @@ async fn oauth2_clients_surface() {
         .create(&models::CreateOAuth2ClientRequest {
             allowed_resources: None,
             authn_request_params: None,
+            backchannel_authentication_request_signing_alg: None,
+            backchannel_client_notification_endpoint: None,
             backchannel_logout_uri: None,
+            backchannel_token_delivery_mode: None,
+            backchannel_user_code_parameter: None,
             browser_sso: None,
             dpop_bound_access_tokens: None,
             dpop_require_nonce: None,
@@ -1949,6 +1981,416 @@ async fn email_config_surface() {
         .expect("email_config.test_tenant");
 }
 
+/// Reaches every operation in the `directory` namespace.
+#[tokio::test]
+async fn directory_surface() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    // directory.get
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/directory"), 200, r#"{"base_dn": "example", "bind_dn": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "group_mappings": [], "group_member_attribute": "example", "group_nesting_depth": 1, "id": "11111111-1111-4111-8111-111111111111", "jit_provisioning": true, "kind": "open_ldap", "start_tls": true, "sync_interval_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "trust_anchors_pem": [], "updated_at": "2026-08-26T00:00:00Z", "url": "example", "user_attribute_map": {"display_name": "example", "email": "example", "external_id": "example", "username": "example"}, "user_filter": "example"}"#).await;
+    client.directory().get().await.expect("directory.get");
+
+    // directory.set
+    mount(&server, "PUT", &format!("/api/v1/tenants/{TENANT_ID}/directory"), 200, r#"{"base_dn": "example", "bind_dn": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "group_mappings": [], "group_member_attribute": "example", "group_nesting_depth": 1, "id": "11111111-1111-4111-8111-111111111111", "jit_provisioning": true, "kind": "open_ldap", "start_tls": true, "sync_interval_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "trust_anchors_pem": [], "updated_at": "2026-08-26T00:00:00Z", "url": "example", "user_attribute_map": {"display_name": "example", "email": "example", "external_id": "example", "username": "example"}, "user_filter": "example"}"#).await;
+    client
+        .directory()
+        .set(&models::SetDirectoryConfig {
+            base_dn: "example".to_string(),
+            bind_dn: "example".to_string(),
+            bind_secret: None,
+            enabled: true,
+            group_base_dn: None,
+            group_filter: None,
+            group_mappings: None,
+            group_member_attribute: None,
+            group_nesting_depth: None,
+            jit_provisioning: None,
+            kind: models::DirectoryKind::OpenLdap,
+            start_tls: true,
+            sync_interval_secs: None,
+            trust_anchors_pem: None,
+            url: "example".to_string(),
+            user_attribute_map: None,
+            user_filter: "example".to_string(),
+        })
+        .await
+        .expect("directory.set");
+
+    // directory.update
+    mount(&server, "PATCH", &format!("/api/v1/tenants/{TENANT_ID}/directory"), 200, r#"{"base_dn": "example", "bind_dn": "example", "created_at": "2026-08-26T00:00:00Z", "enabled": true, "group_mappings": [], "group_member_attribute": "example", "group_nesting_depth": 1, "id": "11111111-1111-4111-8111-111111111111", "jit_provisioning": true, "kind": "open_ldap", "start_tls": true, "sync_interval_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "trust_anchors_pem": [], "updated_at": "2026-08-26T00:00:00Z", "url": "example", "user_attribute_map": {"display_name": "example", "email": "example", "external_id": "example", "username": "example"}, "user_filter": "example"}"#).await;
+    client
+        .directory()
+        .update(&models::UpdateDirectoryConfig::default())
+        .await
+        .expect("directory.update");
+
+    // directory.delete
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/tenants/{TENANT_ID}/directory"),
+        204,
+        "",
+    )
+    .await;
+    client.directory().delete().await.expect("directory.delete");
+
+    // directory.link_account
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/directory/links"), 200, r#"{"certificates_revoked": 1, "directory_external_id": "example", "user_id": "11111111-1111-4111-8111-111111111111", "was_already_linked": true, "webauthn_credentials_deleted": 1}"#).await;
+    client
+        .directory()
+        .link_account(&models::LinkDirectoryAccount {
+            user_id: example_id(),
+        })
+        .await
+        .expect("directory.link_account");
+
+    // directory.get_sync_status
+    mount(
+        &server,
+        "GET",
+        &format!("/api/v1/tenants/{TENANT_ID}/directory/sync-status"),
+        200,
+        r#"{"full_required": true, "has_watermark": true}"#,
+    )
+    .await;
+    client
+        .directory()
+        .get_sync_status()
+        .await
+        .expect("directory.get_sync_status");
+}
+
+/// Reaches every operation in the `saml` namespace.
+#[tokio::test]
+async fn saml_surface() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    // saml.get_idp
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/saml/idp"), 200, r#"{"entity_id": "example", "metadata_served": true, "metadata_url": "example", "saml_available": true, "saml_idp_enabled": true, "slo_url": "example", "sso_url": "example", "tenant_id": "11111111-1111-4111-8111-111111111111"}"#).await;
+    client.saml().get_idp().await.expect("saml.get_idp");
+
+    // saml.list_service_providers
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/saml/service-providers"), 200, r#"{"items": [{"acs_urls": [], "allow_idp_initiated": true, "allowed_groups": [], "attribute_mappings": [], "created_at": "2026-08-26T00:00:00Z", "display_name": "example", "enabled": true, "encrypt_assertions": true, "entity_id": "example", "id": "11111111-1111-4111-8111-111111111111", "name_id_format": "persistent", "sign_responses": true, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "want_authn_requests_signed": true}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    client
+        .saml()
+        .list_service_providers(PageRequest::first(50))
+        .await
+        .expect("saml.list_service_providers");
+    client
+        .saml()
+        .list_service_providers_all(PageRequest::first(50))
+        .await
+        .expect("saml.list_service_providers auto-paging");
+
+    // saml.create_service_provider
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/saml/service-providers"), 201, r#"{"acs_urls": [], "allow_idp_initiated": true, "allowed_groups": [], "attribute_mappings": [], "created_at": "2026-08-26T00:00:00Z", "display_name": "example", "enabled": true, "encrypt_assertions": true, "entity_id": "example", "id": "11111111-1111-4111-8111-111111111111", "name_id_format": "persistent", "sign_responses": true, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "want_authn_requests_signed": true}"#).await;
+    client
+        .saml()
+        .create_service_provider(&models::SamlServiceProviderInput {
+            acs_urls: Vec::new(),
+            allow_idp_initiated: None,
+            allowed_groups: None,
+            attribute_mappings: None,
+            display_name: "example".to_string(),
+            enabled: None,
+            encrypt_assertions: None,
+            entity_id: "example".to_string(),
+            name_id_format: None,
+            sign_responses: None,
+            slo_binding: None,
+            slo_url: None,
+            sp_encryption_cert_pem: None,
+            sp_signing_cert_pem: None,
+            want_authn_requests_signed: None,
+        })
+        .await
+        .expect("saml.create_service_provider");
+
+    // saml.get_service_provider
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/saml/service-providers/{EXAMPLE_ID}"), 200, r#"{"acs_urls": [], "allow_idp_initiated": true, "allowed_groups": [], "attribute_mappings": [], "created_at": "2026-08-26T00:00:00Z", "display_name": "example", "enabled": true, "encrypt_assertions": true, "entity_id": "example", "id": "11111111-1111-4111-8111-111111111111", "name_id_format": "persistent", "sign_responses": true, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "want_authn_requests_signed": true}"#).await;
+    client
+        .saml()
+        .get_service_provider(example_id())
+        .await
+        .expect("saml.get_service_provider");
+
+    // saml.update_service_provider
+    mount(&server, "PUT", &format!("/api/v1/tenants/{TENANT_ID}/saml/service-providers/{EXAMPLE_ID}"), 200, r#"{"acs_urls": [], "allow_idp_initiated": true, "allowed_groups": [], "attribute_mappings": [], "created_at": "2026-08-26T00:00:00Z", "display_name": "example", "enabled": true, "encrypt_assertions": true, "entity_id": "example", "id": "11111111-1111-4111-8111-111111111111", "name_id_format": "persistent", "sign_responses": true, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "want_authn_requests_signed": true}"#).await;
+    client
+        .saml()
+        .update_service_provider(
+            example_id(),
+            &models::SamlServiceProviderInput {
+                acs_urls: Vec::new(),
+                allow_idp_initiated: None,
+                allowed_groups: None,
+                attribute_mappings: None,
+                display_name: "example".to_string(),
+                enabled: None,
+                encrypt_assertions: None,
+                entity_id: "example".to_string(),
+                name_id_format: None,
+                sign_responses: None,
+                slo_binding: None,
+                slo_url: None,
+                sp_encryption_cert_pem: None,
+                sp_signing_cert_pem: None,
+                want_authn_requests_signed: None,
+            },
+        )
+        .await
+        .expect("saml.update_service_provider");
+
+    // saml.delete_service_provider
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/tenants/{TENANT_ID}/saml/service-providers/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .saml()
+        .delete_service_provider(example_id())
+        .await
+        .expect("saml.delete_service_provider");
+
+    // saml.parse_sp_metadata
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/saml/parse-sp-metadata"), 200, r#"{"service_provider": {"acs_urls": [], "display_name": "example", "entity_id": "example"}, "warnings": []}"#).await;
+    client
+        .saml()
+        .parse_sp_metadata(&models::ParseSamlSpMetadata::from_url(
+            "https://sp.example/metadata",
+        ))
+        .await
+        .expect("saml.parse_sp_metadata");
+
+    // saml.list_idp_credentials
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/saml/idp-credentials"), 200, r#"[{"certificate_pem": "example", "created_at": "2026-08-26T00:00:00Z", "fingerprint": "example", "id": "11111111-1111-4111-8111-111111111111", "issuer_ca_id": "11111111-1111-4111-8111-111111111111", "not_after": "2026-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z", "serial": "example", "status": "active", "tenant_id": "11111111-1111-4111-8111-111111111111"}]"#).await;
+    client
+        .saml()
+        .list_idp_credentials()
+        .await
+        .expect("saml.list_idp_credentials");
+
+    // saml.issue_idp_credential
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/saml/idp-credentials"), 201, r#"{"certificate_pem": "example", "created_at": "2026-08-26T00:00:00Z", "fingerprint": "example", "id": "11111111-1111-4111-8111-111111111111", "issuer_ca_id": "11111111-1111-4111-8111-111111111111", "not_after": "2026-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z", "serial": "example", "status": "active", "tenant_id": "11111111-1111-4111-8111-111111111111"}"#).await;
+    client
+        .saml()
+        .issue_idp_credential(&models::IssueSamlIdpCredential {
+            issuer_ca_id: example_id(),
+            slot: models::SamlIdpSlot::Active,
+            validity_days: None,
+        })
+        .await
+        .expect("saml.issue_idp_credential");
+
+    // saml.promote_idp_credential
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/saml/idp-credentials/{EXAMPLE_ID}/promote"), 200, r#"{"active": {"certificate_pem": "example", "created_at": "2026-08-26T00:00:00Z", "fingerprint": "example", "id": "11111111-1111-4111-8111-111111111111", "issuer_ca_id": "11111111-1111-4111-8111-111111111111", "not_after": "2026-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z", "serial": "example", "status": "active", "tenant_id": "11111111-1111-4111-8111-111111111111"}}"#).await;
+    client
+        .saml()
+        .promote_idp_credential(example_id())
+        .await
+        .expect("saml.promote_idp_credential");
+
+    // saml.retire_idp_credential
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/saml/idp-credentials/{EXAMPLE_ID}/retire"), 200, r#"{"certificate_pem": "example", "created_at": "2026-08-26T00:00:00Z", "fingerprint": "example", "id": "11111111-1111-4111-8111-111111111111", "issuer_ca_id": "11111111-1111-4111-8111-111111111111", "not_after": "2026-08-26T00:00:00Z", "not_before": "2026-08-26T00:00:00Z", "serial": "example", "status": "active", "tenant_id": "11111111-1111-4111-8111-111111111111"}"#).await;
+    client
+        .saml()
+        .retire_idp_credential(example_id())
+        .await
+        .expect("saml.retire_idp_credential");
+}
+
+/// Reaches every operation in the `ssf` namespace.
+#[tokio::test]
+async fn ssf_surface() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    // ssf.list_streams
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/ssf/streams"), 200, r#"{"items": [{"audience": "example", "authorization_header_set": true, "created_at": "2026-08-26T00:00:00Z", "delivery_method": "push", "events_allowed": [], "events_delivered": [], "events_requested": [], "id": "11111111-1111-4111-8111-111111111111", "receiver_client_id": "example", "status": "enabled", "status_actor": "admin", "subject_format": "iss_sub", "tenant_id": "11111111-1111-4111-8111-111111111111", "transmitter_active": true, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    client
+        .ssf()
+        .list_streams(PageRequest::first(50))
+        .await
+        .expect("ssf.list_streams");
+    client
+        .ssf()
+        .list_streams_all(PageRequest::first(50))
+        .await
+        .expect("ssf.list_streams auto-paging");
+
+    // ssf.create_stream
+    mount(&server, "POST", &format!("/api/v1/tenants/{TENANT_ID}/ssf/streams"), 201, r#"{"audience": "example", "authorization_header_set": true, "created_at": "2026-08-26T00:00:00Z", "delivery_method": "push", "events_allowed": [], "events_delivered": [], "events_requested": [], "id": "11111111-1111-4111-8111-111111111111", "receiver_client_id": "example", "status": "enabled", "status_actor": "admin", "subject_format": "iss_sub", "tenant_id": "11111111-1111-4111-8111-111111111111", "transmitter_active": true, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    client
+        .ssf()
+        .create_stream(&models::SsfStreamInput {
+            audience: "example".to_string(),
+            authorization_header: None,
+            clear_authorization_header: None,
+            delivery_method: models::SsfDeliveryMethod::Push,
+            description: None,
+            endpoint_url: None,
+            events_allowed: Vec::new(),
+            events_requested: None,
+            receiver_client_id: "example".to_string(),
+            status: None,
+            status_reason: None,
+            subject_format: None,
+        })
+        .await
+        .expect("ssf.create_stream");
+
+    // ssf.get_stream
+    mount(&server, "GET", &format!("/api/v1/tenants/{TENANT_ID}/ssf/streams/{EXAMPLE_ID}"), 200, r#"{"audience": "example", "authorization_header_set": true, "created_at": "2026-08-26T00:00:00Z", "delivery_method": "push", "events_allowed": [], "events_delivered": [], "events_requested": [], "id": "11111111-1111-4111-8111-111111111111", "receiver_client_id": "example", "status": "enabled", "status_actor": "admin", "subject_format": "iss_sub", "tenant_id": "11111111-1111-4111-8111-111111111111", "transmitter_active": true, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    client
+        .ssf()
+        .get_stream(example_id())
+        .await
+        .expect("ssf.get_stream");
+
+    // ssf.update_stream
+    mount(&server, "PUT", &format!("/api/v1/tenants/{TENANT_ID}/ssf/streams/{EXAMPLE_ID}"), 200, r#"{"audience": "example", "authorization_header_set": true, "created_at": "2026-08-26T00:00:00Z", "delivery_method": "push", "events_allowed": [], "events_delivered": [], "events_requested": [], "id": "11111111-1111-4111-8111-111111111111", "receiver_client_id": "example", "status": "enabled", "status_actor": "admin", "subject_format": "iss_sub", "tenant_id": "11111111-1111-4111-8111-111111111111", "transmitter_active": true, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    client
+        .ssf()
+        .update_stream(
+            example_id(),
+            &models::SsfStreamInput {
+                audience: "example".to_string(),
+                authorization_header: None,
+                clear_authorization_header: None,
+                delivery_method: models::SsfDeliveryMethod::Push,
+                description: None,
+                endpoint_url: None,
+                events_allowed: Vec::new(),
+                events_requested: None,
+                receiver_client_id: "example".to_string(),
+                status: None,
+                status_reason: None,
+                subject_format: None,
+            },
+        )
+        .await
+        .expect("ssf.update_stream");
+
+    // ssf.delete_stream
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/tenants/{TENANT_ID}/ssf/streams/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .ssf()
+        .delete_stream(example_id())
+        .await
+        .expect("ssf.delete_stream");
+}
+
+/// Reaches every operation in the `scim_targets` namespace.
+#[tokio::test]
+async fn scim_targets_surface() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    // scim_targets.list
+    mount(&server, "GET", "/api/v1/scim-targets", 200, r#"{"items": [{"auth": {"type": "bearer"}, "base_url": "example", "created_at": "2026-08-26T00:00:00Z", "deprovision": "deactivate", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "name": "example", "push_groups": true, "scope": {"type": "all_users"}, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "user_name_from": "username"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    client
+        .scim_targets()
+        .list(PageRequest::first(50))
+        .await
+        .expect("scim_targets.list");
+    client
+        .scim_targets()
+        .list_all(PageRequest::first(50))
+        .await
+        .expect("scim_targets.list auto-paging");
+
+    // scim_targets.create
+    mount(&server, "POST", "/api/v1/scim-targets", 201, r#"{"auth": {"type": "bearer"}, "base_url": "example", "created_at": "2026-08-26T00:00:00Z", "deprovision": "deactivate", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "name": "example", "push_groups": true, "scope": {"type": "all_users"}, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "user_name_from": "username"}"#).await;
+    client
+        .scim_targets()
+        .create(&models::ScimTargetInput {
+            auth: models::ScimTargetAuth::Bearer {},
+            base_url: "example".to_string(),
+            credential: None,
+            deprovision: None,
+            enabled: None,
+            name: "example".to_string(),
+            push_groups: None,
+            scope: models::ScimTargetScope::AllUsers {},
+            user_name_from: None,
+        })
+        .await
+        .expect("scim_targets.create");
+
+    // scim_targets.get
+    mount(&server, "GET", &format!("/api/v1/scim-targets/{EXAMPLE_ID}"), 200, r#"{"auth": {"type": "bearer"}, "base_url": "example", "created_at": "2026-08-26T00:00:00Z", "deprovision": "deactivate", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "name": "example", "push_groups": true, "scope": {"type": "all_users"}, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "user_name_from": "username"}"#).await;
+    client
+        .scim_targets()
+        .get(example_id())
+        .await
+        .expect("scim_targets.get");
+
+    // scim_targets.update
+    mount(&server, "PUT", &format!("/api/v1/scim-targets/{EXAMPLE_ID}"), 200, r#"{"auth": {"type": "bearer"}, "base_url": "example", "created_at": "2026-08-26T00:00:00Z", "deprovision": "deactivate", "enabled": true, "id": "11111111-1111-4111-8111-111111111111", "name": "example", "push_groups": true, "scope": {"type": "all_users"}, "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "user_name_from": "username"}"#).await;
+    client
+        .scim_targets()
+        .update(
+            example_id(),
+            &models::ScimTargetInput {
+                auth: models::ScimTargetAuth::Bearer {},
+                base_url: "example".to_string(),
+                credential: None,
+                deprovision: None,
+                enabled: None,
+                name: "example".to_string(),
+                push_groups: None,
+                scope: models::ScimTargetScope::AllUsers {},
+                user_name_from: None,
+            },
+        )
+        .await
+        .expect("scim_targets.update");
+
+    // scim_targets.delete
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/scim-targets/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .scim_targets()
+        .delete(example_id())
+        .await
+        .expect("scim_targets.delete");
+
+    // scim_targets.reconcile
+    mount(
+        &server,
+        "POST",
+        &format!("/api/v1/scim-targets/{EXAMPLE_ID}/reconcile"),
+        202,
+        r#"{"status": "example", "target_id": "11111111-1111-4111-8111-111111111111"}"#,
+    )
+    .await;
+    client
+        .scim_targets()
+        .reconcile(example_id())
+        .await
+        .expect("scim_targets.reconcile");
+}
+
 /// Reaches every operation in the `settings` namespace.
 #[tokio::test]
 async fn settings_surface() {
@@ -1996,8 +2438,10 @@ async fn settings_surface() {
             require_lowercase: true,
             require_symbols: true,
             require_uppercase: true,
+            saml_idp_enabled: None,
             sensitive_scopes_enabled: None,
             server_cert_allowed_names: None,
+            ssf_enabled: None,
             webauthn_user_verification: None,
         })
         .await
@@ -2358,7 +2802,14 @@ async fn platform_surface() {
     let client = logged_in_client(&server).await;
 
     // platform.health
-    mount(&server, "GET", "/health", 200, r#"{"status": "example"}"#).await;
+    mount(
+        &server,
+        "GET",
+        "/health",
+        200,
+        r#"{"profile": "example", "status": "example"}"#,
+    )
+    .await;
     client.platform().health().await.expect("platform.health");
 
     // platform.ready

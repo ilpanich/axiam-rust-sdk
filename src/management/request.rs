@@ -29,6 +29,9 @@ pub(crate) enum Verb {
     Post,
     /// `PUT`.
     Put,
+    /// `PATCH` — `directory.update` (§30.1), the registry's one sparse
+    /// update that is not a `PUT`.
+    Patch,
     /// `DELETE`.
     Delete,
 }
@@ -39,6 +42,7 @@ impl Verb {
             Verb::Get => "GET",
             Verb::Post => "POST",
             Verb::Put => "PUT",
+            Verb::Patch => "PATCH",
             Verb::Delete => "DELETE",
         }
     }
@@ -60,6 +64,7 @@ impl Verb {
             Verb::Get => http.get(url),
             Verb::Post => http.post(url),
             Verb::Put => http.put(url),
+            Verb::Patch => http.patch(url),
             Verb::Delete => http.delete(url),
         }
     }
