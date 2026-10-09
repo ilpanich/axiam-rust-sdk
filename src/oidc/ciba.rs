@@ -517,10 +517,7 @@ impl AxiamClient {
             .map_err(PollFailure::terminal)?;
         let configuration = match params.configuration {
             Some(c) => c,
-            None => self
-                .oidc_discover()
-                .await
-                .map_err(PollFailure::terminal)?,
+            None => self.oidc_discover().await.map_err(PollFailure::terminal)?,
         };
         let tenant_id = self
             .resolve_oidc_tenant_id(params.tenant_id)

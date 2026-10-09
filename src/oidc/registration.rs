@@ -194,7 +194,10 @@ impl ClientRegistration {
             }
         };
         put("client_name", self.client_name.clone().map(Value::String));
-        put("redirect_uris", self.redirect_uris.as_deref().map(string_list));
+        put(
+            "redirect_uris",
+            self.redirect_uris.as_deref().map(string_list),
+        );
         put("grant_types", self.grant_types.as_deref().map(string_list));
         put(
             "response_types",
