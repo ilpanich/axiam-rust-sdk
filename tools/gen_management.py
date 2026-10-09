@@ -720,6 +720,7 @@ pub(crate) fn default_true() -> bool {
 }
 """]
 
+    twins: list[str] = []
     for name in names:
         schema = types.schemas[name]
         rname = pascal(name)
@@ -734,6 +735,8 @@ pub(crate) fn default_true() -> bool {
         if external:
             out.append(emit_external_union(rname, schema, external, types))
             continue
+        if secrets.get(name):
+            twins.append(f"{rname}Wire")
         out.append(
             emit_struct(
                 rname,
@@ -744,6 +747,39 @@ pub(crate) fn default_true() -> bool {
                 projections.get(name, []),
             )
         )
+    out.append(emit_twin_debug_test(twins))
+    return "\n".join(out)
+
+
+def emit_twin_debug_test(twins: list[str]) -> str:
+    """A test that no wire twin is `Debug` (CONTRACT.md §7 rule 1).
+
+    A twin holds the plaintext of the `Sensitive` field it mirrors, so a
+    derived `Debug` on it is one `{:?}` away from printing a secret.
+    """
+    out = [
+        "/// CONTRACT.md §7 rule 1: a wire twin holds the plaintext its public type",
+        "/// wraps in `Sensitive`, so no twin may be `Debug`.",
+        "#[cfg(test)]",
+        "mod wire_twin_tests {",
+        "    #[test]",
+        "    fn no_wire_twin_is_debug() {",
+        "        let debug: Vec<&str> = [",
+    ]
+    for twin in twins:
+        out.append(
+            f'            ("{twin}", crate::sensitive::implements_debug!(super::{twin})),'
+        )
+    out.extend([
+        "        ]",
+        "        .into_iter()",
+        "        .filter(|(_, is_debug)| *is_debug)",
+        "        .map(|(name, _)| name)",
+        "        .collect();",
+        '        assert!(debug.is_empty(), "wire twins deriving Debug: {debug:?}");',
+        "    }",
+        "}",
+    ])
     return "\n".join(out)
 
 
@@ -973,7 +1009,9 @@ def emit_sensitive_struct(
 
     wire = f"{rname}Wire"
     out.append(f"/// Wire twin of [`{rname}`] -- plain strings, private, never logged.")
-    wire_derives = ["Debug", "Clone", "Serialize", "Deserialize"]
+    out.append("///")
+    out.append("/// Not `Debug`: it holds the plaintext the public type wraps (§7 rule 1).")
+    wire_derives = ["Clone", "Serialize", "Deserialize"]
     if all_optional:
         wire_derives.insert(2, "Default")
     out.append(f"#[derive({', '.join(wire_derives)})]")

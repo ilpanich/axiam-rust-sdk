@@ -158,7 +158,9 @@ struct LoginSuccessResponseWire {
 }
 
 /// `202 Accepted` body from `/api/v1/auth/login` when MFA is required.
-#[derive(Debug, Deserialize)]
+///
+/// Not `Debug`: it holds the challenge token until it is wrapped (§7 rule 1).
+#[derive(Deserialize)]
 struct MfaRequiredResponseWire {
     challenge_token: String,
     available_methods: Vec<String>,
@@ -1091,5 +1093,18 @@ mod tests {
             "challenge_token must never appear in Debug output: {rendered}"
         );
         assert!(rendered.contains("[REDACTED]"));
+    }
+}
+
+/// CONTRACT.md §7 rule 1: these wire structs hold the plaintext of a value
+/// the public type wraps in `Sensitive`, so none of them may be `Debug`.
+#[cfg(test)]
+mod wire_redaction_tests {
+    #[test]
+    fn no_wire_struct_holding_a_secret_is_debug() {
+        assert!(
+            !crate::sensitive::implements_debug!(super::MfaRequiredResponseWire),
+            "MfaRequiredResponseWire is Debug"
+        );
     }
 }

@@ -52,7 +52,8 @@ struct TokenExchangeForm<'a> {
     client_secret: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
+/// Not `Debug`: it holds the token until it is wrapped (§7 rule 1).
+#[derive(Deserialize)]
 struct TokenExchangeResponseWire {
     access_token: String,
     issued_token_type: String,
@@ -287,5 +288,18 @@ impl AxiamClient {
             expires_in: wire.expires_in,
             scope: wire.scope,
         })
+    }
+}
+
+/// CONTRACT.md §7 rule 1: these wire structs hold the plaintext of a value
+/// the public type wraps in `Sensitive`, so none of them may be `Debug`.
+#[cfg(test)]
+mod wire_redaction_tests {
+    #[test]
+    fn no_wire_struct_holding_a_secret_is_debug() {
+        assert!(
+            !crate::sensitive::implements_debug!(super::TokenExchangeResponseWire),
+            "TokenExchangeResponseWire is Debug"
+        );
     }
 }

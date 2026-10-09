@@ -54,7 +54,8 @@ struct IntrospectOrRevokeForm<'a> {
 }
 
 /// 200 body of `POST /oauth2/token` (wire schema `TokenResponse`).
-#[derive(Debug, Deserialize)]
+/// Not `Debug`: it holds the tokens until they are wrapped (§7 rule 1).
+#[derive(Deserialize)]
 pub(crate) struct TokenResponseWire {
     pub(crate) access_token: String,
     pub(crate) token_type: String,
@@ -1118,5 +1119,18 @@ impl AxiamClient {
             expires_in: wire.expires_in,
             redirect_uri: wire.redirect_uri,
         })
+    }
+}
+
+/// CONTRACT.md §7 rule 1: these wire structs hold the plaintext of a value
+/// the public type wraps in `Sensitive`, so none of them may be `Debug`.
+#[cfg(test)]
+mod wire_redaction_tests {
+    #[test]
+    fn no_wire_struct_holding_a_secret_is_debug() {
+        assert!(
+            !crate::sensitive::implements_debug!(super::TokenResponseWire),
+            "TokenResponseWire is Debug"
+        );
     }
 }
