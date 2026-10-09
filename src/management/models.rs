@@ -3492,10 +3492,10 @@ pub struct Organization {
 }
 
 /// `POST …/saml/parse-sp-metadata` body: **exactly one** of the two members.
-/// Every field is optional, so this is a **sparse** body: what you leave
-/// `None` is left unchanged, and is omitted from the wire request entirely
-/// rather than sent as `null` (§27.4 rule 5). Construct it with
-/// `..Default::default()`.
+/// Every field is `Option` only because the body is a choice: set **exactly
+/// one** (§29.2), most simply with `ParseSamlSpMetadata::from_url` or
+/// `ParseSamlSpMetadata::from_xml`. Both or neither is refused locally,
+/// before a request is sent. Nothing is stored: the result is a draft.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ParseSamlSpMetadata {
     /// An `https` URL the server fetches the document from, once, through its
