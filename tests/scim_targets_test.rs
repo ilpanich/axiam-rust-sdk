@@ -165,12 +165,32 @@ async fn update_without_a_credential_sends_no_key_and_the_variants_keep_their_sh
         .update(id, &input(Some(c.clone())))
         .await
         .expect("replace");
+    // Contract 1.60: `expected_updated_at` is absent when unset, and sent as
+    // the very string given -- fractional seconds and offset included, never
+    // re-formatted -- when set.
+    let read_at = "2026-10-05T00:00:00.123456789+02:00";
+    client
+        .scim_targets()
+        .update(
+            id,
+            &models::ScimTargetInput {
+                expected_updated_at: Some(read_at.into()),
+                ..input(None)
+            },
+        )
+        .await
+        .expect("conditional");
     let sent = seen.lock().unwrap();
     assert!(
         json_of(&sent[0].1).get("credential").is_none(),
         "no credential key"
     );
     assert_eq!(json_of(&sent[1].1)["credential"], c);
+    assert!(
+        json_of(&sent[0].1).get("expected_updated_at").is_none(),
+        "unset is not sent"
+    );
+    assert_eq!(json_of(&sent[2].1)["expected_updated_at"], read_at);
     // `name`, `base_url`, `auth` and `scope` are non-`Option` fields with no
     // `Default`: an input without them does not compile.
 
@@ -204,6 +224,34 @@ async fn update_without_a_credential_sends_no_key_and_the_variants_keep_their_sh
     for (got, want) in shapes {
         assert_eq!(got, want);
     }
+}
+
+#[tokio::test]
+async fn an_overtaken_conditional_update_surfaces_409_and_is_sent_once() {
+    // §31.3 rule 4: the target changed since `expected_updated_at`; the SDK
+    // surfaces the conflict and does not retry it (§31.7).
+    let server = MockServer::start().await;
+    let client = logged_in_client_with_retry(&server).await;
+    let id = Uuid::new_v4();
+    let seen = capture(
+        &server,
+        "PUT",
+        format!("{TARGETS}/{id}"),
+        ResponseTemplate::new(409).set_body_json(
+            json!({"error": "conflict", "message": "the SCIM target changed since it was read"}),
+        ),
+    )
+    .await;
+    let read: models::ScimTargetResponse = serde_json::from_value(target_body(json!({}))).unwrap();
+    let body = models::ScimTargetInput::from(&read);
+    let e = client.scim_targets().update(id, &body).await.unwrap_err();
+    assert!(e.is_conflict(), "{e}");
+    let sent = seen.lock().unwrap();
+    assert_eq!(sent.len(), 1, "a 409 is never retried");
+    assert_eq!(
+        json_of(&sent[0].1)["expected_updated_at"],
+        "2026-10-05T00:00:00Z"
+    );
 }
 
 // ── 4. Open decoding and pagination ─────────────────────────────────────────
@@ -416,4 +464,9 @@ fn a_read_converts_into_the_replacement_body_without_a_credential() {
     );
     assert_eq!(body.base_url, t.base_url);
     assert_eq!(body.enabled, Some(true));
+    assert_eq!(
+        body.expected_updated_at.as_deref(),
+        Some(t.updated_at.as_str()),
+        "the read-modify-write form sends the version it read (§31.3 rule 4)"
+    );
 }

@@ -116,6 +116,17 @@ impl<'c> Federation<'c> {
     }
 
     /// `PUT /api/v1/federation-configs/{id}`
+    ///
+    /// A sparse body (§27.15 note 8): a member left `None` is not sent and stays
+    /// as stored. `metadata_url`, `idp_signing_cert_pem`,
+    /// `idp_metadata_signing_cert_pem`, `provider_slug`, the three OAuth2
+    /// endpoints, `apple_team_id`, `apple_key_id` and `button_icon` set to
+    /// `Some(None)` are sent as `null` and **clear** the value -- still held to
+    /// the relational rules: an `OAuth2` configuration's three endpoints cannot
+    /// be cleared (`400`), and the two Apple ids clear only together. The other
+    /// members cannot be cleared. `allow_sha1_signatures` and
+    /// `idp_metadata_signing_cert_pem` apply to SAML configurations only (`400`
+    /// otherwise).
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn update_config(

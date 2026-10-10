@@ -2065,6 +2065,7 @@ pub enum FailurePolicy {
 pub struct FederationConfigResponse {
     /// SAML only: whether IdP responses signed with SHA-1 are accepted (default
     /// `false`; #531).
+    #[serde(default)]
     pub allow_sha1_signatures: bool,
     /// Whether tenants of this organization may inherit this provider.
     pub allow_tenant_inheritance: bool,
@@ -6043,15 +6044,31 @@ pub struct UpdateFederationConfigRequest {
     /// Accepted external IdP tenants for a templated issuer. Replaced wholesale.
     pub allowed_issuer_tenants: Option<Vec<String>>,
     /// Apple Key ID. Explicit `null` clears it.
-    pub apple_key_id: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub apple_key_id: Option<Option<String>>,
     /// Apple Team ID. Explicit `null` clears it.
-    pub apple_team_id: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub apple_team_id: Option<Option<String>>,
     /// `attribute_map`.
     pub attribute_map: Option<serde_json::Value>,
     /// OAuth2-variant authorization endpoint. Explicit `null` clears it.
-    pub authorization_endpoint: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub authorization_endpoint: Option<Option<String>>,
     /// Sign-in-button icon for a generic provider. Explicit `null` clears it.
-    pub button_icon: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub button_icon: Option<Option<String>>,
     /// `client_id`.
     pub client_id: Option<String>,
     /// `client_secret`.
@@ -6065,29 +6082,53 @@ pub struct UpdateFederationConfigRequest {
     /// clears it; omitted leaves it. Clearing it is audited
     /// (`federation.metadata_signing_cert_cleared`), and so is replacing it with
     /// a different certificate (`federation.metadata_signing_cert_changed`).
-    pub idp_metadata_signing_cert_pem: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub idp_metadata_signing_cert_pem: Option<Option<String>>,
     /// PEM-encoded X.509 certificate for verifying SAML assertions (CQ-B40/REQ-14
     /// AC-5). Explicit `null` clears the stored cert; omitted leaves it.
-    pub idp_signing_cert_pem: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub idp_signing_cert_pem: Option<Option<String>>,
     /// OIDC discovery or SAML metadata URL. Explicit `null` clears it; omitted
     /// leaves it.
-    pub metadata_url: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub metadata_url: Option<Option<String>>,
     /// `provider`.
     pub provider: Option<String>,
     /// Operator-chosen identifier for a `generic_*` kind. Explicit `null` clears
     /// it.
-    pub provider_slug: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub provider_slug: Option<Option<String>>,
     /// Send PKCE on the authorization request.
     pub require_pkce: Option<bool>,
     /// Scopes to request. Replaced wholesale; empty restores the per-kind
     /// default.
     pub scopes: Option<Vec<String>>,
     /// OAuth2-variant token endpoint. Explicit `null` clears it.
-    pub token_endpoint: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub token_endpoint: Option<Option<String>>,
     /// `token_exchange`.
     pub token_exchange: Option<TokenExchangeTrustRequest>,
     /// OAuth2-variant userinfo endpoint. Explicit `null` clears it.
-    pub userinfo_endpoint: Option<String>,
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub userinfo_endpoint: Option<Option<String>>,
 }
 
 /// Wire twin of [`UpdateFederationConfigRequest`] -- plain strings, private, never logged.
@@ -6103,42 +6144,82 @@ pub(crate) struct UpdateFederationConfigRequestWire {
     pub(crate) allowed_algorithms: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_issuer_tenants: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) apple_key_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) apple_team_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) apple_key_id: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) apple_team_id: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attribute_map: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) authorization_endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) button_icon: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) authorization_endpoint: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) button_icon: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) idp_metadata_signing_cert_pem: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) idp_signing_cert_pem: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) metadata_url: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) idp_metadata_signing_cert_pem: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) idp_signing_cert_pem: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) metadata_url: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_slug: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) provider_slug: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) require_pkce: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) token_endpoint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) token_endpoint: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) token_exchange: Option<TokenExchangeTrustRequest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) userinfo_endpoint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) userinfo_endpoint: Option<Option<String>>,
 }
 
 impl From<&UpdateFederationConfigRequest> for UpdateFederationConfigRequestWire {

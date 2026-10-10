@@ -108,6 +108,10 @@ impl From<&models::SsfStream> for models::SsfStreamInput {
 
 /// Read-modify-write for `scim_targets.update`. `credential` is left `None` —
 /// absent keeps the stored one, unless the write moves its URL (§31.3 rule 2).
+/// `expected_updated_at` carries the `updated_at` that was read, so the
+/// replacement is refused `409` if another administrator wrote the target in
+/// between (§31.3 rule 4, contract 1.60); set it to `None` for the old
+/// last-writer-wins behaviour.
 impl From<&models::ScimTargetResponse> for models::ScimTargetInput {
     fn from(t: &models::ScimTargetResponse) -> Self {
         Self {
@@ -116,7 +120,7 @@ impl From<&models::ScimTargetResponse> for models::ScimTargetInput {
             credential: None,
             deprovision: Some(t.deprovision.clone()),
             enabled: Some(t.enabled),
-            expected_updated_at: None,
+            expected_updated_at: Some(t.updated_at.clone()),
             name: t.name.clone(),
             push_groups: Some(t.push_groups),
             scope: t.scope.clone(),
