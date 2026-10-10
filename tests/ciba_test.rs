@@ -576,6 +576,100 @@ async fn t07_no_request_after_expires_in_and_expired_token_is_raised_locally() {
     assert_eq!(at, [5, 10], "nothing at 15 s, past the 12 s deadline");
 }
 
+// §33.8 test 7, contract 1.60 (§34.2 P10, §34.4 B3): a `503` whose
+// `Retry-After` reaches past the deadline makes the loop wait no longer than
+// the deadline and send nothing after it. The retry's wait is served on the
+// injected clock, so no test here sleeps.
+fn retry_after(seconds: u64) -> ResponseTemplate {
+    ResponseTemplate::new(503).insert_header("Retry-After", seconds.to_string().as_str())
+}
+
+#[tokio::test]
+async fn t07_a_retry_after_past_the_deadline_is_capped_and_nothing_follows_it() {
+    let server = MockServer::start().await;
+    let (client, _) = make_client(&server);
+    let clock = TestClock::new();
+    // Every answer is the same `503` with an hour-long `Retry-After`: were the
+    // retry's wait not capped, the loop would wait a virtual hour past a 12 s
+    // deadline and send a second request.
+    let seen = token_script(&server, Some(clock.clone()), vec![retry_after(3600)]).await;
+    let e = client
+        .ciba_await(
+            &initiated(&random(), 12, 5, clock.start),
+            CibaAwaitParams {
+                configuration: Some(configuration(&server)),
+                clock: Some(clock.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(e.is_expired_token(), "the local expired_token, got {e}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "one request, at 5 s; nothing after the deadline"
+    );
+    assert_eq!(
+        clock.sleeps(),
+        [5, 7],
+        "the interval, then the retry's wait capped at the 7 s that were left"
+    );
+    assert!(clock.elapsed() <= Duration::from_secs(12), "never past it");
+}
+
+#[tokio::test]
+async fn t07_a_retry_after_inside_the_deadline_is_honoured_as_a_minimum_wait() {
+    let server = MockServer::start().await;
+    let (client, _) = make_client(&server);
+    let tokens = tokens_with_id_token(&server).await;
+    let clock = TestClock::new();
+    let seen = token_script(&server, Some(clock.clone()), vec![retry_after(2), tokens]).await;
+    client
+        .ciba_await(
+            &initiated(&random(), 12, 5, clock.start),
+            CibaAwaitParams {
+                configuration: Some(configuration(&server)),
+                clock: Some(clock.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a Retry-After inside the deadline is waited out and the retry succeeds");
+    assert_eq!(clock.sleeps(), [5, 2], "Retry-After is a minimum wait");
+    let at: Vec<u64> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.at.as_secs())
+        .collect();
+    assert_eq!(at, [5, 7], "the retry goes out at 7 s");
+}
+
+#[tokio::test]
+async fn t07_a_wait_that_ends_at_the_deadline_is_followed_by_no_request() {
+    let server = MockServer::start().await;
+    let (client, _) = make_client(&server);
+    let tokens = tokens_with_id_token(&server).await;
+    let clock = TestClock::new();
+    // 5 s interval + a 7 s Retry-After lands exactly on the 12 s deadline.
+    let seen = token_script(&server, Some(clock.clone()), vec![retry_after(7), tokens]).await;
+    let e = client
+        .ciba_await(
+            &initiated(&random(), 12, 5, clock.start),
+            CibaAwaitParams {
+                configuration: Some(configuration(&server)),
+                clock: Some(clock.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(e.is_expired_token(), "{e}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "no request at the deadline");
+    assert_eq!(clock.sleeps(), [5, 7]);
+}
+
 // ── 8. Transient failure is not terminal ────────────────────────────────────
 
 #[tokio::test]

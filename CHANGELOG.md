@@ -34,6 +34,15 @@ with the generated-field rows).
   exhaustive destructuring need it); `ReplayStoreError` is
   `Box<dyn std::error::Error + Send + Sync>`.
 
+### Fixed (contract 1.60)
+
+- A §16 retry inside `ciba_poll`, as `ciba_await` calls it, never waits past the deadline
+  `received_at + expires_in` (B3, P10, R-14): the retry's wait, `Retry-After` included, is
+  capped at the time left and served on the injected `CibaClock`; a wait that ends at the
+  deadline is followed by no request and `ciba_await` raises the local `expired_token`. A bare
+  `ciba_poll` has no deadline and keeps §16's bounded budget. §33.8 test 7 gains the
+  `503`-with-`Retry-After` case.
+
 ### Fixed
 
 - `SsfReceiver::poll` no longer loses events (R-1, §34.2 P1): it runs steps 1 – 8 over the

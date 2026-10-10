@@ -190,8 +190,48 @@ pub(crate) struct RetryRunner<'a> {
     pub(crate) sleeper: &'a dyn Sleeper,
 }
 
+/// A deadline that bounds a retry's wait (contract 1.60, P10: a §16 retry
+/// inside `ciba_poll`, as `ciba_await` calls it, MUST NOT wait past the
+/// request's deadline). `now` and `sleeper` are the caller's own clock, so the
+/// bound is testable without sleeping and is served on the same clock as the
+/// loop's other waits.
+pub(crate) struct RetryBound<'a> {
+    /// The instant after which no request may be sent.
+    pub(crate) deadline: crate::time::Instant,
+    /// The caller's clock reading.
+    pub(crate) now: &'a (dyn Fn() -> crate::time::Instant + Send + Sync),
+    /// Serves a wait on the caller's clock.
+    pub(crate) sleeper: &'a dyn Sleeper,
+}
+
+/// Why a bounded run ended without a value.
+pub(crate) struct Ended {
+    /// The last attempt's failure.
+    pub(crate) err: AxiamError,
+    /// True when the retry's wait was capped at the deadline and served: no
+    /// request follows it, and the caller reports its own deadline outcome.
+    pub(crate) at_deadline: bool,
+}
+
 impl RetryRunner<'_> {
-    pub(crate) async fn run<T, F, Fut>(&self, mut op: F) -> Result<T, AxiamError>
+    pub(crate) async fn run<T, F, Fut>(&self, op: F) -> Result<T, AxiamError>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: Future<Output = Result<T, Attempt>>,
+    {
+        self.run_until(None, op).await.map_err(|ended| ended.err)
+    }
+
+    /// [`Self::run`] with an optional deadline. With one, a retry's wait — the
+    /// jittered backoff raised to `Retry-After` — is capped at the time left,
+    /// the wait is served on the bound's own clock, and when the wait ends at
+    /// the deadline no request follows ([`Ended::at_deadline`]). `None` is
+    /// [`Self::run`] exactly.
+    pub(crate) async fn run_until<T, F, Fut>(
+        &self,
+        bound: Option<&RetryBound<'_>>,
+        mut op: F,
+    ) -> Result<T, Ended>
     where
         F: FnMut(u32) -> Fut,
         Fut: Future<Output = Result<T, Attempt>>,
@@ -207,9 +247,20 @@ impl RetryRunner<'_> {
                 Err(Attempt { err, retry_after }) => {
                     let last = attempt >= cap;
                     if last || !is_retryable(&err) {
-                        return Err(err);
+                        return Err(Ended {
+                            err,
+                            at_deadline: false,
+                        });
                     }
-                    let delay = delay_for(attempt, retry_after, self.jitter);
+                    let mut delay = delay_for(attempt, retry_after, self.jitter);
+                    let mut at_deadline = false;
+                    if let Some(bound) = bound {
+                        let left = bound.deadline.saturating_duration_since((bound.now)());
+                        if delay >= left {
+                            delay = left;
+                            at_deadline = true;
+                        }
+                    }
                     self.telemetry.emit(TelemetryEvent::Retry {
                         operation: self.operation,
                         attempt,
@@ -218,7 +269,20 @@ impl RetryRunner<'_> {
                         // it never carries a token.
                         reason: err.to_string(),
                     });
-                    self.sleeper.sleep(delay).await;
+                    match bound {
+                        Some(bound) => {
+                            if !delay.is_zero() {
+                                bound.sleeper.sleep(delay).await;
+                            }
+                        }
+                        None => self.sleeper.sleep(delay).await,
+                    }
+                    if at_deadline {
+                        return Err(Ended {
+                            err,
+                            at_deadline: true,
+                        });
+                    }
                     attempt += 1;
                 }
             }
@@ -495,6 +559,121 @@ mod tests {
         assert_eq!(
             *sleeper.delays.lock().unwrap(),
             vec![Duration::from_secs(2), Duration::from_secs(2)]
+        );
+    }
+
+    /// A hand-wound clock: `sleep` advances it, so a bound is testable
+    /// without sleeping.
+    struct Wound {
+        start: crate::time::Instant,
+        offset: std::sync::Mutex<Duration>,
+        waits: std::sync::Mutex<Vec<Duration>>,
+    }
+    impl Wound {
+        fn new() -> Self {
+            Self {
+                start: crate::time::Instant::now(),
+                offset: Default::default(),
+                waits: Default::default(),
+            }
+        }
+        fn now(&self) -> crate::time::Instant {
+            self.start + *self.offset.lock().unwrap()
+        }
+    }
+    impl Sleeper for Wound {
+        fn sleep(&self, d: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            *self.offset.lock().unwrap() += d;
+            self.waits.lock().unwrap().push(d);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bound_caps_the_wait_at_the_deadline_and_no_request_follows_it() {
+        let tel = Telemetry::default();
+        let unused = RecordingSleeper::default();
+        let clock = Wound::new();
+        let now = || clock.now();
+        let bound = RetryBound {
+            deadline: clock.start + Duration::from_secs(7),
+            now: &now,
+            sleeper: &clock,
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let out: Result<(), _> = runner(true, &tel, &Pinned(1.0), &unused)
+            .run_until(Some(&bound), |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Err(Attempt {
+                        err: AxiamError::network("503"),
+                        retry_after: Some(Duration::from_secs(3600)),
+                    })
+                }
+            })
+            .await;
+
+        let ended = out.expect_err("the deadline ends the run");
+        assert!(ended.at_deadline);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*clock.waits.lock().unwrap(), vec![Duration::from_secs(7)]);
+        assert!(
+            unused.delays.lock().unwrap().is_empty(),
+            "the wait is served on the bound's clock, not the runner's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_leaves_a_wait_that_ends_before_the_deadline_alone() {
+        let tel = Telemetry::default();
+        let unused = RecordingSleeper::default();
+        let clock = Wound::new();
+        let now = || clock.now();
+        let bound = RetryBound {
+            deadline: clock.start + Duration::from_secs(7),
+            now: &now,
+            sleeper: &clock,
+        };
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let out = runner(true, &tel, &Pinned(0.0), &unused)
+            .run_until(Some(&bound), |_| {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        Err(Attempt {
+                            err: AxiamError::network("503"),
+                            retry_after: Some(Duration::from_secs(2)),
+                        })
+                    } else {
+                        Ok(1u32)
+                    }
+                }
+            })
+            .await;
+
+        assert_eq!(out.ok(), Some(1));
+        assert_eq!(*clock.waits.lock().unwrap(), vec![Duration::from_secs(2)]);
+    }
+
+    #[tokio::test]
+    async fn no_bound_is_the_plain_policy() {
+        let tel = Telemetry::default();
+        let sleeper = RecordingSleeper::default();
+        let out: Result<(), _> = runner(true, &tel, &Pinned(1.0), &sleeper)
+            .run_until(None, |_| async {
+                Err(Attempt {
+                    err: AxiamError::network("503"),
+                    retry_after: Some(Duration::from_secs(3600)),
+                })
+            })
+            .await;
+        assert!(!out.expect_err("exhausted").at_deadline);
+        assert_eq!(
+            *sleeper.delays.lock().unwrap(),
+            vec![Duration::from_secs(3600), Duration::from_secs(3600)],
+            "an unbounded Retry-After is a floor with no ceiling (§16.1)"
         );
     }
 

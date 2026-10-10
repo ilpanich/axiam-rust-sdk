@@ -501,15 +501,26 @@ impl AxiamClient {
     /// contract 1.59 P8). **Store the returned tokens before anything else**:
     /// a request is redeemed once, and a second `ciba_poll` for it is
     /// `invalid_grant` (§33.7 rule 7).
+    ///
+    /// A bare `ciba_poll` has no deadline of its own and keeps §16's bounded
+    /// budget; [`Self::ciba_await`]'s polls are bounded by the request's
+    /// deadline (§33.7 rule 5, §34.2 P10, contract 1.60).
     pub async fn ciba_poll(&self, params: CibaPollParams) -> Result<OidcTokenSet, AxiamError> {
-        self.ciba_poll_step(params).await.map_err(|f| f.err)
+        self.ciba_poll_step(params, None).await.map_err(|f| f.err)
     }
 
     /// [`Self::ciba_poll`], keeping what a failure means for
-    /// [`Self::ciba_await`]'s loop.
-    async fn ciba_poll_step(&self, params: CibaPollParams) -> Result<OidcTokenSet, PollFailure> {
+    /// [`Self::ciba_await`]'s loop. `bound`, when set, is `ciba_await`'s
+    /// deadline and clock: a §16 retry here never waits past the deadline and
+    /// no request follows it (`expired_token` is then the outcome).
+    async fn ciba_poll_step(
+        &self,
+        params: CibaPollParams,
+        bound: Option<(Instant, &dyn CibaClock)>,
+    ) -> Result<OidcTokenSet, PollFailure> {
         use crate::retry::{
-            Attempt, RetryRunner, ThreadRngJitter, TokioSleeper, parse_retry_after,
+            Attempt, RetryBound, RetryRunner, Sleeper, ThreadRngJitter, TokioSleeper,
+            parse_retry_after,
         };
         self.ensure_open().map_err(PollFailure::terminal)?;
         let auth = self
@@ -549,8 +560,25 @@ impl AxiamClient {
             sleeper: &TokioSleeper,
         };
         let (url, form) = (&url, &form);
+        // The retry's waits are served on the loop's injected clock.
+        struct ClockSleeper<'c>(&'c dyn CibaClock);
+        impl Sleeper for ClockSleeper<'_> {
+            fn sleep(&self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.0.sleep(d)
+            }
+        }
+        let bound_sleeper = bound.map(|(_, clock)| ClockSleeper(clock));
+        let bound_now = bound.map(|(_, clock)| move || clock.now());
+        let retry_bound = match (bound, &bound_sleeper, &bound_now) {
+            (Some((deadline, _)), Some(sleeper), Some(now)) => Some(RetryBound {
+                deadline,
+                now,
+                sleeper,
+            }),
+            _ => None,
+        };
         let wire: TokenResponseWire = runner
-            .run(|_| async move {
+            .run_until(retry_bound.as_ref(), |_| async move {
                 let response = self
                     .http()
                     .post(url.clone())
@@ -600,11 +628,18 @@ impl AxiamClient {
                 }))
             })
             .await
-            // What outlived §16's retries is a transport failure, a 5xx or a
-            // bodiless 408 / 429: transient for the loop.
-            .map_err(|err| PollFailure {
-                err,
-                step: Step::Transient,
+            .map_err(|ended| {
+                if ended.at_deadline {
+                    // The retry's wait ended at the deadline: no request
+                    // follows it, and the request has expired (§33.7 rule 4).
+                    return PollFailure::terminal(expired_token());
+                }
+                // What outlived §16's retries is a transport failure, a 5xx or
+                // a bodiless 408 / 429: transient for the loop.
+                PollFailure {
+                    err: ended.err,
+                    step: Step::Transient,
+                }
             })??;
         // After the 2xx: a failure here — the ID token, or the key fetch its
         // validation needs — is terminal; the redemption is spent (P9).
@@ -630,7 +665,10 @@ impl AxiamClient {
     ///   not returned (§12.4), and the application starts a new request.
     /// * Polling stops at `received_at + expires_in`, even if the server has
     ///   not said `expired_token`; the same `expired_token` is then raised
-    ///   locally.
+    ///   locally. That includes a §16 retry inside a poll: its wait (a
+    ///   `Retry-After` is a minimum wait) is capped at the deadline and
+    ///   served on the injected clock, and when the wait ends there no request
+    ///   follows (§34.2 P10, contract 1.60).
     ///
     /// Returns the token set without adopting it as this client's credential
     /// — the posture of `device_login` and `login_client_credentials`. In
@@ -659,19 +697,18 @@ impl AxiamClient {
         loop {
             let wait = Duration::from_secs(interval);
             if clock.now() + wait >= deadline {
-                return Err(AxiamError::oauth_protocol_error(
-                    "expired_token",
-                    "the CIBA request expired before it was decided (client-side deadline from \
-                     expires_in; CONTRACT.md §33.7 rule 4)",
-                ));
+                return Err(expired_token());
             }
             clock.sleep(wait).await;
             match self
-                .ciba_poll_step(CibaPollParams {
-                    auth_req_id: initiated.auth_req_id.clone(),
-                    tenant_id: params.tenant_id,
-                    configuration: Some(configuration.clone()),
-                })
+                .ciba_poll_step(
+                    CibaPollParams {
+                        auth_req_id: initiated.auth_req_id.clone(),
+                        tenant_id: params.tenant_id,
+                        configuration: Some(configuration.clone()),
+                    },
+                    Some((deadline, clock.as_ref())),
+                )
                 .await
             {
                 Ok(tokens) => return Ok(tokens),
@@ -762,6 +799,15 @@ impl AxiamError {
     pub fn is_expired_token(&self) -> bool {
         self.oauth_error_code() == Some("expired_token")
     }
+}
+
+/// The local `expired_token` outcome of §33.7 rule 4.
+fn expired_token() -> AxiamError {
+    AxiamError::oauth_protocol_error(
+        "expired_token",
+        "the CIBA request expired before it was decided (client-side deadline from \
+         expires_in; CONTRACT.md §33.7 rule 4)",
+    )
 }
 
 /// The plain form's authentication-request members, exactly those set.
