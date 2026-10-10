@@ -7,115 +7,148 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Contract **1.59** (CONTRACT.md §34, the cross-SDK review of the 1.53 – 1.58 ports: its
-clarifications P1 – P12 amend §32.7, §33.4, §33.7 and §28.12.2 rule 4; follow-up F-59-01,
-ilpanich/axiam#576). The vendored `CONTRACT.md` comes from axiam `fe369eb`; `openapi.json`,
-`management-registry.json` and `proto/` are unchanged. No section is added, so the statement
-names the same sections at 1.59.
+`axiam-sdk` 1.0.0 is the first stable release of the AXIAM Rust SDK: from here its public API
+follows semantic versioning, a breaking change waits for 2.0.0, and security fixes ship in
+`1.0.x`. It ships the REST transport (`rest`), gRPC (`grpc`: authorization checks, `get_user_info`,
+`validate_token` / `introspect_token`), AMQP (`amqp`: the HMAC-verified consumer and the §22
+reactor runtime), OPAQUE login (`opaque`), the Actix-Web route guard and the §11 attribute
+macros (`actix`, `macros`, `reactor-macros`), and a WebAssembly build for the browser
+(`axiam-sdk-wasm`, REST + OPAQUE). It conforms to **contract 1.60**: CONTRACT.md §1 – §13 and
+§12.7, §14, §15, §17, §19, §20, §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31,
+§32 and §33, with §32.7 and §33.2 signed (PS256, ES256, EdDSA), plus the MUST-level §16 retry
+policy and §18 deterministic shutdown, and the §34 clarifications P1 – P12 and §34.4 answers.
+The vendored `CONTRACT.md`, `openapi.json` and `management-registry.json` are those of axiam
+`8df0e11`; `proto/` and `vendor/axiam-opaque/src` are identical to it.
 
-Contract **1.60** rows (CONTRACT.md §34.4; the re-vendored `CONTRACT.md` is axiam's
-`58df4ee` draft — `openapi.json`, `management-registry.json` and `proto/` follow
-with the generated-field rows).
+### Breaking changes
 
-### Changed (breaking)
+Since `v1.0.0-beta17`:
 
-- **BREAKING (D-7, released with 1.0.0): `ReplayStore::check_and_record` returns
-  `Result<bool, ReplayStoreError>`, not `bool`** (B1, §34.2 P4, R-4). A store has three
-  answers — seen (`Ok(false)`), not seen (`Ok(true)`), cannot answer (`Err`) — and an `Err` is
-  no verdict: `SsfReceiver::verify_set` raises an `AxiamError::Network` chaining the store's
-  error, with no reason code, and records nothing; `SsfReceiver::poll` leaves that SET
-  unjudged — in neither `events` nor `refused`, unrecorded — and lists its `jti`, and those of
-  the rest of the batch, in the new `SsfPollResult::unjudged`, so the caller does not
-  acknowledge it and the transmitter offers it again. The 1.59 route (return `false` when you
-  cannot answer, which read as `replayed` and was acknowledged, losing the event) is withdrawn.
-  `MemoryReplayStore` is updated and never fails. **Migrating:** change the method's return
-  type, wrap the old answer in `Ok(..)`, and return `Err(..)` where you returned `false` for an
-  outage. `SsfPollResult` gains the public field `unjudged` (struct-literal constructions and
-  exhaustive destructuring need it); `ReplayStoreError` is
-  `Box<dyn std::error::Error + Send + Sync>`.
+- **`ReplayStore::check_and_record` returns `Result<bool, ReplayStoreError>`**, not `bool`
+  (D-7, contract 1.60 §34.2 P4, B1). A store has three answers — seen (`Ok(false)`), not seen
+  (`Ok(true)`) and cannot answer (`Err`) — and an `Err` is no verdict: the SET stays unjudged
+  and is offered again, where the 1.59 advice ("return `false` when you cannot answer") turned
+  an outage into a `replayed` refusal that was acknowledged, losing the event.
+  *Migrating:* change the return type, wrap each answer in `Ok(..)`, and return `Err(..)` where
+  you returned `false` for an outage. `ReplayStoreError` is
+  `Box<dyn std::error::Error + Send + Sync>`; return an `AxiamError` if you want it passed
+  through unchanged.
+- **`SsfPollResult` gains the public field `unjudged`**, the `jti`s of SETs left neither
+  accepted nor refused. *Migrating:* struct-literal constructions and exhaustive
+  destructuring of `SsfPollResult` add it (or `..`).
+- **`UpdateFederationConfigRequest`'s ten nullable members are `Option<Option<String>>`**
+  (contract 1.60 §27.15 note 8): `metadata_url`, `idp_signing_cert_pem`,
+  `idp_metadata_signing_cert_pem`, `provider_slug`, `authorization_endpoint`,
+  `token_endpoint`, `userinfo_endpoint`, `apple_team_id`, `apple_key_id` and `button_icon`.
+  `None` leaves the member as stored, `Some(None)` sends `null` and clears it,
+  `Some(Some(v))` sets it. *Migrating:* `field: Some(v)` becomes `field: Some(Some(v))`.
+- **Generated management models gain members** from the 1.60 spec, which breaks struct
+  literals of the types without `Default`: `CreateFederationConfigRequest`
+  (`allow_sha1_signatures`, `idp_metadata_signing_cert_pem`), `ScimTargetInput`
+  (`expected_updated_at`) and `CreateNotificationRuleRequest` (`window_minutes`).
+  *Migrating:* add each as `None`, or use the read-modify-write `From` conversions.
+- **`OidcConfiguration` gains four public fields** (the §21.5 revocation and introspection
+  members). It is decoded, not built, by every documented path; a struct literal adds them
+  as `None`.
+- **MSRV 1.89** (was 1.88): uuid 1.27 requires it. `rust-version`,
+  `supported_versions::MIN_RUST_VERSION` and the CI matrix agree; the workspace uses resolver 3,
+  so a dependency raising its own MSRV no longer breaks the MSRV CI job first.
 
-### Fixed (contract 1.60)
+### Added
 
-- A §16 retry inside `ciba_poll`, as `ciba_await` calls it, never waits past the deadline
-  `received_at + expires_in` (B3, P10, R-14): the retry's wait, `Retry-After` included, is
-  capped at the time left and served on the injected `CibaClock`; a wait that ends at the
-  deadline is followed by no request and `ciba_await` raises the local `expired_token`. A bare
-  `ciba_poll` has no deadline and keeps §16's bounded budget. §33.8 test 7 gains the
-  `503`-with-`Retry-After` case.
+- **SSF receiver helper** (§32.7): `axiam_sdk::ssf::SsfReceiver` with `verify_set` and `poll`,
+  `SetFailureReason`, `AxiamError::set_failure_reason`, the pluggable `ReplayStore` and the
+  default `MemoryReplayStore` (bounded in time, unbounded in count).
+- **CIBA** (§33): `ciba_initiate`, `ciba_poll`, `ciba_await`, `ciba_handle_ping`, the signed
+  request form `CibaRequestSigner` (PS256, ES256, EdDSA with the caller's key), and
+  `AxiamError::is_access_denied` / `is_expired_token`.
+- **RFC 7592 client configuration** (§28.12): `read_client_registration`,
+  `update_client_registration`, `delete_client_registration` and `ClientRegistration`. The
+  registration access token is `Sensitive`, sent only as a bearer on a session-free transport,
+  and writes are never retried.
+- **Management namespaces** `saml` (§29), `directory` (§30), `scim_targets` (§31) and `ssf`
+  (§32), for 190 operations across 28 namespaces. `bind_secret`, `authorization_header` and
+  `credential` are `Sensitive`; `UpdateDirectoryConfig` can send an explicit `null`; the
+  contract's rules are repeated at each call site; replace updates have read-modify-write
+  `From` conversions.
+- Contract 1.60 members: `ScimTargetInput::expected_updated_at` (§31.3 rule 4), passed through
+  unchanged — a write that another administrator overtook is `409`, and the
+  `From<&ScimTargetResponse>` conversion fills it with the `updated_at` it read;
+  `window_minutes` on the notification-rule models (§27.15 note 1), passed through and never
+  clamped; `allow_sha1_signatures` and `idp_metadata_signing_cert_pem` on the federation
+  configuration models (§27.15 notes 6, 7), sent only when set, with
+  `FederationConfigResponse::allow_sha1_signatures` reading `false` when an older server omits
+  it.
+- `OidcConfiguration` decodes the four contract 1.60 discovery members
+  (`revocation_endpoint_auth_methods_supported`,
+  `introspection_endpoint_auth_methods_supported` and the two `*_auth_signing_alg_values_supported`
+  lists) as optional (§21.5), and the four CIBA members (§33).
+- `TelemetryEvent::SsfUnjudged` (§19.1, contract 1.60): emitted when `poll` returns with SETs
+  unjudged, carrying their count and the cause, never a `jti`.
+- `AxiamError::Auth` gains the `set_reason` field (the variant is `#[non_exhaustive]`).
 
-### Documentation (contract 1.60)
+### Changed
 
-- §15.2 rule 9: the `token_exchange` documentation, README and example obtain the `actor_token`
-  from the same client's `client_credentials` grant; `400 invalid_request` (`actor_token was
-  not issued to the exchanging client`) surfaces unchanged and unretried (§15.6's added test).
-- §8: the README says a broker confirm is not evidence that AXIAM saw a message, and that a
-  minimal-profile server reads no AMQP queue.
+- `poll` acknowledges rather than reports a `replayed` SET (§34.2 P2): the documentation,
+  `RefusedSet` and the README say to pass it in `ack`, not `set_errs` — this receiver accepted
+  it on an earlier poll.
+- `mtls_endpoint_aliases` decodes the seventh alias, `backchannel_authentication_endpoint`
+  (§21.3.1 as amended in contract 1.58), and an mTLS CIBA call honours it. The tests read
+  §21.3.1 vector A from the vendored `CONTRACT.md`, its CIBA row included.
+- An `/oauth2` error body without `error_description` is still an `OAuthProtocolError`.
+- `federation.update_config` documents the null rule at the call site; `OidcTokenSet::scope`
+  documents that after `oidc_refresh` it is the token's scope, possibly narrower than the
+  original grant's (§12.1, contract 1.60), which is what the SDK already returned.
+- `token_exchange`'s documentation, README and example obtain the `actor_token` from the same
+  client's `client_credentials` grant (§15.2 rule 9); the server's `400 invalid_request` for
+  another client's token surfaces unchanged and unretried.
+- The README says a broker confirm is not evidence that AXIAM saw a message, and that a
+  minimal-profile server reads no AMQP queue (§8).
+- The `ciba_await` deadline stays anchored at the initiate response's receipt, one of the two
+  anchors §34.2 P10 allows.
 
 ### Fixed
 
-- `SsfReceiver::poll` no longer loses events (R-1, §34.2 P1): it runs steps 1 – 8 over the
-  whole batch before recording any `jti`, so a JWKS or discovery fetch that fails part-way
-  returns that error **having recorded nothing** — P1's first form — and the transmitter offers
-  the batch again. Before, the earlier SETs' `jti`s stayed recorded and read `replayed` when
-  re-offered. §32.8 helper test 8 gains the two-SET batch.
-- `ciba_await` stops on a decisive answer (R-12, P9): a `4xx` without an `error` member and any
-  failure after a `200` — a body that does not decode, an ID token that does not validate or
-  whose key cannot be fetched — end the loop; only a transport failure, `408`, `429` and `5xx`
-  are waited out. Before, the loop re-polled a spent redemption into `invalid_grant`.
-- `ciba_poll` retries a `5xx` whatever its body (P8) — AXIAM answers
+- `SsfReceiver::poll` no longer loses events (§34.2 P1, R-1): steps 1 – 8 run over the whole
+  batch before any `jti` is recorded, so a JWKS or discovery fetch that fails part-way returns
+  its error having recorded nothing and the transmitter offers the batch again. Before, the
+  earlier SETs' `jti`s stayed recorded and read `replayed` when re-offered.
+- A replay store that cannot answer is no verdict (§34.2 P3, P4): `verify_set` raises
+  `AxiamError::Network` chaining the store's error, with no reason code, and records nothing;
+  `poll` stops asking the store, returns the SETs recorded before the failure and lists the
+  rest in `unjudged`. An `AxiamError` from the store passes through unchanged; a SET refusal
+  from it is wrapped, so no store failure reads as a verdict.
+- A failed SSF key fetch counts toward the once-a-minute limit (§34.2 P6): after a failed
+  fill, a failed refresh of the five-minute cache or a failed unknown-`kid` refetch, a SET
+  inside the minute makes no fetch and gets a `NetworkError`, so a JWKS outage is not one fetch
+  per SET. The SSF configuration fetch is limited the same way. The §10 guard and §12 ID-token
+  verification are unchanged.
+- `ciba_await` stops on a decisive answer (§34.2 P9, R-12): a `4xx` without an `error` member,
+  and any failure after a `200` (a body that does not decode, an ID token that does not
+  validate or whose key cannot be fetched), end the loop; only a transport failure, `408`,
+  `429` and `5xx` are waited out. Before, it re-polled a spent redemption into
+  `invalid_grant`.
+- `ciba_poll` retries a `5xx` whatever its body (§34.2 P8) — AXIAM answers
   `500 {"error":"server_error"}` — and surfaces it as a `NetworkError`; it never ends
-  `ciba_await`. §33.8 test 8's `500` carries that body.
-- `update_client_registration` sends no list its read lacked (R-23, P12.4), where it sent `[]`,
-  and sends a member of an unexpected shape back as read rather than trimming or dropping it.
-  `ClientRegistration::{redirect_uris, grant_types, response_types}` are
-  `Option<Vec<String>>` (the type is new in this release).
-- No crate-private wire struct holding a secret derives `Debug` (R-19, §7 rule 1): the eighteen
-  generated management twins and six hand-written response wires.
+  `ciba_await`.
+- A §16 retry inside `ciba_poll`, as `ciba_await` calls it, never waits past the deadline
+  `received_at + expires_in` (§34.2 P10, B3): `Retry-After` is capped at the time left, served
+  on the injected `CibaClock`, and a wait that reaches the deadline is followed by no request
+  and the local `expired_token`. A bare `ciba_poll` keeps §16's bounded budget.
+- `update_client_registration` sends no list its read lacked (§34.2 P12.4, R-23), where it sent
+  `[]`, and sends a member of unexpected shape back as read rather than trimming it.
+  `ClientRegistration::{redirect_uris, grant_types, response_types}` are `Option<Vec<String>>`.
 - Generated documentation (R-28): a replace operation with optional members no longer says
   "every field of the body is required", `ParseSamlSpMetadata` is documented as exactly one
   member rather than a sparse body, and `MtlsEndpointAliases` names seven endpoints.
 
-### Changed
+### Security
 
-- `ReplayStore` documented that a store that cannot answer must **fail closed** — return
-  `false` — the documentation route contract 1.59 P4 gave an interface that cannot report a
-  failure (R-4); contract 1.60 withdrew it and the method is now fallible (see above). The
-  README states that the default `MemoryReplayStore` is bounded in time and unbounded in
-  count.
-- A `replayed` refusal from `poll` is acknowledged, not reported in `set_errs` (P2): the poll
-  documentation, `RefusedSet` and the README say so.
-- §21.3.1 vector A is read from the vendored `CONTRACT.md` by the tests, CIBA's alias row
-  included (R-31). The `ciba_await` deadline stays anchored at the initiate response's receipt,
-  one of the two anchors P10 allows.
-
-Contract **1.58** (CONTRACT.md §28.12, §29, §30, §31, §32, §32.7, §33, §21.3.1). The vendored
-`CONTRACT.md`, `openapi.json` and `management-registry.json` come from axiam `21a9c22`;
-`proto/` was already identical.
-
-### Added
-
-- RFC 7592 client configuration: `read_client_registration`, `update_client_registration`,
-  `delete_client_registration` and `ClientRegistration` (§28.12). The token is `Sensitive`,
-  sent only as a bearer on a session-free transport; writes are never retried.
-- Management namespaces `directory` (§30), `saml` (§29), `ssf` (§32) and `scim_targets` (§31):
-  190 operations across 28 namespaces. `bind_secret`, `authorization_header` and `credential`
-  are `Sensitive`; `UpdateDirectoryConfig` can send an explicit `null`; call-site documentation
-  of the contract's rules; read-modify-write `From` conversions for the replace updates.
-- `axiam_sdk::ssf::SsfReceiver` — `verify_set` and `poll` (§32.7), with `SetFailureReason` and
-  `AxiamError::set_failure_reason`.
-- CIBA (§33): `ciba_initiate`, `ciba_poll`, `ciba_await`, `ciba_handle_ping`, the signed
-  request form (`CibaRequestSigner`), `AxiamError::is_access_denied` / `is_expired_token`.
-
-### Changed
-
-- `mtls_endpoint_aliases` decodes the seventh alias, `backchannel_authentication_endpoint`
-  (§21.3.1 amended in contract 1.58); `OidcConfiguration` decodes the four CIBA members.
-- `AxiamError::Auth` gains the additive `set_reason` field (the variant is `#[non_exhaustive]`).
-- An `/oauth2` error body without `error_description` is still an `OAuthProtocolError`.
-- Raise the MSRV from 1.88 to 1.89 (`rust-version`, `supported_versions::MIN_RUST_VERSION`
-  and the CI matrix), so the SDK builds against current dependency releases: uuid 1.27
-  requires Rust 1.89. The workspace now uses resolver 3, so a dependency raising its own
-  MSRV no longer breaks the MSRV CI job before the SDK decides to follow.
+- No crate-private wire struct holding a secret derives `Debug` (R-19, §7 rule 1): the
+  eighteen generated management wire twins and six hand-written response wires, so a
+  `{:?}` cannot print a `bind_secret`, `credential` or `authorization_header`.
+- The SSF receiver honours no `jwk` or `x5c` header member and fetches keys only from the
+  configured JWKS or SSF configuration, over §6 TLS (§32.9).
 
 ## [1.0.0-beta17] - 2026-09-25
 Contract **1.51**, the dogfooding remediation (CONTRACT.md §1.1.1, §5.2 rule
