@@ -571,6 +571,14 @@ See [`examples/amqp_consumer.rs`](examples/amqp_consumer.rs). Every delivery's H
 signature (CONTRACT.md §8) is verified before the handler runs; failures are nacked without
 requeue.
 
+**A broker confirm is not evidence that AXIAM saw a message** (CONTRACT.md §8, minimal
+profile). A publisher confirm — including the one `reactor_serve` waits for on a reply — means
+only that the broker accepted the message; it never means AXIAM decided a request or recorded
+an event. A server running in the minimal profile (`AXIAM__AMQP__ENABLED=false`) reads no AMQP
+queue at all: it consumes neither `axiam.authz.request` nor `axiam.audit.events`, whatever a
+broker holds. Against one, use REST or gRPC (`GET /health` reports `profile: minimal` and lists
+`amqp_authz` and `amqp_audit_ingestion` under `unavailable`).
+
 #### Transport security (§8b)
 
 `consume`, `consume_with_tls` and `reactor_serve` all require `amqps://` and check it
@@ -906,6 +914,12 @@ Most of what this method does is refuse to be helpful, and each refusal is delib
 
 - **No default `actor_token`.** Omitting it asks for *impersonation*; the SDK will not
   quietly substitute the client's own session token and turn that into a delegation.
+- **The actor token is the exchanging client's own** (§15.2 rule 9). Pass an `actor_token` the
+  same client was issued — usually its own `client_credentials` token, from
+  `login_client_credentials` — and the issued token's `act.sub` is that client's `client_id`.
+  An actor token issued to another client, a console sign-in or a service account is answered
+  `400 invalid_request` (`actor_token was not issued to the exchanging client`), which the SDK
+  surfaces unchanged and neither retries nor rewrites into an impersonation.
 - **No auto-narrowing after `invalid_scope`.** The server refuses rather than silently
   narrowing precisely so the caller finds out here.
 - **No refresh token, ever** — `ExchangedToken` has no such field, so there is nothing to

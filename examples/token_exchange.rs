@@ -12,7 +12,7 @@
 
 use axiam_sdk::Sensitive;
 use axiam_sdk::client::AxiamClient;
-use axiam_sdk::oidc::{ACCESS_TOKEN_TYPE, TokenExchangeParams};
+use axiam_sdk::oidc::{ACCESS_TOKEN_TYPE, LoginClientCredentialsParams, TokenExchangeParams};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,8 +45,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // impersonation instead — a different operation with different risk,
     // which the server refuses unless this client holds that grant. The SDK
     // will not pick for you (§15.2 rule 1).
+    //
+    // The actor token must have been issued to THIS client (§15.2 rule 9): the
+    // usual one is the gateway's own `client_credentials` token, whose `sub`
+    // is its `client_id` and so becomes the issued token's `act.sub`. Any
+    // other client's token, a console sign-in or a service account's is
+    // answered `400 invalid_request` ("actor_token was not issued to the
+    // exchanging client"), surfaced unchanged and never retried or rewritten.
+    // `login_client_credentials` does not adopt the token as the client's own
+    // credential; you obtain it and pass it.
+    let actor = client
+        .login_client_credentials(LoginClientCredentialsParams::default())
+        .await?;
     let exchanged = client
         .token_exchange(TokenExchangeParams {
+            actor_token: Some(actor.access_token),
             scopes: Some(vec!["orders:read".to_string()]),
             audience: Some("orders-service".to_string()),
             ..TokenExchangeParams::new(Sensitive::new(user_token), ACCESS_TOKEN_TYPE)

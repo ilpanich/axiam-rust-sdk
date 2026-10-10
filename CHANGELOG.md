@@ -43,6 +43,14 @@ with the generated-field rows).
   `ciba_poll` has no deadline and keeps §16's bounded budget. §33.8 test 7 gains the
   `503`-with-`Retry-After` case.
 
+### Documentation (contract 1.60)
+
+- §15.2 rule 9: the `token_exchange` documentation, README and example obtain the `actor_token`
+  from the same client's `client_credentials` grant; `400 invalid_request` (`actor_token was
+  not issued to the exchanging client`) surfaces unchanged and unretried (§15.6's added test).
+- §8: the README says a broker confirm is not evidence that AXIAM saw a message, and that a
+  minimal-profile server reads no AMQP queue.
+
 ### Fixed
 
 - `SsfReceiver::poll` no longer loses events (R-1, §34.2 P1): it runs steps 1 – 8 over the

@@ -16,12 +16,14 @@ use std::sync::{Arc, Mutex};
 
 use axiam_sdk::AxiamError;
 use axiam_sdk::Sensitive;
-use axiam_sdk::oidc::{ACCESS_TOKEN_TYPE, JWT_TOKEN_TYPE, TokenExchangeParams};
+use axiam_sdk::oidc::{
+    ACCESS_TOKEN_TYPE, JWT_TOKEN_TYPE, LoginClientCredentialsParams, TokenExchangeParams,
+};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-use oidc_support::{CLIENT_SECRET, build_client, discovery_document};
+use oidc_support::{CLIENT_ID, CLIENT_SECRET, build_client, discovery_document, token_response};
 
 const SUBJECT_TOKEN: &str = "subject-token-value";
 const ACTOR_TOKEN: &str = "actor-token-value";
@@ -219,6 +221,107 @@ async fn actor_token_and_its_type_are_sent_as_a_pair() {
         form.get("actor_token_type").map(String::as_str),
         Some("urn:ietf:params:oauth:token-type:access_token"),
         "RFC 8693 §2.1 requires the pair; the type alone is a malformed request"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §15.2 rule 9 and §15.6 (contract 1.60) — the actor token is the exchanging
+// client's own
+// ---------------------------------------------------------------------------
+
+/// The one normative `error_description` of §15.2 rule 9.
+const ACTOR_NOT_ISSUED_TO_CLIENT: &str = "actor_token was not issued to the exchanging client";
+
+#[tokio::test]
+async fn an_actor_token_not_issued_to_the_exchanging_client_surfaces_unchanged_and_unretried() {
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    let forms = mount_exchange(
+        &server,
+        oauth_error_with_description("invalid_request", ACTOR_NOT_ISSUED_TO_CLIENT),
+    )
+    .await;
+
+    let client = build_client(&server.uri(), true);
+    let err = client
+        .token_exchange(TokenExchangeParams {
+            actor_token: Some(Sensitive::new(ACTOR_TOKEN.into())),
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
+        })
+        .await
+        .expect_err("the server refuses an actor token issued to another client");
+
+    // Surfaced as every OAuth2 `invalid_request` is (§15.3): the code and the
+    // description reach the caller unchanged.
+    assert_eq!(err.oauth_error_code(), Some("invalid_request"));
+    assert!(
+        err.to_string().contains(ACTOR_NOT_ISSUED_TO_CLIENT),
+        "the description is surfaced unchanged: {err}"
+    );
+    // Exactly one request, sent as written: not retried, not rewritten into an
+    // impersonation (rule 1), not repaired with a token of the SDK's own.
+    let forms = forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 1, "exactly one request");
+    assert_eq!(
+        forms[0].get("actor_token").map(String::as_str),
+        Some(ACTOR_TOKEN),
+        "the actor token is the caller's, neither dropped nor substituted"
+    );
+    assert_eq!(
+        forms[0].get("client_id").map(String::as_str),
+        Some(CLIENT_ID)
+    );
+}
+
+#[tokio::test]
+async fn the_usual_actor_token_is_the_same_clients_client_credentials_token() {
+    // What the documentation and the example show: the caller obtains the
+    // actor token with the exchanging client's own `client_credentials` grant
+    // and passes it; the SDK supplies none (rule 1).
+    const CLIENT_CREDENTIALS_TOKEN: &str = "client-credentials-access-token";
+    let server = MockServer::start().await;
+    mount_discovery(&server).await;
+    let forms: Arc<Mutex<Vec<HashMap<String, String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&forms);
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(move |req: &Request| {
+            let form = parse_form(&req.body);
+            let reply = if form.get("grant_type").map(String::as_str) == Some("client_credentials")
+            {
+                token_response(json!({"access_token": CLIENT_CREDENTIALS_TOKEN}))
+            } else {
+                exchange_response(json!({}))
+            };
+            sink.lock().unwrap().push(form);
+            ResponseTemplate::new(200).set_body_json(reply)
+        })
+        .mount(&server)
+        .await;
+
+    let client = build_client(&server.uri(), true);
+    let actor = client
+        .login_client_credentials(LoginClientCredentialsParams::default())
+        .await
+        .expect("the client's own client_credentials token");
+    client
+        .token_exchange(TokenExchangeParams {
+            actor_token: Some(actor.access_token),
+            ..TokenExchangeParams::new(Sensitive::new(SUBJECT_TOKEN.into()), ACCESS_TOKEN_TYPE)
+        })
+        .await
+        .expect("exchange");
+
+    let forms = forms.lock().unwrap().clone();
+    assert_eq!(forms.len(), 2);
+    assert_eq!(
+        forms[0].get("client_id"),
+        forms[1].get("client_id"),
+        "the actor token and the exchange are one client's"
+    );
+    assert_eq!(
+        forms[1].get("actor_token").map(String::as_str),
+        Some(CLIENT_CREDENTIALS_TOKEN)
     );
 }
 
