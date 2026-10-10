@@ -771,3 +771,194 @@ async fn discovery_supplies_the_jwks_uri_and_must_name_the_issuer() {
     // Debug never shows the provider.
     assert!(format!("{r:?}").contains("SsfReceiver"));
 }
+
+// ── contract 1.60, second pass: C-1, C-4 / §19.1 `ssf_unjudged`, C-5 / P6 ──
+
+/// A store that answers every `jti` with the error its function builds.
+struct FailingStore(fn() -> ReplayStoreError);
+
+impl ReplayStore for FailingStore {
+    fn check_and_record(&self, _jti: &str, _window: Duration) -> Result<bool, ReplayStoreError> {
+        Err((self.0)())
+    }
+}
+
+#[tokio::test]
+async fn c1_the_sdks_own_error_from_the_store_passes_through_and_a_refusal_is_wrapped() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    jwks(&server, vec![key.jwk()]).await;
+
+    // An `AxiamError` the store raises is this SDK's own §2 error: unchanged.
+    let own = receiver_with_store(
+        &server,
+        Arc::new(FailingStore(|| {
+            Box::new(AxiamError::network("replay cluster has no quorum"))
+        })),
+    );
+    let e = own.verify_set(&key.sign_set(&claims())).await.unwrap_err();
+    assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+    assert!(e.to_string().contains("no quorum"), "passed through: {e}");
+    assert!(
+        std::error::Error::source(&e).is_none(),
+        "not wrapped: {e:?}"
+    );
+
+    // A SET refusal from inside the store is wrapped, so that no store
+    // failure surfaces carrying a reason code and reads as a verdict.
+    let refusal = receiver_with_store(
+        &server,
+        Arc::new(FailingStore(|| {
+            Box::new(AxiamError::set_refused(SetFailureReason::Replayed, "store"))
+        })),
+    );
+    let e = refusal
+        .verify_set(&key.sign_set(&claims()))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+    assert!(e.set_failure_reason().is_none(), "no reason code: {e:?}");
+}
+
+/// The `(count, category)` of every `ssf_unjudged` event a hook saw.
+type Unjudged = Arc<Mutex<Vec<(usize, String)>>>;
+
+/// A client whose telemetry hook keeps every `ssf_unjudged` event.
+fn client_with_hook(server: &MockServer) -> (AxiamClient, Unjudged) {
+    use axiam_sdk::telemetry::TelemetryEvent;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let client = AxiamClient::builder()
+        .base_url(server.uri())
+        .unwrap()
+        .tenant_id(Uuid::new_v4())
+        .telemetry_hook(move |event: &TelemetryEvent| {
+            if let TelemetryEvent::SsfUnjudged {
+                operation,
+                count,
+                category,
+            } = event
+            {
+                assert_eq!(*operation, "ssf.poll");
+                sink.lock().unwrap().push((*count, category.to_string()));
+            }
+        })
+        .build()
+        .unwrap();
+    (client, seen)
+}
+
+#[tokio::test]
+async fn c4_a_poll_returning_with_unjudged_sets_emits_ssf_unjudged() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    jwks(&server, vec![key.jwk()]).await;
+    let stream = Uuid::new_v4().to_string();
+    let jti = |p: &str| format!("{p}-{}", Uuid::new_v4().simple());
+    let (a, b, c) = (jti("a"), jti("b"), jti("c"));
+    let reply = json!({
+        "sets": {
+            a.clone(): key.sign_set(&with(claims(), "jti", json!(a))),
+            b.clone(): key.sign_set(&with(claims(), "jti", json!(b))),
+            c.clone(): key.sign_set(&with(claims(), "jti", json!(c))),
+        },
+        "moreAvailable": false,
+    });
+    Mock::given(method("POST"))
+        .and(path(format!("/ssf/v1/poll/{stream}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    let (client, events) = client_with_hook(&server);
+    let store = FlakyStore::down_for(&[&b]);
+    let token = format!("cc-{}", Uuid::new_v4().simple());
+    let mut config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::JwksUri(format!("{}/oauth2/jwks", server.uri())),
+    );
+    config.access_token_provider = Some(Arc::new(move || {
+        let t = token.clone();
+        Box::pin(async move { Ok(Sensitive::new(t)) })
+    }));
+    config.replay_store = Some(store.clone());
+    let r = SsfReceiver::new(&client, config).unwrap();
+
+    let result = r.poll(&stream, SsfPollOptions::default()).await.unwrap();
+    assert_eq!(result.unjudged.len(), 2);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [(2, "replay_store".to_string())],
+        "one event: the count and the category, no jti"
+    );
+
+    // A poll that leaves nothing unjudged emits nothing.
+    store.recovers();
+    let again = r.poll(&stream, SsfPollOptions::default()).await.unwrap();
+    assert!(again.unjudged.is_empty());
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn c5_a_failed_cold_fill_counts_and_a_set_inside_the_minute_makes_no_fetch() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    let hits = Arc::new(Mutex::new(0usize));
+    let sink = Arc::clone(&hits);
+    let keys = vec![key.jwk()];
+    // The first fetch fails; any later one would serve the key.
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(move |_: &Request| {
+            let mut n = sink.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"keys": keys}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let store = Arc::new(InspectableStore::default());
+    let r = receiver_with_store(&server, store.clone());
+
+    for _ in 0..3 {
+        let e = r.verify_set(&key.sign_set(&claims())).await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+        assert!(e.set_failure_reason().is_none(), "no verdict: {e:?}");
+    }
+    assert_eq!(
+        *hits.lock().unwrap(),
+        1,
+        "a JWKS outage is not one fetch per SET (§34.2 P6)"
+    );
+    assert!(store.seen.lock().unwrap().is_empty(), "nothing recorded");
+}
+
+#[tokio::test]
+async fn c5_a_failed_ssf_configuration_fetch_counts_too() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    let hits = Arc::new(Mutex::new(0usize));
+    let sink = Arc::clone(&hits);
+    Mock::given(method("GET"))
+        .and(path("/.well-known/ssf-configuration"))
+        .respond_with(move |_: &Request| {
+            *sink.lock().unwrap() += 1;
+            ResponseTemplate::new(503)
+        })
+        .mount(&server)
+        .await;
+    let config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::DiscoveryUrl(format!("{}/.well-known/ssf-configuration", server.uri())),
+    );
+    let r = SsfReceiver::new(&client(&server), config).unwrap();
+    for _ in 0..2 {
+        let e = r.verify_set(&key.sign_set(&claims())).await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+    }
+    assert_eq!(*hits.lock().unwrap(), 1);
+}

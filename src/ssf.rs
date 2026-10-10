@@ -111,7 +111,9 @@ pub type ReplayStoreError = Box<dyn std::error::Error + Send + Sync>;
 /// `jti` you could not check: that turns an outage into a `replayed` refusal,
 /// which a caller acknowledges, and an event that was never processed is lost.
 /// Make the outage visible from inside the store as well (a log line, a
-/// metric).
+/// metric). An [`AxiamError`] you return as the error passes through
+/// unchanged, unless it is a SET refusal; any other error is wrapped in
+/// [`AxiamError::Network`] (§2, contract 1.60).
 pub trait ReplayStore: Send + Sync {
     /// Record `jti` for `window` and return `Ok(true)`, or return `Ok(false)`
     /// without recording when it is already held, or `Err` when the store
@@ -303,6 +305,9 @@ pub struct SsfReceiver {
     token_provider: Option<AccessTokenProvider>,
     replay_window: Duration,
     replay_store: Arc<dyn ReplayStore>,
+    /// When the SSF configuration fetch last failed: like a failed JWKS fill,
+    /// it counts toward the once-a-minute limit (§34.2 P6).
+    discovery_failed_at: Mutex<Option<crate::time::Instant>>,
 }
 
 impl std::fmt::Debug for SsfReceiver {
@@ -318,6 +323,21 @@ impl std::fmt::Debug for SsfReceiver {
 
 fn refuse(reason: SetFailureReason, detail: &str) -> AxiamError {
     AxiamError::set_refused(reason, detail)
+}
+
+/// The error for a store that could not answer (§2, §34.2 P3; contract 1.60
+/// C-1): this SDK's own [`AxiamError`] raised from inside the store passes
+/// through unchanged, any other failure is wrapped in [`AxiamError::Network`]
+/// as its `source`. A SET refusal is wrapped too, so that no store failure
+/// surfaces carrying a reason code and reads as a verdict.
+fn store_failure(cause: ReplayStoreError) -> AxiamError {
+    const UNJUDGED: &str =
+        "the replay store could not answer: the SET is unjudged and was not recorded";
+    match cause.downcast::<AxiamError>() {
+        Ok(own) if own.set_failure_reason().is_none() => *own,
+        Ok(refusal) => AxiamError::network_with_source(UNJUDGED, refusal),
+        Err(other) => AxiamError::network_with_source(UNJUDGED, other),
+    }
 }
 
 fn b64_json(part: &str) -> Option<Map<String, Value>> {
@@ -362,6 +382,7 @@ impl SsfReceiver {
             replay_store: config
                 .replay_store
                 .unwrap_or_else(|| Arc::new(MemoryReplayStore::default())),
+            discovery_failed_at: Mutex::new(None),
         })
     }
 
@@ -370,12 +391,40 @@ impl SsfReceiver {
             .get_or_try_init(|| async {
                 let jwks_uri = match &self.keys {
                     SsfKeySource::JwksUri(u) => u.clone(),
-                    SsfKeySource::DiscoveryUrl(d) => self.discover_jwks_uri(d).await?,
+                    SsfKeySource::DiscoveryUrl(d) => self.discover_jwks_uri_limited(d).await?,
                 };
                 let url = parse_secure("jwks_uri", &jwks_uri)?;
-                Ok::<_, AxiamError>(JwksVerifier::for_jwks_url(self.client.http().clone(), url))
+                // §34.2 P6: the key cache expires within ten minutes, and a
+                // failed fetch counts toward the once-a-minute limit.
+                Ok::<_, AxiamError>(
+                    JwksVerifier::for_jwks_url(self.client.http().clone(), url)
+                        .limiting_failed_fetches(),
+                )
             })
             .await
+    }
+
+    /// [`Self::discover_jwks_uri`], made at most once a minute after a failure
+    /// (§34.2 P6): a SET inside that minute makes no fetch and gets a
+    /// `NetworkError` — no verdict — so an outage is not one fetch per SET.
+    async fn discover_jwks_uri_limited(&self, discovery_url: &str) -> Result<String, AxiamError> {
+        let recent = self
+            .discovery_failed_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some_and(|at| at.elapsed() < crate::token::jwks::FAILED_FETCH_MIN_INTERVAL);
+        if recent {
+            return Err(AxiamError::network(
+                "the SSF configuration fetch failed less than a minute ago; no fetch was made \
+                 (CONTRACT.md §34.2 P6)",
+            ));
+        }
+        let outcome = self.discover_jwks_uri(discovery_url).await;
+        *self
+            .discovery_failed_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(crate::time::Instant::now);
+        outcome
     }
 
     async fn discover_jwks_uri(&self, discovery_url: &str) -> Result<String, AxiamError> {
@@ -450,10 +499,7 @@ impl SsfReceiver {
         {
             Ok(true) => Ok(event),
             Ok(false) => Err(refuse(SetFailureReason::Replayed, "jti already seen")),
-            Err(cause) => Err(AxiamError::network_with_source(
-                "the replay store could not answer: the SET is unjudged and was not recorded",
-                cause,
-            )),
+            Err(cause) => Err(store_failure(cause)),
         }
     }
 
@@ -581,7 +627,10 @@ impl SsfReceiver {
     /// recorded before the failure — and leaves the SET the store failed on
     /// and every one after it *unjudged*: in neither `events` nor `refused`,
     /// recorded nowhere, their `jti`s in [`SsfPollResult::unjudged`]. Do not
-    /// acknowledge them; the transmitter offers them again.
+    /// acknowledge them; the transmitter offers them again. Such a poll returns
+    /// without an error, so it also emits the §19
+    /// [`crate::telemetry::TelemetryEvent::SsfUnjudged`] event, which makes the
+    /// outage visible to a telemetry hook.
     ///
     /// Retried per §16 on a transport failure, a `5xx`, a `408` or a `429`;
     /// never on another `4xx`.
@@ -700,6 +749,15 @@ impl SsfReceiver {
                     None => unjudged.push(jti.clone()),
                 },
             }
+        }
+        if !unjudged.is_empty() {
+            self.client
+                .telemetry()
+                .emit(crate::telemetry::TelemetryEvent::SsfUnjudged {
+                    operation: "ssf.poll",
+                    count: unjudged.len(),
+                    category: "replay_store",
+                });
         }
         Ok(SsfPollResult {
             events,
