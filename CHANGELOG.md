@@ -13,6 +13,27 @@ ilpanich/axiam#576). The vendored `CONTRACT.md` comes from axiam `fe369eb`; `ope
 `management-registry.json` and `proto/` are unchanged. No section is added, so the statement
 names the same sections at 1.59.
 
+Contract **1.60** rows (CONTRACT.md §34.4; the re-vendored `CONTRACT.md` is axiam's
+`58df4ee` draft — `openapi.json`, `management-registry.json` and `proto/` follow
+with the generated-field rows).
+
+### Changed (breaking)
+
+- **BREAKING (D-7, released with 1.0.0): `ReplayStore::check_and_record` returns
+  `Result<bool, ReplayStoreError>`, not `bool`** (B1, §34.2 P4, R-4). A store has three
+  answers — seen (`Ok(false)`), not seen (`Ok(true)`), cannot answer (`Err`) — and an `Err` is
+  no verdict: `SsfReceiver::verify_set` raises an `AxiamError::Network` chaining the store's
+  error, with no reason code, and records nothing; `SsfReceiver::poll` leaves that SET
+  unjudged — in neither `events` nor `refused`, unrecorded — and lists its `jti`, and those of
+  the rest of the batch, in the new `SsfPollResult::unjudged`, so the caller does not
+  acknowledge it and the transmitter offers it again. The 1.59 route (return `false` when you
+  cannot answer, which read as `replayed` and was acknowledged, losing the event) is withdrawn.
+  `MemoryReplayStore` is updated and never fails. **Migrating:** change the method's return
+  type, wrap the old answer in `Ok(..)`, and return `Err(..)` where you returned `false` for an
+  outage. `SsfPollResult` gains the public field `unjudged` (struct-literal constructions and
+  exhaustive destructuring need it); `ReplayStoreError` is
+  `Box<dyn std::error::Error + Send + Sync>`.
+
 ### Fixed
 
 - `SsfReceiver::poll` no longer loses events (R-1, §34.2 P1): it runs steps 1 – 8 over the
@@ -39,9 +60,10 @@ names the same sections at 1.59.
 
 ### Changed
 
-- `ReplayStore` documents that a store that cannot answer must **fail closed** — return
-  `false` — the documentation route P4 gives an interface that cannot report a failure (R-4).
-  The README states that the default `MemoryReplayStore` is bounded in time and unbounded in
+- `ReplayStore` documented that a store that cannot answer must **fail closed** — return
+  `false` — the documentation route contract 1.59 P4 gave an interface that cannot report a
+  failure (R-4); contract 1.60 withdrew it and the method is now fallible (see above). The
+  README states that the default `MemoryReplayStore` is bounded in time and unbounded in
   count.
 - A `replayed` refusal from `poll` is acknowledged, not reported in `set_errs` (P2): the poll
   documentation, `RefusedSet` and the README say so.

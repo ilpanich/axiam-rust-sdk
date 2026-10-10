@@ -82,7 +82,7 @@ honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.
 Contract 1.59 adds no section: its §34 records the cross-SDK review of the 1.53 – 1.58 ports
 and twelve clarifications, P1 – P12. This SDK follows them — `SsfReceiver::poll` records no
 `jti` it does not return (P1), a `replayed` refusal is acknowledged (P2), a custom
-`ReplayStore` fails closed (P4), `ciba_await` ends on a decisive answer or any failure after a
+`ReplayStore` answers `Result<bool, _>` and a store that cannot answer gives no verdict (P4, as rewritten in 1.60), `ciba_await` ends on a decisive answer or any failure after a
 `200` and survives a `5xx` whatever its body (P8, P9), and an RFC 7592 update sends no list its
 read lacked (P12.4).
 
@@ -2102,10 +2102,19 @@ not return.
 
 The replay store is pluggable (`SsfReceiverConfig::replay_store`). The default
 `MemoryReplayStore` is one process's memory, bounded in time — each `jti` is kept for the
-replay window — and **unbounded in count**: nothing caps how many it holds meanwhile. A
-store of your own cannot report a failure through `ReplayStore::check_and_record`, so it
-must **fail closed**: when it cannot answer, it returns `false` ("already seen"), and the
-SET is refused rather than accepted (§34.2 P4).
+replay window — and **unbounded in count**: nothing caps how many it holds meanwhile.
+
+A store has three answers — seen, not seen, **cannot answer** — and
+`ReplayStore::check_and_record` returns `Result<bool, ReplayStoreError>` to give all three
+(contract 1.60, §34.2 P4). A store that cannot answer (backend unreachable, a timeout) returns
+`Err`, which is **no verdict**: the SET is neither refused nor accepted and stays *unjudged*.
+`verify_set` raises an `AxiamError::Network` chaining your error, with no reason code; `poll`
+records nothing for the SET, returns it in neither `events` nor `refused`, lists its `jti` in
+`SsfPollResult::unjudged` (with the rest of the batch, which the failed store is not asked
+about) and expects you not to acknowledge it, so the transmitter offers it again. Never answer
+`Ok(false)` for a `jti` you could not check: that reads as `replayed`, which you acknowledge,
+and an event nobody processed is lost. (Before 1.0.0 the method answered a bare `bool` and
+documented "return `false` when you cannot answer"; that route is withdrawn.)
 
 ## CIBA (§33)
 
