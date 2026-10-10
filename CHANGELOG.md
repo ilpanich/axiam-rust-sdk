@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-10
+
 `axiam-sdk` 1.0.0 is the first stable release of the AXIAM Rust SDK: from here its public API
 follows semantic versioning, a breaking change waits for 2.0.0, and security fixes ship in
 `1.0.x`. It ships the REST transport (`rest`), gRPC (`grpc`: authorization checks, `get_user_info`,
@@ -87,6 +89,20 @@ Since `v1.0.0-beta17`:
   unjudged, carrying their count and the cause, never a `jti`.
 - `AxiamError::Auth` gains the `set_reason` field (the variant is `#[non_exhaustive]`).
 
+- The federation update_config null rule, and the 1.60 member tests
+
+- The four contract 1.60 discovery members; a refresh's scope is the token's
+
+- A replay store that cannot answer gives no verdict (contract 1.60 B1)
+
+- CIBA initiation, polling and ping helpers, signed form (CONTRACT §33, §21.3.1)
+
+- SSF stream management tests and the receiver helper (CONTRACT §32, §32.7)
+
+- Directory namespace semantics (CONTRACT §30)
+
+- RFC 7592 client configuration operations (CONTRACT §28.12)
+
 ### Changed
 
 - `poll` acknowledges rather than reports a `replayed` SET (§34.2 P2): the documentation,
@@ -106,6 +122,52 @@ Since `v1.0.0-beta17`:
   minimal-profile server reads no AMQP queue (§8).
 - The `ciba_await` deadline stays anchored at the initiate response's receipt, one of the two
   anchors §34.2 P10 allows.
+
+- README at contract 1.60; the 1.0.0 changelog
+
+- re-vendor contract 1.60, the spec and the registry (axiam 8df0e11)
+
+- The actor token is the exchanging client's own; a broker confirm is not evidence (contract 1.60 15.2 rule 9, 8)
+
+- re-vendor CONTRACT.md at contract 1.60 (draft 58df4ee)
+
+- Contract 1.59 conformance statement and changelog (F-59-01)
+
+- Generated and type documentation agrees with the types (R-28, F-13, F-14)
+
+- Rustfmt the CIBA and RFC 7592 changes
+
+- Pin §21.3.1 vector A from the vendored CONTRACT.md, CIBA row included (R-31, F-3)
+
+- re-vendor CONTRACT.md at contract 1.59 (axiam fe369eb)
+
+- Redaction assertions never print the secret they caught
+
+- Contract 1.58 conformance statement, usage, changelog
+
+- scim_targets namespace required tests (CONTRACT §31)
+
+- Saml namespace required tests (CONTRACT §29)
+
+- re-vendor contract 1.58 artifacts and regenerate §27 surface
+
+- Raise the MSRV from 1.88 to 1.89
+
+- Revert "ci: test the stable leg against the newest dependency releases"
+
+- Test the stable leg against the newest dependency releases
+
+- Enable MSRV-aware dependency resolution (resolver 3)
+
+- Bump dtolnay/rust-toolchain
+
+- Bump taiki-e/install-action from 2.87.20 to 2.87.22
+
+- re-vendor openapi.json + management-registry.json after utoipa 6
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump taiki-e/install-action from 2.87.15 to 2.87.20
 
 ### Fixed
 
@@ -141,6 +203,20 @@ Since `v1.0.0-beta17`:
 - Generated documentation (R-28): a replace operation with optional members no longer says
   "every field of the body is required", `ParseSamlSpMetadata` is documented as exactly one
   member rather than a sparse body, and `MtlsEndpointAliases` names seven endpoints.
+
+- A failed key fetch counts toward the minute; ssf_unjudged; a store's own error passes through
+
+- A section 16 retry inside ciba_await never waits past the deadline (contract 1.60 B3)
+
+- No wire struct holding a secret derives Debug (R-19, F-16)
+
+- The RFC 7592 replacement sends no list the read lacked and keeps an unexpected shape (R-23, F-4)
+
+- ciba_await stops on a decisive answer or a failure after the 200; a 5xx is transient whatever its body (R-12, F-2; §33.8 t8 / P8)
+
+- Poll records nothing on a non-verdict failure; the replay store fails closed (R-1, F-1; R-4, F-8(a))
+
+- Never retry a 4xx answer to read_client_registration (§28.12.2 rule 5)
 
 ### Security
 
