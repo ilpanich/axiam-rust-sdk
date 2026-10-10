@@ -27,10 +27,9 @@ if (await client.can("documents:read", "3f8a…-uuid")) {
 }
 ```
 
-1.0.0 has not shipped: every release so far is a prerelease, and the API can
-still change between them. Until it does, `latest` names the newest prerelease,
-so the install line above is the one to use — pin the exact version in
-`package.json` if you would rather choose when to move.
+From 1.0.0 the package is stable and follows semantic versioning, in lockstep
+with the `axiam-sdk` crate it is built from: `latest` names the newest stable
+release, a breaking change waits for 2.0.0, and security fixes ship in `1.0.x`.
 
 ## Coming from 1.0.0-alpha31 or earlier?
 

@@ -161,7 +161,11 @@ pub struct OidcTokenSet {
     pub token_type: String,
     /// Access-token lifetime in seconds from the time of the response.
     pub expires_in: u64,
-    /// Granted scope, when the server narrowed or echoed it.
+    /// The granted scope, as this response states it. After `oidc_refresh`
+    /// it is the token's scope, which may be narrower than the original
+    /// grant's when the client's registration was narrowed since (§12.1,
+    /// contract 1.60): never assume the two are equal. `None` when the
+    /// response carried none.
     pub scope: Option<String>,
     /// The refresh token, when the grant issued one (§12.5 secret).
     pub refresh_token: Option<Sensitive<String>>,

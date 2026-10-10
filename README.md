@@ -14,7 +14,7 @@ Official Rust client SDK for [AXIAM](https://github.com/ilpanich/axiam) — Acce
 
 - **Crate:** `axiam-sdk`
 - **Repository:** [github.com/ilpanich/axiam-rust-sdk](https://github.com/ilpanich/axiam-rust-sdk)
-- **Registry:** [crates.io/crates/axiam-sdk](https://crates.io/crates/axiam-sdk) _(reserved, not yet published)_
+- **Registry:** [crates.io/crates/axiam-sdk](https://crates.io/crates/axiam-sdk)
 - **API docs:** [docs.rs/axiam-sdk](https://docs.rs/axiam-sdk) — built automatically by docs.rs on each release
 - **License:** Apache-2.0
 - **MSRV:** Rust 1.89 (`rust-version = "1.89"` in `Cargo.toml`, enforced in CI) — see [Supported Rust versions](#supported-rust-versions)
@@ -54,9 +54,15 @@ produces a manifest promising a toolchain the edition cannot compile on.
 
 See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
+## Stability
+
+`axiam-sdk` 1.0.0 is the first stable release. Its public API and the wire contract it
+speaks (CONTRACT.md, the REST, gRPC and AMQP surfaces) follow semantic versioning from here: a
+breaking change waits for 2.0.0, and security fixes ship in `1.0.x`.
+
 ## Contract conformance
 
-This SDK conforms to **contract 1.59**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.60**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -79,12 +85,19 @@ seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) i
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
 
-Contract 1.59 adds no section: its §34 records the cross-SDK review of the 1.53 – 1.58 ports
-and twelve clarifications, P1 – P12. This SDK follows them — `SsfReceiver::poll` records no
+Contract 1.59 and 1.60 add no section an SDK claims (1.60's §35, certificate revocation
+lists, is informative and has no SDK surface): §34 records the cross-SDK review of the
+1.53 – 1.58 ports, its clarifications P1 – P12 and the answers of §34.4. This SDK follows them — `SsfReceiver::poll` records no
 `jti` it does not return (P1), a `replayed` refusal is acknowledged (P2), a custom
-`ReplayStore` fails closed (P4), `ciba_await` ends on a decisive answer or any failure after a
-`200` and survives a `5xx` whatever its body (P8, P9), and an RFC 7592 update sends no list its
-read lacked (P12.4).
+`ReplayStore` answers `Result<bool, _>` and a store that cannot answer gives no verdict (P4, as rewritten in 1.60), `ciba_await` ends on a decisive answer or any failure after a
+`200` and survives a `5xx` whatever its body (P8, P9), a §16 retry inside `ciba_await` never
+waits past its deadline (P10), the SSF key cache expires within ten minutes and a failed key
+fetch counts toward its once-a-minute limit (P6), and an RFC 7592 update sends no list its
+read lacked (P12.4). The contract 1.60 additions are carried too: `expected_updated_at` on
+`ScimTargetInput` (§31.3 rule 4), `window_minutes` on notification rules, the federation
+configuration's `allow_sha1_signatures` and `idp_metadata_signing_cert_pem` and its
+`update_config` null rule (§27.15), a refresh's `scope` read as the token's (§12.1), and the
+four revocation and introspection discovery members (§21.5).
 
 ### Contract 1.53 – 1.58 — what this SDK ships
 
@@ -345,14 +358,14 @@ into just `rest`:
 
 ```toml
 [dependencies]
-axiam-sdk = { version = "0.1", default-features = false, features = ["rest"] }
+axiam-sdk = { version = "1.0.0", default-features = false, features = ["rest"] }
 ```
 
 ## Usage
 
 ```toml
 [dependencies]
-axiam-sdk = "0.1"
+axiam-sdk = "1.0.0"
 ```
 
 Each capability below has a complete, runnable example under [`examples/`](examples/) — they
@@ -570,6 +583,14 @@ consume_with_tls("amqps://broker.internal:5671", "axiam.authz.request", signing_
 See [`examples/amqp_consumer.rs`](examples/amqp_consumer.rs). Every delivery's HMAC-SHA256
 signature (CONTRACT.md §8) is verified before the handler runs; failures are nacked without
 requeue.
+
+**A broker confirm is not evidence that AXIAM saw a message** (CONTRACT.md §8, minimal
+profile). A publisher confirm — including the one `reactor_serve` waits for on a reply — means
+only that the broker accepted the message; it never means AXIAM decided a request or recorded
+an event. A server running in the minimal profile (`AXIAM__AMQP__ENABLED=false`) reads no AMQP
+queue at all: it consumes neither `axiam.authz.request` nor `axiam.audit.events`, whatever a
+broker holds. Against one, use REST or gRPC (`GET /health` reports `profile: minimal` and lists
+`amqp_authz` and `amqp_audit_ingestion` under `unavailable`).
 
 #### Transport security (§8b)
 
@@ -906,6 +927,12 @@ Most of what this method does is refuse to be helpful, and each refusal is delib
 
 - **No default `actor_token`.** Omitting it asks for *impersonation*; the SDK will not
   quietly substitute the client's own session token and turn that into a delegation.
+- **The actor token is the exchanging client's own** (§15.2 rule 9). Pass an `actor_token` the
+  same client was issued — usually its own `client_credentials` token, from
+  `login_client_credentials` — and the issued token's `act.sub` is that client's `client_id`.
+  An actor token issued to another client, a console sign-in or a service account is answered
+  `400 invalid_request` (`actor_token was not issued to the exchanging client`), which the SDK
+  surfaces unchanged and neither retries nor rewrites into an impersonation.
 - **No auto-narrowing after `invalid_scope`.** The server refuses rather than silently
   narrowing precisely so the caller finds out here.
 - **No refresh token, ever** — `ExchangedToken` has no such field, so there is nothing to
@@ -2049,11 +2076,20 @@ let draft = client.saml()
 let sp = client.saml().create_service_provider(&draft.service_provider).await?;
 
 // §31 / §32 — replace updates: read, convert, change, write. The write-only secret is
-// left absent, which keeps the stored one.
+// left absent, which keeps the stored one. The SCIM conversion also carries the
+// `updated_at` it read as `expected_updated_at`, so the write is refused `409` if another
+// administrator changed the target in between (§31.3 rule 4): reload and retry.
 let target = client.scim_targets().get(target_id).await?;
 let mut body = models::ScimTargetInput::from(&target);
 body.enabled = Some(false);
 client.scim_targets().update(target_id, &body).await?;
+
+// §27.15 note 8 — federation.update_config is sparse: `None` leaves a member as stored,
+// and on its ten nullable members `Some(None)` sends `null`, which clears it.
+client.federation().update_config(config_id, &models::UpdateFederationConfigRequest {
+    idp_metadata_signing_cert_pem: Some(None), // stop checking the metadata signature
+    ..Default::default()
+}).await?;
 ```
 
 `SamlIdpCredential` has no key member and never will; `delete` on a SCIM target deprovisions
@@ -2102,10 +2138,29 @@ not return.
 
 The replay store is pluggable (`SsfReceiverConfig::replay_store`). The default
 `MemoryReplayStore` is one process's memory, bounded in time — each `jti` is kept for the
-replay window — and **unbounded in count**: nothing caps how many it holds meanwhile. A
-store of your own cannot report a failure through `ReplayStore::check_and_record`, so it
-must **fail closed**: when it cannot answer, it returns `false` ("already seen"), and the
-SET is refused rather than accepted (§34.2 P4).
+replay window — and **unbounded in count**: nothing caps how many it holds meanwhile.
+
+A store has three answers — seen, not seen, **cannot answer** — and
+`ReplayStore::check_and_record` returns `Result<bool, ReplayStoreError>` to give all three
+(contract 1.60, §34.2 P4). A store that cannot answer (backend unreachable, a timeout) returns
+`Err`, which is **no verdict**: the SET is neither refused nor accepted and stays *unjudged*.
+`verify_set` raises an `AxiamError::Network` chaining your error, with no reason code; `poll`
+records nothing for the SET, returns it in neither `events` nor `refused`, lists its `jti` in
+`SsfPollResult::unjudged` (with the rest of the batch, which the failed store is not asked
+about) and expects you not to acknowledge it, so the transmitter offers it again. Never answer
+`Ok(false)` for a `jti` you could not check: that reads as `replayed`, which you acknowledge,
+and an event nobody processed is lost. (Before 1.0.0 the method answered a bare `bool` and
+documented "return `false` when you cannot answer"; that route is withdrawn.) An `AxiamError`
+your store returns passes through unchanged; any other error is wrapped. A `poll` that returns
+with SETs unjudged emits the §19 `TelemetryEvent::SsfUnjudged` event (their count, and
+`replay_store`), so an outage is visible to a telemetry hook even though no error was raised.
+
+The signing keys are cached for five minutes (the contract's ceiling is ten). An unknown
+`kid` costs one refetch, at most once a minute; a key fetch that **fails** — the first fill,
+the refresh of an expired cache, or that refetch — counts toward the same minute, so a JWKS
+outage is not one fetch per SET: a SET inside that minute makes no fetch and gets an
+`AxiamError::Network` with no reason code (no verdict; answer it `5xx`), and `poll` raises it
+having recorded nothing (§34.2 P6).
 
 ## CIBA (§33)
 

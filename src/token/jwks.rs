@@ -33,9 +33,18 @@ use crate::AxiamError;
 pub const JWKS_PATH: &str = "/oauth2/jwks";
 
 /// How long a fetched `JwkSet` is cached before a normal (non-forced)
-/// refetch is attempted.
+/// refetch is attempted. Five minutes, inside the ten §34.2 P6 allows the
+/// SSF key cache (contract 1.60).
 #[cfg(any(feature = "rest", feature = "actix"))]
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// After a failed fetch, how long a verifier built with
+/// [`JwksVerifier::limiting_failed_fetches`] makes no other (§34.2 P6: a failed
+/// fill, a failed refresh of an expired cache and a failed unknown-`kid`
+/// refetch each count toward the once-a-minute limit, so that a JWKS outage
+/// is not one fetch per SET).
+#[cfg(any(feature = "rest", feature = "actix"))]
+pub(crate) const FAILED_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Minimum interval between forced refetches triggered by an unknown `kid`,
 /// to avoid a hostile/rotating token stream hammering the JWKS endpoint.
@@ -482,6 +491,12 @@ pub struct JwksVerifier {
     /// (D-08/D-09). Guards ONLY the fetch — a coalescing wrapper, never the
     /// cryptographic verify path.
     fetch_lock: tokio::sync::Mutex<()>,
+    /// §34.2 P6: whether a failed fetch counts toward the once-a-minute limit.
+    /// Set for the SSF receiver only; the §10 guard and §12 ID-token paths
+    /// retry a failed fetch on their next call, as they always have.
+    limit_failed_fetches: bool,
+    /// When the last fetch failed, while [`Self::limit_failed_fetches`] holds.
+    last_failed_fetch: std::sync::Mutex<Option<Instant>>,
     /// §10.1 rule 4: the tenant every verified token MUST be scoped to.
     /// `None` means "not configured", which makes [`Self::verify`] fail
     /// closed — never "no tenant constraint".
@@ -526,6 +541,8 @@ impl JwksVerifier {
             jwks_url,
             cache: RwLock::new(None),
             fetch_lock: tokio::sync::Mutex::new(()),
+            limit_failed_fetches: false,
+            last_failed_fetch: std::sync::Mutex::new(None),
             expected_tenant_id: None,
             expected_issuer: None,
             expected_audience: None,
@@ -676,6 +693,8 @@ impl JwksVerifier {
             jwks_url,
             cache: RwLock::new(None),
             fetch_lock: tokio::sync::Mutex::new(()),
+            limit_failed_fetches: false,
+            last_failed_fetch: std::sync::Mutex::new(None),
             expected_tenant_id: None,
             expected_issuer: None,
             expected_audience: None,
@@ -684,6 +703,33 @@ impl JwksVerifier {
             resource_metadata_url: None,
             #[cfg(feature = "actix")]
             mcp_challenges: None,
+        }
+    }
+
+    /// Count a failed fetch toward the once-a-minute limit (§34.2 P6, the SSF
+    /// receiver's key cache): within a minute of a failed fetch no fetch is
+    /// made, and a lookup that needs one fails with [`AxiamError::Network`].
+    pub(crate) fn limiting_failed_fetches(mut self) -> Self {
+        self.limit_failed_fetches = true;
+        self
+    }
+
+    /// The refusal a lookup gets inside the minute after a failed fetch, when
+    /// failed fetches are limited.
+    fn failed_fetch_cooldown(&self) -> Result<(), AxiamError> {
+        if !self.limit_failed_fetches {
+            return Ok(());
+        }
+        let last = *self
+            .last_failed_fetch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match last {
+            Some(at) if at.elapsed() < FAILED_FETCH_MIN_INTERVAL => Err(AxiamError::network(
+                "the JWKS fetch failed less than a minute ago; no fetch was made \
+                 (CONTRACT.md §34.2 P6)",
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -1175,6 +1221,7 @@ impl JwksVerifier {
         if let Some(jwks) = self.cached_if_fresh() {
             return Ok(jwks);
         }
+        self.failed_fetch_cooldown()?;
         self.fetch_and_cache(false).await
     }
 
@@ -1198,6 +1245,7 @@ impl JwksVerifier {
         // (D-08/D-09), rather than each racing the cooldown check
         // independently (the pre-existing TOCTOU this plan closes).
         let _guard = self.fetch_lock.lock().await;
+        self.failed_fetch_cooldown()?;
 
         let allowed = {
             let cache = self.cache.read().ok();
@@ -1225,6 +1273,17 @@ impl JwksVerifier {
     }
 
     async fn fetch_and_cache(&self, is_forced: bool) -> Result<JwkSet, AxiamError> {
+        let outcome = self.fetch_and_cache_once(is_forced).await;
+        if self.limit_failed_fetches {
+            *self
+                .last_failed_fetch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(Instant::now);
+        }
+        outcome
+    }
+
+    async fn fetch_and_cache_once(&self, is_forced: bool) -> Result<JwkSet, AxiamError> {
         let response = self
             .http_client
             .get(self.jwks_url.clone())
@@ -1422,5 +1481,130 @@ mod tests {
         };
         let found = find_jwk(&jwks, Some("kid-2"));
         assert_eq!(found.unwrap().common.key_id.as_deref(), Some("kid-2"));
+    }
+
+    // ── §34.2 P6 (contract 1.60): the key cache expires, and a failed fetch
+    //    counts toward the once-a-minute limit ──
+
+    /// A JWKS endpoint answering `statuses` in turn (the last one repeats),
+    /// and the number of fetches it saw.
+    async fn jwks_endpoint(
+        statuses: Vec<u16>,
+    ) -> (
+        wiremock::MockServer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = wiremock::MockServer::start().await;
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&hits);
+        let body = serde_json::json!({ "keys": [ed25519_test_jwk(Some("kid-1"))] });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                let status = statuses[n.min(statuses.len() - 1)];
+                wiremock::ResponseTemplate::new(status).set_body_json(body.clone())
+            })
+            .mount(&server)
+            .await;
+        (server, hits)
+    }
+
+    fn ssf_verifier(server: &wiremock::MockServer) -> JwksVerifier {
+        let url = url::Url::parse(&format!("{}/oauth2/jwks", server.uri())).unwrap();
+        JwksVerifier::for_jwks_url(reqwest::Client::new(), url).limiting_failed_fetches()
+    }
+
+    fn backdate(verifier: &JwksVerifier, field: &str, by: Duration) {
+        let past = Instant::now()
+            .checked_sub(by)
+            .expect("a monotonic clock that far back");
+        match field {
+            "fetched_at" => verifier.cache.write().unwrap().as_mut().unwrap().fetched_at = past,
+            _ => *verifier.last_failed_fetch.lock().unwrap() = Some(past),
+        }
+    }
+
+    #[test]
+    fn the_key_cache_lifetime_is_within_ten_minutes() {
+        assert!(JWKS_CACHE_TTL <= Duration::from_secs(600));
+    }
+
+    #[tokio::test]
+    async fn the_key_cache_expires_and_the_next_lookup_fetches_again() {
+        use std::sync::atomic::Ordering;
+        let (server, hits) = jwks_endpoint(vec![200]).await;
+        let verifier = ssf_verifier(&server);
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "served from the cache");
+
+        backdate(&verifier, "fetched_at", JWKS_CACHE_TTL);
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "an expired cache fetches again"
+        );
+        // A successful refresh is not counted: the unknown-kid refetch runs.
+        assert!(verifier.key_for_kid("kid-9").await.unwrap().is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fill_counts_and_the_next_lookup_inside_the_minute_makes_no_fetch() {
+        use std::sync::atomic::Ordering;
+        let (server, hits) = jwks_endpoint(vec![503, 200]).await;
+        let verifier = ssf_verifier(&server);
+        let e = verifier.key_for_kid("kid-1").await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+        let e = verifier.key_for_kid("kid-1").await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "no verdict: {e}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no fetch inside the minute");
+
+        backdate(&verifier, "last_failed_fetch", FAILED_FETCH_MIN_INTERVAL);
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the minute is over");
+    }
+
+    #[tokio::test]
+    async fn a_failed_expiry_refresh_and_a_failed_refetch_each_count() {
+        use std::sync::atomic::Ordering;
+        let (server, hits) = jwks_endpoint(vec![200, 503]).await;
+        let verifier = ssf_verifier(&server);
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+
+        // An unknown kid's refetch fails: a second unknown kid inside the
+        // minute makes no fetch and is no verdict, while a known one still
+        // verifies from the cache.
+        assert!(verifier.key_for_kid("kid-9").await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        let e = verifier.key_for_kid("kid-8").await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // The cache expires and its refresh fails: counted the same way.
+        backdate(&verifier, "last_failed_fetch", FAILED_FETCH_MIN_INTERVAL);
+        backdate(&verifier, "fetched_at", JWKS_CACHE_TTL);
+        assert!(verifier.key_for_kid("kid-1").await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert!(verifier.key_for_kid("kid-1").await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "no fetch inside the minute");
+    }
+
+    #[tokio::test]
+    async fn without_the_limit_a_failed_fetch_is_retried_on_the_next_lookup() {
+        use std::sync::atomic::Ordering;
+        let (server, hits) = jwks_endpoint(vec![503, 200]).await;
+        let url = url::Url::parse(&format!("{}/oauth2/jwks", server.uri())).unwrap();
+        let verifier = JwksVerifier::for_jwks_url(reqwest::Client::new(), url);
+        assert!(verifier.key_for_kid("kid-1").await.is_err());
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "the §10 / §12 paths are unchanged"
+        );
     }
 }

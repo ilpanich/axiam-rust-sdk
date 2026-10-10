@@ -74,6 +74,15 @@ OMIT_WHEN_EMPTY = {"tenant_scope"}
 # not about booleans.
 DEFAULT_TRUE_WHEN_ABSENT = {"inherit"}
 
+# The same, for a required boolean whose absence means `false`.
+#
+# CONTRACT.md §27.15 note 6: `FederationConfigResponse.allow_sha1_signatures`
+# is always sent by a 1.0.0 server, and "a response that lacks it, from an older
+# server, decodes as `false`" -- the SHA-1 acceptance that server never offered.
+# Failing the decode instead would take `federation.list_configs` down against
+# every server that predates the field.
+DEFAULT_FALSE_WHEN_ABSENT = {"allow_sha1_signatures"}
+
 
 def skip_attr(ident: str, ty: str, indent: str) -> str:
     """The `serde` attribute for an optional field, honouring OMIT_WHEN_EMPTY."""
@@ -112,6 +121,20 @@ EXPLICIT_NULL_FIELDS = {
     ("UpdateDirectoryConfig", "group_filter"),
     ("SamlIdpInfo", "active_credential_id"),
     ("SamlIdpInfo", "next_credential_id"),
+    # §27.15 note 8 (contract 1.60): `federation.update_config` is sparse, and
+    # each of these ten is cleared by an explicit `null` and left unchanged when
+    # omitted. The body's other members cannot be cleared (the server reads
+    # `null` there as absent), so they stay a single `Option`.
+    ("UpdateFederationConfigRequest", "metadata_url"),
+    ("UpdateFederationConfigRequest", "idp_signing_cert_pem"),
+    ("UpdateFederationConfigRequest", "idp_metadata_signing_cert_pem"),
+    ("UpdateFederationConfigRequest", "provider_slug"),
+    ("UpdateFederationConfigRequest", "authorization_endpoint"),
+    ("UpdateFederationConfigRequest", "token_endpoint"),
+    ("UpdateFederationConfigRequest", "userinfo_endpoint"),
+    ("UpdateFederationConfigRequest", "apple_team_id"),
+    ("UpdateFederationConfigRequest", "apple_key_id"),
+    ("UpdateFederationConfigRequest", "button_icon"),
 }
 
 # Call-site documentation the contract makes an SDK repeat (§29.3, §30.3, §31.3,
@@ -152,6 +175,18 @@ CALL_SITE_NOTES: dict[str, str] = {
         "(TOTP is kept). The entry is found by the account's own username; a repeat "
         "on an already-linked account answers `was_already_linked` and repeats the "
         "revocations."
+    ),
+    "federation.update_config": (
+        "A sparse body (§27.15 note 8): a member left `None` is not sent and stays "
+        "as stored. `metadata_url`, `idp_signing_cert_pem`, "
+        "`idp_metadata_signing_cert_pem`, `provider_slug`, the three OAuth2 "
+        "endpoints, `apple_team_id`, `apple_key_id` and `button_icon` set to "
+        "`Some(None)` are sent as `null` and **clear** the value -- still held to the "
+        "relational rules: an `OAuth2` configuration's three endpoints cannot be "
+        "cleared (`400`), and the two Apple ids clear only together. The other "
+        "members cannot be cleared. `allow_sha1_signatures` and "
+        "`idp_metadata_signing_cert_pem` apply to SAML configurations only (`400` "
+        "otherwise)."
     ),
     "saml.create_service_provider": (
         "`sp_signing_cert_pem` must be RSA (2048 bits or more) or ECDSA on P-256, "
@@ -977,6 +1012,8 @@ def emit_struct(
             lines.append(skip_attr(ident, ty, "    "))
         elif ty == "bool" and ident in DEFAULT_TRUE_WHEN_ABSENT:
             lines.append('    #[serde(default = "default_true")]')
+        elif ty == "bool" and ident in DEFAULT_FALSE_WHEN_ABSENT:
+            lines.append("    #[serde(default)]")
         lines.append(f"    pub {ident}: {ty},")
     lines.append("}\n")
     return "\n".join(lines)

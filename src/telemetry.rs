@@ -128,6 +128,24 @@ pub enum TelemetryEvent {
         /// The §-reference for the limit, e.g. `§17.1 rule 2`.
         contract_reference: &'static str,
     },
+    /// Emitted when [`crate::ssf::SsfReceiver::poll`] returns normally leaving
+    /// at least one SET unjudged (§19.1, contract 1.60 §34.2 P1).
+    ///
+    /// An unjudged SET is in neither `events` nor `refused` and the poll raised
+    /// no error, so without this event a replay-store outage is invisible to
+    /// anyone not reading [`crate::ssf::SsfPollResult::unjudged`]. Carries no
+    /// `jti` and no SET.
+    SsfUnjudged {
+        /// Canonical operation name: `ssf.poll`.
+        operation: &'static str,
+        /// How many SETs of the batch were left unjudged.
+        count: usize,
+        /// The failure that left them unjudged: `replay_store`, or
+        /// `key_fetch`. This SDK's `poll` raises on a failed key fetch having
+        /// recorded nothing (§34.2 P1's first form), so it only ever reports
+        /// `replay_store`.
+        category: &'static str,
+    },
 }
 
 /// A caller-supplied telemetry sink (§19).

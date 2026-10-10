@@ -159,6 +159,35 @@ pub struct OidcConfiguration {
     #[serde(default)]
     pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
 
+    /// RFC 8414 §2 — the client-authentication methods the revocation
+    /// endpoint accepts (contract 1.60, §21.5): the token endpoint's list.
+    ///
+    /// `None` for a server before 1.0.0, which omits all four contract 1.60
+    /// members; RFC 8414 then reads it as `client_secret_basic` alone. Like
+    /// [`Self::token_endpoint_auth_methods_supported`] it describes the
+    /// deployment: `revoke` keeps authenticating with the method this client
+    /// was configured with either way (§12.1 rules 3 and 4).
+    #[serde(default)]
+    pub revocation_endpoint_auth_methods_supported: Option<Vec<String>>,
+
+    /// RFC 8414 §2 — the client-authentication methods the introspection
+    /// endpoint accepts (contract 1.60, §21.5): the token endpoint's list
+    /// without `none`. `Option`, and informational only, for the reason
+    /// [`Self::revocation_endpoint_auth_methods_supported`] gives.
+    #[serde(default)]
+    pub introspection_endpoint_auth_methods_supported: Option<Vec<String>>,
+
+    /// RFC 8414 §2 — the JWS algorithms the revocation endpoint accepts on a
+    /// `private_key_jwt` assertion (contract 1.60, §21.5); equal to
+    /// [`Self::token_endpoint_auth_signing_alg_values_supported`] at AXIAM.
+    #[serde(default)]
+    pub revocation_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
+
+    /// RFC 8414 §2 — the JWS algorithms the introspection endpoint accepts on
+    /// a `private_key_jwt` assertion (contract 1.60, §21.5).
+    #[serde(default)]
+    pub introspection_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
+
     /// RFC 8628 device authorization endpoint, used by
     /// [`crate::client::AxiamClient::device_authorize`] (§14.1).
     ///

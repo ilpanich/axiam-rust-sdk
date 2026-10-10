@@ -89,25 +89,41 @@ pub type AccessTokenFuture =
 /// Supplies [`AccessTokenFuture`]s, called once per poll.
 pub type AccessTokenProvider = Arc<dyn Fn() -> AccessTokenFuture + Send + Sync>;
 
+/// Why a [`ReplayStore`] could not answer: its backend was unreachable, a
+/// timeout, an error of any kind. Boxed, so a store reports whatever error its
+/// backend raised.
+pub type ReplayStoreError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Remembers the `jti`s already accepted, for step 9.
 ///
 /// Pluggable so a receiver running several instances can share one store
 /// (§32.7). [`MemoryReplayStore`] is the default.
 ///
-/// **A store that cannot answer must fail closed** (§32.7 step 9, contract
-/// 1.59 P4). [`Self::check_and_record`] has no way to report a failure, so
-/// when yours cannot answer — its backend unreachable, a timeout, an error of
-/// any kind — return `false`, "already seen": the SET is then refused as
-/// `replayed`, never accepted. Returning `true` for a `jti` you could not
-/// check accepts a replay. A refusal for that reason looks exactly like a real
-/// replay to the caller, so make the outage visible from inside the store
-/// (a log line, a metric) rather than letting it pass as one.
+/// A store has three answers — seen, not seen, **cannot answer** — and
+/// [`Self::check_and_record`] can give all three (§32.7 step 9, contract 1.60
+/// P4). A store that cannot answer returns `Err`: that is **no verdict**. The
+/// SET is neither refused nor accepted and stays *unjudged* —
+/// [`SsfReceiver::verify_set`] raises an [`AxiamError::Network`] chaining your
+/// error, and [`SsfReceiver::poll`] records nothing for it, returns it in
+/// neither `events` nor `refused` (its `jti` is in
+/// [`SsfPollResult::unjudged`]) and expects you not to acknowledge it, so the
+/// transmitter offers it again. Never answer `Ok(false)` ("already seen") for a
+/// `jti` you could not check: that turns an outage into a `replayed` refusal,
+/// which a caller acknowledges, and an event that was never processed is lost.
+/// Make the outage visible from inside the store as well (a log line, a
+/// metric). An [`AxiamError`] you return as the error passes through
+/// unchanged, unless it is a SET refusal; any other error is wrapped in
+/// [`AxiamError::Network`] (§2, contract 1.60).
 pub trait ReplayStore: Send + Sync {
-    /// Record `jti` for `window` and return `true`, or return `false` without
-    /// recording when it is already held — or when the store cannot answer
-    /// (fail closed, above). Must be atomic: two concurrent calls with one
-    /// `jti` must not both see `true`.
-    fn check_and_record(&self, jti: &str, window: Duration) -> bool;
+    /// Record `jti` for `window` and return `Ok(true)`, or return `Ok(false)`
+    /// without recording when it is already held, or `Err` when the store
+    /// cannot answer (nothing is recorded then). Must be atomic: two
+    /// concurrent calls with one `jti` must not both see `Ok(true)`.
+    ///
+    /// # Errors
+    /// [`ReplayStoreError`] when the store cannot answer — no verdict on the
+    /// SET.
+    fn check_and_record(&self, jti: &str, window: Duration) -> Result<bool, ReplayStoreError>;
 }
 
 /// The in-memory [`ReplayStore`]: one process, lost on restart.
@@ -123,15 +139,15 @@ pub struct MemoryReplayStore {
 }
 
 impl ReplayStore for MemoryReplayStore {
-    fn check_and_record(&self, jti: &str, window: Duration) -> bool {
+    fn check_and_record(&self, jti: &str, window: Duration) -> Result<bool, ReplayStoreError> {
         let now = crate::time::Instant::now();
         let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
         seen.retain(|_, expires| *expires > now);
         if seen.contains_key(jti) {
-            return false;
+            return Ok(false);
         }
         seen.insert(jti.to_string(), now + window);
-        true
+        Ok(true)
     }
 }
 
@@ -272,6 +288,11 @@ pub struct SsfPollResult {
     pub more_available: bool,
     /// The SETs that did not verify.
     pub refused: Vec<RefusedSet>,
+    /// The `jti`s of SETs that verified but that the [`ReplayStore`] could not
+    /// answer for, and those after them in the batch (contract 1.60 P1, P4):
+    /// neither accepted nor refused, recorded nowhere. Acknowledge none of
+    /// them and refuse none of them; the transmitter offers them again.
+    pub unjudged: Vec<String>,
 }
 
 /// The receiver helper (§32.7). Build with [`SsfReceiver::new`].
@@ -284,6 +305,9 @@ pub struct SsfReceiver {
     token_provider: Option<AccessTokenProvider>,
     replay_window: Duration,
     replay_store: Arc<dyn ReplayStore>,
+    /// When the SSF configuration fetch last failed: like a failed JWKS fill,
+    /// it counts toward the once-a-minute limit (§34.2 P6).
+    discovery_failed_at: Mutex<Option<crate::time::Instant>>,
 }
 
 impl std::fmt::Debug for SsfReceiver {
@@ -299,6 +323,21 @@ impl std::fmt::Debug for SsfReceiver {
 
 fn refuse(reason: SetFailureReason, detail: &str) -> AxiamError {
     AxiamError::set_refused(reason, detail)
+}
+
+/// The error for a store that could not answer (§2, §34.2 P3; contract 1.60
+/// C-1): this SDK's own [`AxiamError`] raised from inside the store passes
+/// through unchanged, any other failure is wrapped in [`AxiamError::Network`]
+/// as its `source`. A SET refusal is wrapped too, so that no store failure
+/// surfaces carrying a reason code and reads as a verdict.
+fn store_failure(cause: ReplayStoreError) -> AxiamError {
+    const UNJUDGED: &str =
+        "the replay store could not answer: the SET is unjudged and was not recorded";
+    match cause.downcast::<AxiamError>() {
+        Ok(own) if own.set_failure_reason().is_none() => *own,
+        Ok(refusal) => AxiamError::network_with_source(UNJUDGED, refusal),
+        Err(other) => AxiamError::network_with_source(UNJUDGED, other),
+    }
 }
 
 fn b64_json(part: &str) -> Option<Map<String, Value>> {
@@ -343,6 +382,7 @@ impl SsfReceiver {
             replay_store: config
                 .replay_store
                 .unwrap_or_else(|| Arc::new(MemoryReplayStore::default())),
+            discovery_failed_at: Mutex::new(None),
         })
     }
 
@@ -351,12 +391,40 @@ impl SsfReceiver {
             .get_or_try_init(|| async {
                 let jwks_uri = match &self.keys {
                     SsfKeySource::JwksUri(u) => u.clone(),
-                    SsfKeySource::DiscoveryUrl(d) => self.discover_jwks_uri(d).await?,
+                    SsfKeySource::DiscoveryUrl(d) => self.discover_jwks_uri_limited(d).await?,
                 };
                 let url = parse_secure("jwks_uri", &jwks_uri)?;
-                Ok::<_, AxiamError>(JwksVerifier::for_jwks_url(self.client.http().clone(), url))
+                // §34.2 P6: the key cache expires within ten minutes, and a
+                // failed fetch counts toward the once-a-minute limit.
+                Ok::<_, AxiamError>(
+                    JwksVerifier::for_jwks_url(self.client.http().clone(), url)
+                        .limiting_failed_fetches(),
+                )
             })
             .await
+    }
+
+    /// [`Self::discover_jwks_uri`], made at most once a minute after a failure
+    /// (§34.2 P6): a SET inside that minute makes no fetch and gets a
+    /// `NetworkError` — no verdict — so an outage is not one fetch per SET.
+    async fn discover_jwks_uri_limited(&self, discovery_url: &str) -> Result<String, AxiamError> {
+        let recent = self
+            .discovery_failed_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some_and(|at| at.elapsed() < crate::token::jwks::FAILED_FETCH_MIN_INTERVAL);
+        if recent {
+            return Err(AxiamError::network(
+                "the SSF configuration fetch failed less than a minute ago; no fetch was made \
+                 (CONTRACT.md §34.2 P6)",
+            ));
+        }
+        let outcome = self.discover_jwks_uri(discovery_url).await;
+        *self
+            .discovery_failed_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(crate::time::Instant::now);
+        outcome
     }
 
     async fn discover_jwks_uri(&self, discovery_url: &str) -> Result<String, AxiamError> {
@@ -412,8 +480,10 @@ impl SsfReceiver {
     ///
     /// # Errors
     /// [`AxiamError::Auth`] with [`AxiamError::set_failure_reason`] set, or
-    /// [`AxiamError::Network`] when the JWKS could not be fetched — which is
-    /// not a verdict on the SET.
+    /// [`AxiamError::Network`] when the JWKS could not be fetched or the
+    /// [`ReplayStore`] could not answer — neither is a verdict on the SET
+    /// (§34.2 P3, P4), and the error carries no reason code. A SET whose store
+    /// failed was not recorded: verify it again once the store is back.
     pub async fn verify_set(&self, set: &str) -> Result<SecurityEvent, AxiamError> {
         let event = self.judge(set, None).await?;
         self.record(event)
@@ -421,13 +491,16 @@ impl SsfReceiver {
 
     /// Step 9: record the `jti` of a SET that passed steps 1–8.
     fn record(&self, event: SecurityEvent) -> Result<SecurityEvent, AxiamError> {
-        if !self
+        // A store that cannot answer gives no verdict (§34.2 P4): the SET is
+        // neither refused nor accepted, and the error is no `replayed`.
+        match self
             .replay_store
             .check_and_record(&event.jti, self.replay_window)
         {
-            return Err(refuse(SetFailureReason::Replayed, "jti already seen"));
+            Ok(true) => Ok(event),
+            Ok(false) => Err(refuse(SetFailureReason::Replayed, "jti already seen")),
+            Err(cause) => Err(store_failure(cause)),
         }
-        Ok(event)
     }
 
     /// Steps 1–8, recording nothing.
@@ -548,6 +621,17 @@ impl SsfReceiver {
     /// that error having recorded nothing, so every SET of the batch is offered
     /// again and none is lost as a false `replayed`.
     ///
+    /// **A store that cannot answer is no verdict either** (contract 1.60 P4):
+    /// the store's one atomic check-and-record cannot undo a `jti` recorded
+    /// earlier in the batch, so the poll returns what it judged — the SETs
+    /// recorded before the failure — and leaves the SET the store failed on
+    /// and every one after it *unjudged*: in neither `events` nor `refused`,
+    /// recorded nowhere, their `jti`s in [`SsfPollResult::unjudged`]. Do not
+    /// acknowledge them; the transmitter offers them again. Such a poll returns
+    /// without an error, so it also emits the §19
+    /// [`crate::telemetry::TelemetryEvent::SsfUnjudged`] event, which makes the
+    /// outage visible to a telemetry hook.
+    ///
     /// Retried per §16 on a transport failure, a `5xx`, a `408` or a `429`;
     /// never on another `4xx`.
     pub async fn poll(
@@ -646,21 +730,40 @@ impl SsfReceiver {
         // Step 9, in the transmitter's order.
         let mut events = Vec::new();
         let mut refused = Vec::new();
+        let mut unjudged = Vec::new();
         for (jti, verdict) in judged {
+            // The store already failed: it is not asked again for the rest of
+            // the batch, whose SETs stay unjudged and unrecorded (P1, P4).
+            if !unjudged.is_empty() && verdict.is_ok() {
+                unjudged.push(jti.clone());
+                continue;
+            }
             match verdict.and_then(|event| self.record(event)) {
                 Ok(event) => events.push(event),
-                Err(e) => refused.push(RefusedSet {
-                    jti: jti.clone(),
-                    reason: e
-                        .set_failure_reason()
-                        .expect("every remaining failure is a verdict"),
-                }),
+                Err(e) => match e.set_failure_reason() {
+                    Some(reason) => refused.push(RefusedSet {
+                        jti: jti.clone(),
+                        reason,
+                    }),
+                    // No reason code: the store could not answer.
+                    None => unjudged.push(jti.clone()),
+                },
             }
+        }
+        if !unjudged.is_empty() {
+            self.client
+                .telemetry()
+                .emit(crate::telemetry::TelemetryEvent::SsfUnjudged {
+                    operation: "ssf.poll",
+                    count: unjudged.len(),
+                    category: "replay_store",
+                });
         }
         Ok(SsfPollResult {
             events,
             more_available,
             refused,
+            unjudged,
         })
     }
 }
@@ -680,11 +783,19 @@ mod tests {
     #[test]
     fn the_memory_store_refuses_a_second_sighting_and_forgets_after_the_window() {
         let store = MemoryReplayStore::default();
-        assert!(store.check_and_record("a", Duration::from_secs(60)));
-        assert!(!store.check_and_record("a", Duration::from_secs(60)));
-        assert!(store.check_and_record("b", Duration::ZERO));
         assert!(
-            store.check_and_record("b", Duration::ZERO),
+            store
+                .check_and_record("a", Duration::from_secs(60))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .check_and_record("a", Duration::from_secs(60))
+                .unwrap()
+        );
+        assert!(store.check_and_record("b", Duration::ZERO).unwrap());
+        assert!(
+            store.check_and_record("b", Duration::ZERO).unwrap(),
             "expired, so new again"
         );
     }

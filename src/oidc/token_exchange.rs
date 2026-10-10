@@ -92,6 +92,11 @@ pub struct TokenExchangeParams {
     /// Its absence selects **impersonation**, which is a different operation
     /// with different risk. The SDK never fills this in for you — see
     /// [`AxiamClient::token_exchange`].
+    ///
+    /// It must have been issued to the exchanging client (§15.2 rule 9,
+    /// contract 1.60): usually that client's own `client_credentials` token
+    /// ([`AxiamClient::login_client_credentials`]), whose `sub` is its
+    /// `client_id`. Any other actor token is answered `400 invalid_request`.
     pub actor_token: Option<Sensitive<String>>,
     /// Scopes to request. Omitted from the body when `None`, which asks the
     /// server for the widest set the subject and the client's registration
@@ -195,6 +200,16 @@ impl AxiamClient {
     ///   *impersonation*; the SDK will not quietly reuse the client's own
     ///   session token as the actor and turn that into a delegation. They
     ///   are different operations with different risk.
+    /// * **The actor token is the exchanging client's own** (rule 9, contract
+    ///   1.60). The server accepts an `actor_token` only if it was issued to the
+    ///   client that authenticates the exchange, and answers any other —
+    ///   another client's, a console sign-in's, a service account's — with
+    ///   `400 invalid_request` (`actor_token was not issued to the exchanging
+    ///   client`), which surfaces here unchanged: not retried, not rewritten
+    ///   into an impersonation, not repaired with a token of the SDK's own. The
+    ///   usual actor is this client's own `client_credentials` token, from
+    ///   [`AxiamClient::login_client_credentials`]; you obtain it and pass it
+    ///   as [`TokenExchangeParams::actor_token`], the SDK supplies none.
     /// * **No retry or downgrade on `unauthorized_client`** (rule 2). It
     ///   means either "this client may not exchange" or "may not
     ///   impersonate" — both registration facts an operator must fix, not

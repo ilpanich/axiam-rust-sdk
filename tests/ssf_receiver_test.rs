@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::ssf::{
-    ReplayStore, SetErr, SsfKeySource, SsfPollOptions, SsfReceiver, SsfReceiverConfig, event_types,
+    ReplayStore, ReplayStoreError, SetErr, SsfKeySource, SsfPollOptions, SsfReceiver,
+    SsfReceiverConfig, event_types,
 };
 use axiam_sdk::{AxiamError, Sensitive, SetFailureReason};
 use base64::Engine as _;
@@ -406,13 +407,13 @@ struct InspectableStore {
 }
 
 impl ReplayStore for InspectableStore {
-    fn check_and_record(&self, jti: &str, _window: Duration) -> bool {
+    fn check_and_record(&self, jti: &str, _window: Duration) -> Result<bool, ReplayStoreError> {
         let mut seen = self.seen.lock().unwrap();
         if seen.iter().any(|j| j == jti) {
-            return false;
+            return Ok(false);
         }
         seen.push(jti.to_string());
-        true
+        Ok(true)
     }
 }
 
@@ -525,24 +526,69 @@ async fn poll_never_keeps_a_jti_it_does_not_return_when_a_later_key_fetch_fails(
     );
 }
 
-// ── §32.7 step 9 and §34.2 P4: a store that cannot answer fails closed ──
+// ── 6, a store that cannot answer (contract 1.60, §34.2 P4; §34.4 B1) ──
 //
-// `ReplayStore::check_and_record` returns `bool` and cannot report a failure,
-// which conforms only if its documentation tells an implementer to answer
-// "already seen" when it cannot answer. The documentation is pinned here, and
-// so is what that answer does: a refusal, never an acceptance.
+// `ReplayStore::check_and_record` answers `Result<bool, _>`: seen, not seen, or
+// cannot answer. The third is no verdict. `verify_set` raises the network
+// category with the store's error as its cause and no reason code; `poll` leaves
+// the SET unjudged — in neither `events` nor `refused`, not recorded, and its
+// `jti` in `unjudged`, so the caller does not acknowledge it. It is never
+// accepted, and never read as `replayed` (which a caller acknowledges).
 
-/// A store whose backend is down, answering as the trait's documentation says.
-struct UnreachableStore;
+/// A store that records, except for the `jti`s it is told it cannot answer for.
+#[derive(Default)]
+struct FlakyStore {
+    seen: Mutex<Vec<String>>,
+    down_for: Mutex<Vec<String>>,
+    calls: Mutex<Vec<String>>,
+}
 
-impl ReplayStore for UnreachableStore {
-    fn check_and_record(&self, _jti: &str, _window: Duration) -> bool {
-        false
+impl FlakyStore {
+    fn down_for(jtis: &[&str]) -> Arc<Self> {
+        let store = Self::default();
+        *store.down_for.lock().unwrap() = jtis.iter().map(|j| j.to_string()).collect();
+        Arc::new(store)
+    }
+    fn recovers(&self) {
+        self.down_for.lock().unwrap().clear();
+    }
+    fn recorded(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
     }
 }
 
+impl ReplayStore for FlakyStore {
+    fn check_and_record(&self, jti: &str, _window: Duration) -> Result<bool, ReplayStoreError> {
+        self.calls.lock().unwrap().push(jti.to_string());
+        if self.down_for.lock().unwrap().iter().any(|j| j == jti) {
+            return Err("the replay backend is unreachable".into());
+        }
+        let mut seen = self.seen.lock().unwrap();
+        if seen.iter().any(|j| j == jti) {
+            return Ok(false);
+        }
+        seen.push(jti.to_string());
+        Ok(true)
+    }
+}
+
+fn receiver_with_store(server: &MockServer, store: Arc<dyn ReplayStore>) -> SsfReceiver {
+    let token = format!("cc-{}", Uuid::new_v4().simple());
+    let mut config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::JwksUri(format!("{}/oauth2/jwks", server.uri())),
+    );
+    config.access_token_provider = Some(Arc::new(move || {
+        let t = token.clone();
+        Box::pin(async move { Ok(Sensitive::new(t)) })
+    }));
+    config.replay_store = Some(store);
+    SsfReceiver::new(&client(server), config).unwrap()
+}
+
 #[test]
-fn the_replay_store_documentation_says_fail_closed() {
+fn the_replay_store_documentation_says_a_store_that_cannot_answer_gives_no_verdict() {
     let source = include_str!("../src/ssf.rs");
     let start = source
         .find("pub trait ReplayStore")
@@ -551,9 +597,13 @@ fn the_replay_store_documentation_says_fail_closed() {
         .rfind("\n\n")
         .expect("the trait's documentation");
     let doc = &source[doc_start..start];
-    for needle in ["cannot answer", "return `false`", "fail closed"] {
+    for needle in ["cannot answer", "no verdict", "unjudged", "Ok(false)"] {
         assert!(doc.contains(needle), "ReplayStore's docs lack {needle:?}");
     }
+    assert!(
+        !doc.contains("fail closed"),
+        "contract 1.60 withdrew the fail-closed-as-replayed route"
+    );
     let readme = include_str!("../README.md");
     assert!(
         readme.contains("unbounded in count"),
@@ -562,21 +612,105 @@ fn the_replay_store_documentation_says_fail_closed() {
 }
 
 #[tokio::test]
-async fn a_store_that_cannot_answer_refuses_and_never_accepts() {
+async fn t6_verify_set_raises_the_network_category_for_a_store_that_cannot_answer() {
     let server = MockServer::start().await;
     let key = Key::generate();
     jwks(&server, vec![key.jwk()]).await;
-    let mut config = SsfReceiverConfig::new(
-        ISSUER,
-        AUDIENCE,
-        SsfKeySource::JwksUri(format!("{}/oauth2/jwks", server.uri())),
+    let c = claims();
+    let jti = c["jti"].as_str().unwrap().to_string();
+    let set = key.sign_set(&c);
+    let store = FlakyStore::down_for(&[&jti]);
+    let r = receiver_with_store(&server, store.clone());
+
+    let e = r.verify_set(&set).await.unwrap_err();
+    assert!(
+        matches!(e, AxiamError::Network { .. }),
+        "the §2 network category, not a refusal: {e}"
     );
-    config.replay_store = Some(Arc::new(UnreachableStore));
-    let r = SsfReceiver::new(&client(&server), config).unwrap();
+    assert!(e.set_failure_reason().is_none(), "no reason code: {e:?}");
+    let cause = std::error::Error::source(&e).expect("the store's error is the cause");
+    assert!(cause.to_string().contains("replay backend is unreachable"));
+    assert!(store.recorded().is_empty(), "nothing was recorded");
+
+    // Unjudged, not refused and not accepted: once the store answers, the same
+    // SET verifies — it was never `replayed`.
+    store.recovers();
+    let event = r.verify_set(&set).await.expect("the SET is judged now");
+    assert_eq!(event.jti, jti);
+    assert_eq!(reason(&r, &set).await, SetFailureReason::Replayed);
+}
+
+#[tokio::test]
+async fn t6_poll_leaves_a_set_the_store_cannot_answer_for_unjudged_and_unrecorded() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    jwks(&server, vec![key.jwk()]).await;
+    let stream = Uuid::new_v4().to_string();
+    // `a-`, `b-`, `c-` keep the batch's order whatever map the transmitter's
+    // JSON is read into.
+    let jti = |p: &str| format!("{p}-{}", Uuid::new_v4().simple());
+    let (a, b, c) = (jti("a"), jti("b"), jti("c"));
+    let reply = json!({
+        "sets": {
+            a.clone(): key.sign_set(&with(claims(), "jti", json!(a))),
+            b.clone(): key.sign_set(&with(claims(), "jti", json!(b))),
+            c.clone(): key.sign_set(&with(claims(), "jti", json!(c))),
+        },
+        "moreAvailable": false,
+    });
+    Mock::given(method("POST"))
+        .and(path(format!("/ssf/v1/poll/{stream}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    let store = FlakyStore::down_for(&[&b]);
+    let r = receiver_with_store(&server, store.clone());
+
+    let result = r
+        .poll(&stream, SsfPollOptions::default())
+        .await
+        .expect("a store outage is not a transport failure of the poll");
+    let returned: Vec<&str> = result.events.iter().map(|e| e.jti.as_str()).collect();
     assert_eq!(
-        reason(&r, &key.sign_set(&claims())).await,
-        SetFailureReason::Replayed
+        returned,
+        [a.as_str()],
+        "only the SET judged before the outage"
     );
+    assert!(
+        result.refused.is_empty(),
+        "an unjudged SET is not refused, least of all as `replayed`: {:?}",
+        result.refused
+    );
+    assert_eq!(
+        result.unjudged,
+        [b.clone(), c.clone()],
+        "the SET the store failed on and the tail after it, which is not asked"
+    );
+    assert_eq!(
+        store.recorded(),
+        std::slice::from_ref(&a),
+        "the unjudged jtis are unrecorded"
+    );
+    assert_eq!(
+        *store.calls.lock().unwrap(),
+        [a.clone(), b.clone()],
+        "a store that just failed is not asked again within the batch"
+    );
+
+    // The transmitter offers them again; the caller acknowledged only `a`.
+    store.recovers();
+    let again = r.poll(&stream, SsfPollOptions::default()).await.unwrap();
+    let returned: Vec<&str> = again.events.iter().map(|e| e.jti.as_str()).collect();
+    assert_eq!(returned, [b.as_str(), c.as_str()]);
+    assert_eq!(
+        again
+            .refused
+            .iter()
+            .map(|r| r.jti.as_str())
+            .collect::<Vec<_>>(),
+        [a.as_str()]
+    );
+    assert!(again.unjudged.is_empty());
 }
 
 #[tokio::test]
@@ -636,4 +770,195 @@ async fn discovery_supplies_the_jwks_uri_and_must_name_the_issuer() {
     assert!(matches!(e, AxiamError::Auth { .. }));
     // Debug never shows the provider.
     assert!(format!("{r:?}").contains("SsfReceiver"));
+}
+
+// ── contract 1.60, second pass: C-1, C-4 / §19.1 `ssf_unjudged`, C-5 / P6 ──
+
+/// A store that answers every `jti` with the error its function builds.
+struct FailingStore(fn() -> ReplayStoreError);
+
+impl ReplayStore for FailingStore {
+    fn check_and_record(&self, _jti: &str, _window: Duration) -> Result<bool, ReplayStoreError> {
+        Err((self.0)())
+    }
+}
+
+#[tokio::test]
+async fn c1_the_sdks_own_error_from_the_store_passes_through_and_a_refusal_is_wrapped() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    jwks(&server, vec![key.jwk()]).await;
+
+    // An `AxiamError` the store raises is this SDK's own §2 error: unchanged.
+    let own = receiver_with_store(
+        &server,
+        Arc::new(FailingStore(|| {
+            Box::new(AxiamError::network("replay cluster has no quorum"))
+        })),
+    );
+    let e = own.verify_set(&key.sign_set(&claims())).await.unwrap_err();
+    assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+    assert!(e.to_string().contains("no quorum"), "passed through: {e}");
+    assert!(
+        std::error::Error::source(&e).is_none(),
+        "not wrapped: {e:?}"
+    );
+
+    // A SET refusal from inside the store is wrapped, so that no store
+    // failure surfaces carrying a reason code and reads as a verdict.
+    let refusal = receiver_with_store(
+        &server,
+        Arc::new(FailingStore(|| {
+            Box::new(AxiamError::set_refused(SetFailureReason::Replayed, "store"))
+        })),
+    );
+    let e = refusal
+        .verify_set(&key.sign_set(&claims()))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+    assert!(e.set_failure_reason().is_none(), "no reason code: {e:?}");
+}
+
+/// The `(count, category)` of every `ssf_unjudged` event a hook saw.
+type Unjudged = Arc<Mutex<Vec<(usize, String)>>>;
+
+/// A client whose telemetry hook keeps every `ssf_unjudged` event.
+fn client_with_hook(server: &MockServer) -> (AxiamClient, Unjudged) {
+    use axiam_sdk::telemetry::TelemetryEvent;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let client = AxiamClient::builder()
+        .base_url(server.uri())
+        .unwrap()
+        .tenant_id(Uuid::new_v4())
+        .telemetry_hook(move |event: &TelemetryEvent| {
+            if let TelemetryEvent::SsfUnjudged {
+                operation,
+                count,
+                category,
+            } = event
+            {
+                assert_eq!(*operation, "ssf.poll");
+                sink.lock().unwrap().push((*count, category.to_string()));
+            }
+        })
+        .build()
+        .unwrap();
+    (client, seen)
+}
+
+#[tokio::test]
+async fn c4_a_poll_returning_with_unjudged_sets_emits_ssf_unjudged() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    jwks(&server, vec![key.jwk()]).await;
+    let stream = Uuid::new_v4().to_string();
+    let jti = |p: &str| format!("{p}-{}", Uuid::new_v4().simple());
+    let (a, b, c) = (jti("a"), jti("b"), jti("c"));
+    let reply = json!({
+        "sets": {
+            a.clone(): key.sign_set(&with(claims(), "jti", json!(a))),
+            b.clone(): key.sign_set(&with(claims(), "jti", json!(b))),
+            c.clone(): key.sign_set(&with(claims(), "jti", json!(c))),
+        },
+        "moreAvailable": false,
+    });
+    Mock::given(method("POST"))
+        .and(path(format!("/ssf/v1/poll/{stream}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    let (client, events) = client_with_hook(&server);
+    let store = FlakyStore::down_for(&[&b]);
+    let token = format!("cc-{}", Uuid::new_v4().simple());
+    let mut config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::JwksUri(format!("{}/oauth2/jwks", server.uri())),
+    );
+    config.access_token_provider = Some(Arc::new(move || {
+        let t = token.clone();
+        Box::pin(async move { Ok(Sensitive::new(t)) })
+    }));
+    config.replay_store = Some(store.clone());
+    let r = SsfReceiver::new(&client, config).unwrap();
+
+    let result = r.poll(&stream, SsfPollOptions::default()).await.unwrap();
+    assert_eq!(result.unjudged.len(), 2);
+    assert_eq!(
+        *events.lock().unwrap(),
+        [(2, "replay_store".to_string())],
+        "one event: the count and the category, no jti"
+    );
+
+    // A poll that leaves nothing unjudged emits nothing.
+    store.recovers();
+    let again = r.poll(&stream, SsfPollOptions::default()).await.unwrap();
+    assert!(again.unjudged.is_empty());
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn c5_a_failed_cold_fill_counts_and_a_set_inside_the_minute_makes_no_fetch() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    let hits = Arc::new(Mutex::new(0usize));
+    let sink = Arc::clone(&hits);
+    let keys = vec![key.jwk()];
+    // The first fetch fails; any later one would serve the key.
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(move |_: &Request| {
+            let mut n = sink.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"keys": keys}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let store = Arc::new(InspectableStore::default());
+    let r = receiver_with_store(&server, store.clone());
+
+    for _ in 0..3 {
+        let e = r.verify_set(&key.sign_set(&claims())).await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+        assert!(e.set_failure_reason().is_none(), "no verdict: {e:?}");
+    }
+    assert_eq!(
+        *hits.lock().unwrap(),
+        1,
+        "a JWKS outage is not one fetch per SET (§34.2 P6)"
+    );
+    assert!(store.seen.lock().unwrap().is_empty(), "nothing recorded");
+}
+
+#[tokio::test]
+async fn c5_a_failed_ssf_configuration_fetch_counts_too() {
+    let server = MockServer::start().await;
+    let key = Key::generate();
+    let hits = Arc::new(Mutex::new(0usize));
+    let sink = Arc::clone(&hits);
+    Mock::given(method("GET"))
+        .and(path("/.well-known/ssf-configuration"))
+        .respond_with(move |_: &Request| {
+            *sink.lock().unwrap() += 1;
+            ResponseTemplate::new(503)
+        })
+        .mount(&server)
+        .await;
+    let config = SsfReceiverConfig::new(
+        ISSUER,
+        AUDIENCE,
+        SsfKeySource::DiscoveryUrl(format!("{}/.well-known/ssf-configuration", server.uri())),
+    );
+    let r = SsfReceiver::new(&client(&server), config).unwrap();
+    for _ in 0..2 {
+        let e = r.verify_set(&key.sign_set(&claims())).await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+    }
+    assert_eq!(*hits.lock().unwrap(), 1);
 }

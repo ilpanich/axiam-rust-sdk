@@ -1096,6 +1096,12 @@ pub struct CreateCertificateRequest {
 /// point you need it.
 #[derive(Debug, Clone)]
 pub struct CreateFederationConfigRequest {
+    /// SAML only: accept IdP responses signed with SHA-1 (`rsa-sha1`). Default
+    /// `false` — since 1.0.0 the SP verifier accepts only SHA-2 signatures. The
+    /// escape hatch for an IdP that cannot sign with SHA-2 yet; refused on a non-
+    /// SAML config, and audited (`federation.sha1_signatures_allowed`) when set
+    /// to `true`.
+    pub allow_sha1_signatures: Option<bool>,
     /// Whether tenants of this organization may inherit this provider. Only
     /// meaningful on a config in the organization-scope tenant.
     pub allow_tenant_inheritance: Option<bool>,
@@ -1131,6 +1137,11 @@ pub struct CreateFederationConfigRequest {
     /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
     /// to read it.
     pub client_secret: Sensitive<String>,
+    /// SAML only: the PEM certificate the IdP signs its metadata document with
+    /// (#530). When set, the metadata must carry one SHA-2 signature on its
+    /// `EntityDescriptor` root that verifies against it, or no sign-in starts.
+    /// Omitted: the metadata is not signature-checked.
+    pub idp_metadata_signing_cert_pem: Option<String>,
     /// PEM-encoded X.509 certificate for verifying SAML assertions or OIDC
     /// signatures (CQ-B40/REQ-14 AC-5). Required for SAML configs.
     pub idp_signing_cert_pem: Option<String>,
@@ -1169,6 +1180,8 @@ pub struct CreateFederationConfigRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CreateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) allow_sha1_signatures: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allow_tenant_inheritance: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_algorithms: Option<Vec<String>>,
@@ -1186,6 +1199,8 @@ pub(crate) struct CreateFederationConfigRequestWire {
     pub(crate) button_icon: Option<String>,
     pub(crate) client_id: String,
     pub(crate) client_secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) idp_metadata_signing_cert_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) idp_signing_cert_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1211,6 +1226,7 @@ pub(crate) struct CreateFederationConfigRequestWire {
 impl From<&CreateFederationConfigRequest> for CreateFederationConfigRequestWire {
     fn from(v: &CreateFederationConfigRequest) -> Self {
         Self {
+            allow_sha1_signatures: v.allow_sha1_signatures,
             allow_tenant_inheritance: v.allow_tenant_inheritance,
             allowed_algorithms: v.allowed_algorithms.clone(),
             allowed_issuer_tenants: v.allowed_issuer_tenants.clone(),
@@ -1221,6 +1237,7 @@ impl From<&CreateFederationConfigRequest> for CreateFederationConfigRequestWire 
             button_icon: v.button_icon.clone(),
             client_id: v.client_id.clone(),
             client_secret: crate::management::error::expose_for_wire(&v.client_secret),
+            idp_metadata_signing_cert_pem: v.idp_metadata_signing_cert_pem.clone(),
             idp_signing_cert_pem: v.idp_signing_cert_pem.clone(),
             metadata_url: v.metadata_url.clone(),
             protocol: v.protocol.clone(),
@@ -1275,6 +1292,11 @@ pub struct CreateNotificationRuleRequest {
     pub name: String,
     /// Email addresses to notify.
     pub recipient_emails: Vec<String>,
+    /// Minutes in which one event type mails each recipient at most once: the
+    /// first event of a window is mailed, the rest are counted and the next mail
+    /// says how many were not sent (#551). 1 … 1440; 15 when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<i32>,
 }
 
 /// `CreateOAuth2ClientRequest` (generated from openapi.json).
@@ -2041,6 +2063,10 @@ pub enum FailurePolicy {
 /// Federation config response -- omits client_secret.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FederationConfigResponse {
+    /// SAML only: whether IdP responses signed with SHA-1 are accepted (default
+    /// `false`; #531).
+    #[serde(default)]
+    pub allow_sha1_signatures: bool,
     /// Whether tenants of this organization may inherit this provider.
     pub allow_tenant_inheritance: bool,
     /// Accepted signing algorithms. Returned for OIDC and SAML; meaningless, and
@@ -2078,6 +2104,10 @@ pub struct FederationConfigResponse {
     pub has_bundled_mark: bool,
     /// `id`.
     pub id: Uuid,
+    /// SAML only: the certificate the IdP's metadata must be signed with (#530);
+    /// `null` when the metadata is not signature-checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idp_metadata_signing_cert_pem: Option<String>,
     /// `metadata_url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_url: Option<String>,
@@ -3013,6 +3043,9 @@ pub struct NotificationRuleResponse {
     pub tenant_id: Uuid,
     /// `updated_at`.
     pub updated_at: String,
+    /// Minutes in which one event type mails each recipient at most once; further
+    /// events are counted and reported by the next mail (#551).
+    pub window_minutes: i32,
 }
 
 /// Response for client creation -- includes the one-time plaintext secret.
@@ -4497,6 +4530,14 @@ pub struct ScimTargetInput {
     pub deprovision: Option<DeprovisionPolicy>,
     /// `true` by default. A disabled target receives nothing.
     pub enabled: Option<bool>,
+    /// The `updated_at` of the target as the client read it (P23W5-09, T-416).
+    /// **Update only; create ignores it.** When present, the replacement lands
+    /// only if the target still has that version, else `409` (reload and retry):
+    /// two administrators who opened the form at the same version cannot silently
+    /// overwrite each other. When absent the replacement is conditional on the
+    /// version the server reads during the request — last-writer-wins between
+    /// administrators, as before.
+    pub expected_updated_at: Option<String>,
     /// 1–128 bytes.
     pub name: String,
     /// Push groups too (every group for `all_users`, the listed ones for
@@ -4522,6 +4563,8 @@ pub(crate) struct ScimTargetInputWire {
     pub(crate) deprovision: Option<DeprovisionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_updated_at: Option<String>,
     pub(crate) name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) push_groups: Option<bool>,
@@ -4541,6 +4584,7 @@ impl From<&ScimTargetInput> for ScimTargetInputWire {
                 .map(crate::management::error::expose_for_wire),
             deprovision: v.deprovision.clone(),
             enabled: v.enabled,
+            expected_updated_at: v.expected_updated_at.clone(),
             name: v.name.clone(),
             push_groups: v.push_groups,
             scope: v.scope.clone(),
@@ -5990,22 +6034,41 @@ impl From<&UpdateDirectoryConfig> for UpdateDirectoryConfigWire {
 /// point you need it.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateFederationConfigRequest {
+    /// SAML only: accept IdP responses signed with SHA-1. Refused on a non-SAML
+    /// config; turning it on is audited (`federation.sha1_signatures_allowed`).
+    pub allow_sha1_signatures: Option<bool>,
     /// Whether tenants may inherit this organization-level provider.
     pub allow_tenant_inheritance: Option<bool>,
     /// Accepted signature algorithms (CQ-B40/REQ-14 AC-5).
     pub allowed_algorithms: Option<Vec<String>>,
     /// Accepted external IdP tenants for a templated issuer. Replaced wholesale.
     pub allowed_issuer_tenants: Option<Vec<String>>,
-    /// Apple Key ID. `Some(None)` clears it.
-    pub apple_key_id: Option<String>,
-    /// Apple Team ID. `Some(None)` clears it.
-    pub apple_team_id: Option<String>,
+    /// Apple Key ID. Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub apple_key_id: Option<Option<String>>,
+    /// Apple Team ID. Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub apple_team_id: Option<Option<String>>,
     /// `attribute_map`.
     pub attribute_map: Option<serde_json::Value>,
-    /// OAuth2-variant authorization endpoint. `Some(None)` clears it.
-    pub authorization_endpoint: Option<String>,
-    /// Sign-in-button icon for a generic provider. `Some(None)` clears it.
-    pub button_icon: Option<String>,
+    /// OAuth2-variant authorization endpoint. Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub authorization_endpoint: Option<Option<String>>,
+    /// Sign-in-button icon for a generic provider. Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub button_icon: Option<Option<String>>,
     /// `client_id`.
     pub client_id: Option<String>,
     /// `client_secret`.
@@ -6015,26 +6078,57 @@ pub struct UpdateFederationConfigRequest {
     pub client_secret: Option<Sensitive<String>>,
     /// `enabled`.
     pub enabled: Option<bool>,
+    /// SAML only: the IdP metadata signing certificate (#530). Explicit `null`
+    /// clears it; omitted leaves it. Clearing it is audited
+    /// (`federation.metadata_signing_cert_cleared`), and so is replacing it with
+    /// a different certificate (`federation.metadata_signing_cert_changed`).
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub idp_metadata_signing_cert_pem: Option<Option<String>>,
     /// PEM-encoded X.509 certificate for verifying SAML assertions (CQ-B40/REQ-14
-    /// AC-5). `Some(None)` clears the stored cert.
-    pub idp_signing_cert_pem: Option<String>,
-    /// `metadata_url`.
-    pub metadata_url: Option<String>,
+    /// AC-5). Explicit `null` clears the stored cert; omitted leaves it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub idp_signing_cert_pem: Option<Option<String>>,
+    /// OIDC discovery or SAML metadata URL. Explicit `null` clears it; omitted
+    /// leaves it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub metadata_url: Option<Option<String>>,
     /// `provider`.
     pub provider: Option<String>,
-    /// Operator-chosen identifier for a `generic_*` kind. `Some(None)` clears it.
-    pub provider_slug: Option<String>,
+    /// Operator-chosen identifier for a `generic_*` kind. Explicit `null` clears
+    /// it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub provider_slug: Option<Option<String>>,
     /// Send PKCE on the authorization request.
     pub require_pkce: Option<bool>,
     /// Scopes to request. Replaced wholesale; empty restores the per-kind
     /// default.
     pub scopes: Option<Vec<String>>,
-    /// OAuth2-variant token endpoint. `Some(None)` clears it.
-    pub token_endpoint: Option<String>,
+    /// OAuth2-variant token endpoint. Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub token_endpoint: Option<Option<String>>,
     /// `token_exchange`.
     pub token_exchange: Option<TokenExchangeTrustRequest>,
-    /// OAuth2-variant userinfo endpoint. `Some(None)` clears it.
-    pub userinfo_endpoint: Option<String>,
+    /// OAuth2-variant userinfo endpoint. Explicit `null` clears it.
+    ///
+    /// `None` is an absent member (on a request: the key is not sent, the value
+    /// is left unchanged); `Some(None)` is an explicit `null` (on a request: it
+    /// clears the value; §27.4 rule 5).
+    pub userinfo_endpoint: Option<Option<String>>,
 }
 
 /// Wire twin of [`UpdateFederationConfigRequest`] -- plain strings, private, never logged.
@@ -6043,50 +6137,95 @@ pub struct UpdateFederationConfigRequest {
 #[derive(Clone, Serialize, Default, Deserialize)]
 pub(crate) struct UpdateFederationConfigRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) allow_sha1_signatures: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allow_tenant_inheritance: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_algorithms: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_issuer_tenants: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) apple_key_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) apple_team_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) apple_key_id: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) apple_team_id: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attribute_map: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) authorization_endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) button_icon: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) authorization_endpoint: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) button_icon: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) idp_signing_cert_pem: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) metadata_url: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) idp_metadata_signing_cert_pem: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) idp_signing_cert_pem: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) metadata_url: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) provider_slug: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) provider_slug: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) require_pkce: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) scopes: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) token_endpoint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) token_endpoint: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) token_exchange: Option<TokenExchangeTrustRequest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) userinfo_endpoint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::management::checks::explicit_null"
+    )]
+    pub(crate) userinfo_endpoint: Option<Option<String>>,
 }
 
 impl From<&UpdateFederationConfigRequest> for UpdateFederationConfigRequestWire {
     fn from(v: &UpdateFederationConfigRequest) -> Self {
         Self {
+            allow_sha1_signatures: v.allow_sha1_signatures,
             allow_tenant_inheritance: v.allow_tenant_inheritance,
             allowed_algorithms: v.allowed_algorithms.clone(),
             allowed_issuer_tenants: v.allowed_issuer_tenants.clone(),
@@ -6101,6 +6240,7 @@ impl From<&UpdateFederationConfigRequest> for UpdateFederationConfigRequestWire 
                 .as_ref()
                 .map(crate::management::error::expose_for_wire),
             enabled: v.enabled,
+            idp_metadata_signing_cert_pem: v.idp_metadata_signing_cert_pem.clone(),
             idp_signing_cert_pem: v.idp_signing_cert_pem.clone(),
             metadata_url: v.metadata_url.clone(),
             provider: v.provider.clone(),
@@ -6154,6 +6294,9 @@ pub struct UpdateNotificationRuleRequest {
     /// `recipient_emails`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_emails: Option<Vec<String>>,
+    /// The rule's notification window in minutes, 1 … 1440 (#551).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<i32>,
 }
 
 /// `UpdateOAuth2ClientRequest` (generated from openapi.json).
