@@ -1656,7 +1656,7 @@ async fn federation_surface() {
     let client = logged_in_client(&server).await;
 
     // federation.list_configs
-    mount(&server, "GET", "/api/v1/federation-configs", 200, r#"{"items": [{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    mount(&server, "GET", "/api/v1/federation-configs", 200, r#"{"items": [{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
     client
         .federation()
         .list_configs(PageRequest::first(50))
@@ -1669,10 +1669,11 @@ async fn federation_surface() {
         .expect("federation.list_configs auto-paging");
 
     // federation.create_config
-    mount(&server, "POST", "/api/v1/federation-configs", 201, r#"{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "POST", "/api/v1/federation-configs", 201, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .create_config(&models::CreateFederationConfigRequest {
+            allow_sha1_signatures: None,
             allow_tenant_inheritance: None,
             allowed_algorithms: None,
             allowed_issuer_tenants: None,
@@ -1683,6 +1684,7 @@ async fn federation_surface() {
             button_icon: None,
             client_id: "example".to_string(),
             client_secret: Sensitive::new("example".to_string()),
+            idp_metadata_signing_cert_pem: None,
             idp_signing_cert_pem: None,
             metadata_url: None,
             protocol: "example".to_string(),
@@ -1699,7 +1701,7 @@ async fn federation_surface() {
         .expect("federation.create_config");
 
     // federation.get_config
-    mount(&server, "GET", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "GET", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .get_config(example_id())
@@ -1707,7 +1709,7 @@ async fn federation_surface() {
         .expect("federation.get_config");
 
     // federation.update_config
-    mount(&server, "PUT", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .update_config(
@@ -1797,7 +1799,7 @@ async fn notification_rules_surface() {
     let client = logged_in_client(&server).await;
 
     // notification_rules.list
-    mount(&server, "GET", "/api/v1/notification-rules", 200, r#"{"items": [{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    mount(&server, "GET", "/api/v1/notification-rules", 200, r#"{"items": [{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "window_minutes": 1}], "total": 1, "offset": 0, "limit": 50}"#).await;
     client
         .notification_rules()
         .list(PageRequest::first(50))
@@ -1810,7 +1812,7 @@ async fn notification_rules_surface() {
         .expect("notification_rules.list auto-paging");
 
     // notification_rules.create
-    mount(&server, "POST", "/api/v1/notification-rules", 201, r#"{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "POST", "/api/v1/notification-rules", 201, r#"{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "window_minutes": 1}"#).await;
     client
         .notification_rules()
         .create(&models::CreateNotificationRuleRequest {
@@ -1818,12 +1820,13 @@ async fn notification_rules_surface() {
             events: Vec::new(),
             name: "example".to_string(),
             recipient_emails: Vec::new(),
+            window_minutes: None,
         })
         .await
         .expect("notification_rules.create");
 
     // notification_rules.get
-    mount(&server, "GET", &format!("/api/v1/notification-rules/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "GET", &format!("/api/v1/notification-rules/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "window_minutes": 1}"#).await;
     client
         .notification_rules()
         .get(example_id())
@@ -1831,7 +1834,7 @@ async fn notification_rules_surface() {
         .expect("notification_rules.get");
 
     // notification_rules.update
-    mount(&server, "PUT", &format!("/api/v1/notification-rules/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/notification-rules/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "description": "example", "enabled": true, "events": [], "id": "11111111-1111-4111-8111-111111111111", "name": "example", "recipient_emails": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "window_minutes": 1}"#).await;
     client
         .notification_rules()
         .update(
@@ -2323,6 +2326,7 @@ async fn scim_targets_surface() {
             credential: None,
             deprovision: None,
             enabled: None,
+            expected_updated_at: None,
             name: "example".to_string(),
             push_groups: None,
             scope: models::ScimTargetScope::AllUsers {},
@@ -2351,6 +2355,7 @@ async fn scim_targets_surface() {
                 credential: None,
                 deprovision: None,
                 enabled: None,
+                expected_updated_at: None,
                 name: "example".to_string(),
                 push_groups: None,
                 scope: models::ScimTargetScope::AllUsers {},

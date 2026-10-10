@@ -57,6 +57,7 @@ fn input(credential: Option<String>) -> models::ScimTargetInput {
         credential: credential.map(Sensitive::new),
         deprovision: None,
         enabled: None,
+        expected_updated_at: None,
         name: "Downstream".into(),
         push_groups: None,
         scope: models::ScimTargetScope::AllUsers {},

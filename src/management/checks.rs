@@ -116,6 +116,7 @@ impl From<&models::ScimTargetResponse> for models::ScimTargetInput {
             credential: None,
             deprovision: Some(t.deprovision.clone()),
             enabled: Some(t.enabled),
+            expected_updated_at: None,
             name: t.name.clone(),
             push_groups: Some(t.push_groups),
             scope: t.scope.clone(),
