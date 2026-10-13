@@ -86,7 +86,12 @@ where
 
 /// Read-modify-write for `ssf.update_stream`. `authorization_header` is left
 /// `None` — absent keeps the stored header (§32.2) — and so is
-/// `clear_authorization_header`.
+/// `clear_authorization_header`. `events_requested` is always sent, as read (`[]`
+/// stays `[]`; omitting it would reset a receiver's narrowing to every allowed
+/// event), and `expected_updated_at` carries the `updated_at` that was read, so
+/// the replacement is refused `409` if the stream was written in between (§32.2,
+/// contract 1.61); set it to `None` for the old last-writer-wins behaviour. An
+/// edit that lowers `events_allowed` cuts `events_requested` to the new ceiling.
 impl From<&models::SsfStream> for models::SsfStreamInput {
     fn from(s: &models::SsfStream) -> Self {
         Self {
@@ -98,6 +103,7 @@ impl From<&models::SsfStream> for models::SsfStreamInput {
             endpoint_url: s.endpoint_url.clone(),
             events_allowed: s.events_allowed.clone(),
             events_requested: Some(s.events_requested.clone()),
+            expected_updated_at: Some(s.updated_at.clone()),
             receiver_client_id: s.receiver_client_id.clone(),
             status: Some(s.status.clone()),
             status_reason: s.status_reason.clone(),

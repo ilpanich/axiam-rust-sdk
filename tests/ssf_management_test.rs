@@ -61,6 +61,7 @@ fn input(header: Option<String>) -> models::SsfStreamInput {
         endpoint_url: Some("https://rp.example/ssf".into()),
         events_allowed: vec![models::SsfEventType::SessionRevoked],
         events_requested: None,
+        expected_updated_at: None,
         receiver_client_id: "rp-1".into(),
         status: None,
         status_reason: None,
@@ -133,6 +134,70 @@ async fn update_stream_puts_every_member_it_models() {
         "absent keeps the stored header"
     );
     // The four required members are non-`Option` fields with no `Default`.
+}
+
+/// §32.8 test 1 (contract 1.61): `expected_updated_at`, when the caller sets it,
+/// is sent exactly as given — the string, not re-formatted — and is absent from
+/// the body when unset; an `events_requested` of `[]` is sent as `[]` while an
+/// unset one is absent.
+#[tokio::test]
+async fn update_stream_sends_expected_updated_at_verbatim_and_keeps_empty_events_distinct() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let id = Uuid::new_v4();
+    let seen = capture(
+        &server,
+        "PUT",
+        format!("{STREAMS}/{id}"),
+        ResponseTemplate::new(200).set_body_json(stream_body(json!({}))),
+    )
+    .await;
+
+    // Nanosecond precision, a non-`Z` offset: the instant is compared, so the
+    // string must reach the wire untouched.
+    let stamp = "2026-10-04T00:00:00.123456789+00:00";
+    let mut set = input(None);
+    set.expected_updated_at = Some(stamp.to_string());
+    set.events_requested = Some(Vec::new());
+    client.ssf().update_stream(id, &set).await.expect("200");
+
+    let unset = input(None);
+    client.ssf().update_stream(id, &unset).await.expect("200");
+
+    let sent = seen.lock().unwrap();
+    assert_eq!(sent[0]["expected_updated_at"], json!(stamp));
+    assert_eq!(sent[0]["events_requested"], json!([]), "[] is sent as []");
+    assert!(
+        sent[1].get("expected_updated_at").is_none(),
+        "unset is absent, never null: {}",
+        sent[1]
+    );
+    assert!(
+        sent[1].get("events_requested").is_none(),
+        "unset is absent, never []: {}",
+        sent[1]
+    );
+}
+
+/// §32.3 rule 4 / §32.8 test 5 (contract 1.61): a `409` on an update that named
+/// `expected_updated_at` is surfaced as the conflict it is, and sent once.
+#[tokio::test]
+async fn a_409_on_a_conditional_update_is_surfaced_and_not_retried() {
+    let server = MockServer::start().await;
+    let client = logged_in_client_with_retry(&server).await;
+    let id = Uuid::new_v4();
+    let seen = capture(
+        &server,
+        "PUT",
+        format!("{STREAMS}/{id}"),
+        ResponseTemplate::new(409).set_body_string(r#"{"error":"conflict","message":"stale"}"#),
+    )
+    .await;
+    let mut body = input(None);
+    body.expected_updated_at = Some("2026-10-04T00:00:00Z".into());
+    let e = client.ssf().update_stream(id, &body).await.unwrap_err();
+    assert!(e.is_conflict(), "{e}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "a write is not retried");
 }
 
 // ── 2. The header is Sensitive ──────────────────────────────────────────────
@@ -363,4 +428,39 @@ fn a_read_converts_into_the_replacement_body_without_the_header() {
         body.events_requested.as_deref(),
         Some(s.events_requested.as_slice())
     );
+    // Contract 1.61 (§32.2): the version the caller read rides back as it came.
+    assert_eq!(
+        body.expected_updated_at.as_deref(),
+        Some(s.updated_at.as_str())
+    );
+}
+
+/// §32.2 (contract 1.61): a read the receiver narrowed to nothing converts into
+/// a body that says `[]`, not into one that omits the member (which would widen
+/// it to every allowed event), and the stamp is the read's `updated_at`
+/// verbatim.
+#[tokio::test]
+async fn a_read_with_no_events_requested_converts_to_an_explicit_empty_list() {
+    let s: models::SsfStream = serde_json::from_value(stream_body(json!({
+        "events_requested": [],
+        "events_delivered": [],
+        "updated_at": "2026-10-04T08:15:30.5Z",
+    })))
+    .unwrap();
+    let body = models::SsfStreamInput::from(&s);
+    assert_eq!(body.events_requested, Some(Vec::new()));
+
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let seen = capture(
+        &server,
+        "PUT",
+        format!("{STREAMS}/{}", s.id),
+        ResponseTemplate::new(200).set_body_json(stream_body(json!({}))),
+    )
+    .await;
+    client.ssf().update_stream(s.id, &body).await.expect("200");
+    let sent = &seen.lock().unwrap()[0];
+    assert_eq!(sent["events_requested"], json!([]));
+    assert_eq!(sent["expected_updated_at"], json!("2026-10-04T08:15:30.5Z"));
 }

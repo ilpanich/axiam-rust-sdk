@@ -639,6 +639,7 @@ fn certificate_the_sign_csr_response_type_has_no_private_key_field() {
         status: models::CertificateStatus::Active,
         subject: "CN=device-1".into(),
         tenant_id: Uuid::new_v4(),
+        user_id: None,
     };
 
     let value = serde_json::to_value(&cert).expect("Certificate serializes");
@@ -690,6 +691,7 @@ async fn sign_csr_decodes_as_certificate_and_drops_a_private_key_the_server_sent
             issuer_ca_id: ca,
             metadata: None,
             subject_alt_names: None,
+            user_id: None,
             validity_days: 90,
         })
         .await

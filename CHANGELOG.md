@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-13
+
+Contract 1.61 (axiam `058d8e0`, branch `claude/release-1.0.1`): additive and clarifying, no
+route and no operation. `CONTRACT.md`, `openapi.json`, `management-registry.json` and
+`proto/` are vendored from that commit.
+
+### Added
+
+- **`Certificate::user_id`** (§27.11 rule 5): `Option<Uuid>` on `Certificate` and
+  `GeneratedCertificate` — a UUID decodes, `null` and an absent member both read `None`, never
+  synthesised from `metadata` — and an optional request member on `CreateCertificateRequest`
+  and `SignCertificateCsrRequest`, sent exactly as given and left out when `None`.
+- **`SsfStreamInput::expected_updated_at`** (§32.2, §32.3 rule 4): `Option<String>`, sent
+  exactly as the stream's `updated_at` was read and left out when `None`. A `409` on the
+  update is a conflict error and is not retried.
+
+### Changed
+
+- **`SsfStreamInput::from(&SsfStream)` sets `expected_updated_at`** — the read's `updated_at`
+  — so an update built from a read of a stream written since (a receiver's pause or
+  narrowing) answers `409` instead of putting the old value back; set it to `None` for the
+  previous last-writer-wins. It already carried `events_requested` as read; `Some(vec![])`
+  stays `[]` (§32.2: absent would reset the receiver's narrowing to every allowed event).
+- **Breaking for a struct literal:** `Certificate`, `GeneratedCertificate`,
+  `CreateCertificateRequest`, `SignCertificateCsrRequest` and `SsfStreamInput` gain a field,
+  so a struct literal that names every field needs `user_id: None` / `expected_updated_at: None`.
+  Decoding and the request builders are unaffected.
+
+### Notes
+
+- `CibaPendingList::total_pending` and `truncated` (§33.3 rule 16) are not modelled: the type
+  belongs to a console route no operation returns and no SDK drives.
+
 ## [1.0.0] - 2026-10-10
 
 `axiam-sdk` 1.0.0 is the first stable release of the AXIAM Rust SDK: from here its public API
