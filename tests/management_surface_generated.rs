@@ -1229,6 +1229,7 @@ async fn certificates_surface() {
             metadata: None,
             subject: "example".to_string(),
             subject_alt_names: None,
+            user_id: None,
             validity_days: 1,
         })
         .await
@@ -1244,6 +1245,7 @@ async fn certificates_surface() {
             issuer_ca_id: example_id(),
             metadata: None,
             subject_alt_names: None,
+            user_id: None,
             validity_days: 1,
         })
         .await
@@ -2241,6 +2243,7 @@ async fn ssf_surface() {
             endpoint_url: None,
             events_allowed: Vec::new(),
             events_requested: None,
+            expected_updated_at: None,
             receiver_client_id: "example".to_string(),
             status: None,
             status_reason: None,
@@ -2272,6 +2275,7 @@ async fn ssf_surface() {
                 endpoint_url: None,
                 events_allowed: Vec::new(),
                 events_requested: None,
+                expected_updated_at: None,
                 receiver_client_id: "example".to_string(),
                 status: None,
                 status_reason: None,

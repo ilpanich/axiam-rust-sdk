@@ -62,7 +62,7 @@ breaking change waits for 2.0.0, and security fixes ship in `1.0.x`.
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.60**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.61**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -84,6 +84,26 @@ into a different claim without anyone editing it. The §21.3.1 amendment of cont
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.61 (§34.5) is additive and clarifying — no route, no operation, one optional member
+on each of three models — and this SDK carries it on its REST transport (it has no gRPC or AMQP
+message that holds these models):
+
+- **`Certificate.user_id`** (§27.11 rule 5): `Option<Uuid>` on `Certificate` and
+  `GeneratedCertificate`; a UUID decodes, `null` and an absent member both read `None` ("no
+  account named"), never synthesised from `metadata`. On `CreateCertificateRequest` and
+  `SignCertificateCsrRequest` a `Some` is sent exactly as given and `None` leaves the key out
+  (never `null`); the SDK does not judge it, the server answers `400`.
+- **`SsfStreamInput.expected_updated_at`** (§32.2, §32.3 rule 4): `Option<String>`, sent exactly
+  as the stream's `updated_at` was read and absent when `None`. `SsfStreamInput::from(&SsfStream)`
+  sets it to the read's `updated_at` and always carries `events_requested` as read (`Some(vec![])`
+  stays `[]`; omitting it would reset a receiver's narrowing to every allowed event), so an
+  update built from a read is a `409` (`is_conflict()`, never retried) if the stream was written
+  since — the receiver's pause or narrowing included. If you lower `events_allowed`, cut
+  `events_requested` to it.
+- **`CibaPendingList.total_pending`, `truncated`** (§33.3 rule 16): not modelled — the type belongs
+  to the console's `GET /api/v1/ciba/requests` route, which no registry operation returns and no
+  SDK drives.
 
 Contract 1.59 and 1.60 add no section an SDK claims (1.60's §35, certificate revocation
 lists, is informative and has no SDK surface): §34 records the cross-SDK review of the

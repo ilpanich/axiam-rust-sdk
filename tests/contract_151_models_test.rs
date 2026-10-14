@@ -139,6 +139,7 @@ async fn a_server_certificate_sends_its_names_externally_tagged() {
                 models::SubjectAltName::Dns("api.lakeside.internal".into()),
                 models::SubjectAltName::Ip("10.0.0.5".into()),
             ]),
+            user_id: None,
             validity_days: 90,
         })
         .await
@@ -163,6 +164,7 @@ fn a_leaf_request_without_names_omits_the_key() {
         metadata: None,
         subject: "device-001".into(),
         subject_alt_names: None,
+        user_id: None,
         validity_days: 90,
     })
     .unwrap();
@@ -172,6 +174,7 @@ fn a_leaf_request_without_names_omits_the_key() {
         issuer_ca_id: example_id(),
         metadata: None,
         subject_alt_names: None,
+        user_id: None,
         validity_days: 90,
     })
     .unwrap();
