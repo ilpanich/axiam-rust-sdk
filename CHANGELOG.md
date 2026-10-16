@@ -9,10 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] - 2026-10-16
 
-`axiam-sdk` 1.1.0 carries **contract 1.62** (axiam `d76c5a80b`, the release branch of AXIAM 1.1.0)
+`axiam-sdk` 1.1.0 carries **contract 1.62** (axiam `d25413506`, the release branch of AXIAM 1.1.0)
 and, because the never-tagged 1.0.1 is folded into it, **contract 1.61** (axiam `058d8e0`) as
 well. `CONTRACT.md`, `openapi.json`, `management-registry.json` and `proto/` are vendored
-byte for byte from `d76c5a80b`. The surface is 202 operations in 29 namespaces.
+byte for byte from `d25413506`. The surface is 202 operations in 29 namespaces.
 
 ### Source-breaking changes
 
@@ -108,6 +108,15 @@ behaviour is additive in every case.
 - `CibaPendingList::total_pending` and `truncated` (§33.3 rule 16) are not modelled: the type
   belongs to a console route no operation returns and no SDK drives (item d: "SDK work: no").
 - The `[1.0.1]` section of this file, never tagged, is merged into this one.
+- **Re-vendor of the 1.62 corrections** (axiam `d25413506`; review C162-11, C162-12): `CONTRACT.md`
+  (the §34.6 bullets x to ae, §6.1 rule 11, §12.1 rule 3, §14.6, §27.6.2, §27.9, §27.10, §36.10 and
+  the Conformance Statement), `openapi.json` and `management-registry.json` (version 1.1.0, digest
+  `sha256:cf0fc71c2061576b077afd48d9903f9f4ef26d66e9edbebe5e3020be89fc59a7`); `proto/` is unchanged.
+  The generated management surface is unchanged (`tools/gen_management.py --check` is clean). The
+  README now names §36 in its conformance statement and says that manifest pruning is not offered
+  in any namespace. A regression test (`tests/oauth2_no_session_bearer_test.rs`) pins that neither
+  an adopted device credential nor a cookie session puts an `Authorization` header on
+  `/oauth2/device_authorization` or `/oauth2/token` (§14.6, C162-05); no source changed.
 
 ## [1.0.0] - 2026-10-10
 

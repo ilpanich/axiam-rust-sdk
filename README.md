@@ -70,7 +70,7 @@ A **removal** — of a method, a field, a variant or a type — waits for 2.0.0.
 ## Contract conformance
 
 This SDK conforms to **contract 1.62**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
-§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
+§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33 and §36, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
 signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
@@ -85,8 +85,11 @@ that ships only one half to say which; this one ships both. (The manifest has no
 the four namespaces contract 1.54–1.57 added, by the contract's design; `network` from contract
 1.62 is a manifest namespace here — see below.)
 
-§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26, §27, §28.12, §29, §30, §31, §32, §32.7 and
-§33 are named rather than folded into the range because they landed after this SDK already
+**Manifest pruning: not offered in any namespace** (§27.10). `plan` never emits a `Delete`, so
+§27.6.2 item 6 and §27.9's "with pruning on" assertion have nothing to bind here.
+
+§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26, §27, §28.12, §29, §30, §31, §32, §32.7,
+§33 and §36 are named rather than folded into the range because they landed after this SDK already
 claimed §1–§13: widening the range silently would turn a statement that was true when written
 into a different claim without anyone editing it. The §21.3.1 amendment of contract 1.58 (the
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
