@@ -31,6 +31,12 @@ const CLIENT_ID: &str = "device-client";
 const CLIENT_SECRET: &str = "device-client-secret-value";
 const DEVICE_CODE: &str = "device-code-value";
 
+/// A throwaway password for a mocked login, generated per call so no credential
+/// literal appears in the test source (the same helper `acting_tenant_test.rs` uses).
+fn any_password() -> String {
+    Uuid::new_v4().to_string()
+}
+
 /// One request, as the server saw it.
 #[derive(Debug, Clone)]
 struct Seen {
@@ -245,7 +251,7 @@ async fn a_cookie_session_sends_no_authorization_header_to_the_device_endpoints(
 
     let client = builder(&server.uri()).build().unwrap();
     client
-        .login("admin@example.com", "correct horse battery staple")
+        .login("admin@example.com", &any_password())
         .await
         .expect("login");
 
