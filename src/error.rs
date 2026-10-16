@@ -124,6 +124,15 @@ pub enum AxiamError {
         action: Option<String>,
         /// The resource the action was denied against, if known.
         resource_id: Option<String>,
+        /// The server's machine-readable sub-code of a `409`, read from the
+        /// body's `reason_code` member (CONTRACT.md §36.3 rule 2, §36.4;
+        /// contract 1.62): `stale_version`, `strands_profile`,
+        /// `duplicate_vlan` and so on. A string, because the vocabulary is
+        /// **open** (§27.13) — a value this SDK has never seen is surfaced
+        /// verbatim. `None` for every refusal that is not a `409`, and for a
+        /// `409` whose server predates the member. Read it with
+        /// [`AxiamError::reason_code`]; branch on it, never on `message`.
+        reason_code: Option<Box<str>>,
     },
 
     /// Transport-level failure: connection refused, timeout, TLS error, DNS
@@ -187,6 +196,7 @@ impl AxiamError {
             message: message.into(),
             action,
             resource_id,
+            reason_code: None,
         }
     }
 
@@ -244,7 +254,7 @@ impl AxiamError {
                 set_reason: None,
             },
             403 | 409 => {
-                let (action, resource_id) = parse_authz_body_fields(&message);
+                let (action, resource_id, reason_code) = parse_authz_body_fields(&message);
                 AxiamError::Authz {
                     // §2 maps 403 and 409 to the same type; §27.4 rule 7
                     // keeps that mapping and splits only the discriminant.
@@ -256,6 +266,12 @@ impl AxiamError {
                     message,
                     action,
                     resource_id,
+                    // §36.4: only a 409 carries the sub-code.
+                    reason_code: if status == 409 {
+                        reason_code.map(String::into_boxed_str)
+                    } else {
+                        None
+                    },
                 }
             }
             _ => AxiamError::Network {
@@ -298,6 +314,7 @@ impl AxiamError {
                 message,
                 action: None,
                 resource_id: None,
+                reason_code: None,
             },
             _ => AxiamError::Network {
                 message,
@@ -447,11 +464,13 @@ impl AxiamError {
                 message,
                 action,
                 resource_id,
+                reason_code,
             } => AxiamError::Authz {
                 kind: *kind,
                 message: message.clone(),
                 action: action.clone(),
                 resource_id: resource_id.clone(),
+                reason_code: reason_code.clone(),
             },
             AxiamError::Network { message, .. } => AxiamError::Network {
                 message: message.clone(),
@@ -550,21 +569,34 @@ impl fmt::Display for IdTokenFailureReason {
 /// `{"error":"authorization_denied","message":"...","action":"users:get","resource_id":"<uuid>"}`
 /// — `action` is present when known, `resource_id` only for a
 /// resource-scoped denial. Any parse failure (non-JSON body, missing keys,
-/// or a 409 body with a different shape) silently yields `(None, None)`
+/// or a 409 body with a different shape) silently yields all `None`
 /// rather than surfacing a secondary error — `action`/`resource_id` are
 /// best-effort extras, never load-bearing for the `Authz` variant itself.
-fn parse_authz_body_fields(body: &str) -> (Option<String>, Option<String>) {
+///
+/// The third member is the `reason_code` of a `409` (CONTRACT.md §36.4,
+/// contract 1.62); the caller keeps it only for that status.
+fn parse_authz_body_fields(body: &str) -> (Option<String>, Option<String>, Option<String>) {
     #[derive(serde::Deserialize)]
     struct AuthzErrorBody {
         #[serde(default)]
         action: Option<String>,
         #[serde(default)]
         resource_id: Option<String>,
+        // Read leniently: a member that is not a string is "absent", and must
+        // not cost the `action` and `resource_id` beside it.
+        #[serde(default)]
+        reason_code: Option<serde_json::Value>,
     }
 
     match serde_json::from_str::<AuthzErrorBody>(body) {
-        Ok(parsed) => (parsed.action, parsed.resource_id),
-        Err(_) => (None, None),
+        Ok(parsed) => (
+            parsed.action,
+            parsed.resource_id,
+            parsed
+                .reason_code
+                .and_then(|v| v.as_str().map(str::to_string)),
+        ),
+        Err(_) => (None, None, None),
     }
 }
 
