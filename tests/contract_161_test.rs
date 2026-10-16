@@ -57,7 +57,7 @@ async fn last_body(server: &MockServer, route: &str) -> Value {
     serde_json::from_slice(&request.body).expect("a JSON body")
 }
 
-fn generate(user_id: Option<Uuid>) -> models::CreateCertificateRequest {
+fn generate(user_id: Option<&str>) -> models::CreateCertificateRequest {
     models::CreateCertificateRequest {
         cert_type: models::CertificateType::User,
         issuer_ca_id: example_id(),
@@ -65,19 +65,19 @@ fn generate(user_id: Option<Uuid>) -> models::CreateCertificateRequest {
         metadata: None,
         subject: "ada".into(),
         subject_alt_names: None,
-        user_id,
+        user_id: user_id.map(str::to_string),
         validity_days: 90,
     }
 }
 
-fn sign(user_id: Option<Uuid>) -> models::SignCertificateCsrRequest {
+fn sign(user_id: Option<&str>) -> models::SignCertificateCsrRequest {
     models::SignCertificateCsrRequest {
         cert_type: models::CertificateType::User,
         csr_pem: "csr".into(),
         issuer_ca_id: example_id(),
         metadata: None,
         subject_alt_names: None,
-        user_id,
+        user_id: user_id.map(str::to_string),
         validity_days: 90,
     }
 }
@@ -105,7 +105,8 @@ async fn generate_and_sign_csr_send_user_id_as_given_and_omit_the_key_when_unset
     )
     .await;
 
-    let account = Uuid::new_v4();
+    let account = Uuid::new_v4().to_string();
+    let account = account.as_str();
 
     client
         .certificates()
@@ -113,7 +114,7 @@ async fn generate_and_sign_csr_send_user_id_as_given_and_omit_the_key_when_unset
         .await
         .expect("generate");
     let sent = last_body(&server, "/api/v1/certificates").await;
-    assert_eq!(sent["user_id"], json!(account.to_string()));
+    assert_eq!(sent["user_id"], json!(account));
 
     client
         .certificates()
@@ -132,7 +133,7 @@ async fn generate_and_sign_csr_send_user_id_as_given_and_omit_the_key_when_unset
         .await
         .expect("sign_csr");
     let sent = last_body(&server, "/api/v1/certificates/sign-csr").await;
-    assert_eq!(sent["user_id"], json!(account.to_string()));
+    assert_eq!(sent["user_id"], json!(account));
 
     client
         .certificates()
@@ -199,7 +200,7 @@ async fn user_id_reaches_a_generated_certificate_and_a_get() {
 
     let generated = client
         .certificates()
-        .generate(&generate(Some(account)))
+        .generate(&generate(Some(&account.to_string())))
         .await
         .unwrap();
     assert_eq!(generated.user_id, Some(account));
@@ -214,5 +215,58 @@ async fn user_id_reaches_a_generated_certificate_and_a_get() {
             .count(),
         1,
         "a get costs one request"
+    );
+}
+
+/// Contract 1.62, §27.11 rule 5 (item (i)): the request `user_id` is an untyped
+/// string. A value that is not a UUID is representable, reaches the server
+/// byte for byte, and the server's `400` is what the caller sees; the SDK
+/// judges nothing. (The *response* member stays `Option<Uuid>`, above.)
+#[tokio::test]
+async fn a_malformed_request_user_id_reaches_the_server_and_its_400_is_surfaced() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+    let refusal = json!({
+        "error": "validation_error",
+        "message": "user_id: not a UUID",
+    })
+    .to_string();
+    mount(&server, "POST", "/api/v1/certificates", 400, &refusal).await;
+    mount(
+        &server,
+        "POST",
+        "/api/v1/certificates/sign-csr",
+        400,
+        &refusal,
+    )
+    .await;
+
+    let malformed = "not-a-uuid ";
+
+    let err = client
+        .certificates()
+        .generate(&generate(Some(malformed)))
+        .await
+        .expect_err("the server refuses it");
+    let validation = err
+        .validation()
+        .expect("a ValidationError, not a local one");
+    assert_eq!(validation.status, 400);
+    assert!(validation.message.contains("not a UUID"), "{validation:?}");
+    assert_eq!(
+        last_body(&server, "/api/v1/certificates").await["user_id"],
+        json!(malformed),
+        "sent exactly as given — untrimmed, unparsed"
+    );
+
+    let err = client
+        .certificates()
+        .sign_csr(&sign(Some(malformed)))
+        .await
+        .expect_err("the server refuses it");
+    assert_eq!(err.validation().expect("a ValidationError").status, 400);
+    assert_eq!(
+        last_body(&server, "/api/v1/certificates/sign-csr").await["user_id"],
+        json!(malformed)
     );
 }

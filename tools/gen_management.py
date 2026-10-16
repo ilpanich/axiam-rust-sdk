@@ -84,6 +84,21 @@ DEFAULT_TRUE_WHEN_ABSENT = {"inherit"}
 DEFAULT_FALSE_WHEN_ABSENT = {"allow_sha1_signatures"}
 
 
+# Request members the registry's OpenAPI types as `format: uuid` and this SDK
+# nevertheless models as a plain optional string.
+#
+# CONTRACT.md §27.11 rule 5 (contract 1.62, item (i)): the request `user_id`
+# on `certificates.generate` and `certificates.sign_csr` "is passed as a
+# string, so that a malformed value reaches the server and its `400` is
+# surfaced". A `Uuid`-typed member makes the malformed value unrepresentable,
+# which is a client-side judgement of the value however it is spelled. The
+# *response* `Certificate.user_id` stays `Option<Uuid>`.
+UNTYPED_REQUEST_STRINGS = {
+    ("CreateCertificateRequest", "user_id"),
+    ("SignCertificateCsrRequest", "user_id"),
+}
+
+
 def skip_attr(ident: str, ty: str, indent: str) -> str:
     """The `serde` attribute for an optional field, honouring OMIT_WHEN_EMPTY."""
     if ty.startswith("Option<Option<"):
@@ -967,6 +982,16 @@ def emit_struct(
                 ty = f"Option<{ty}>"
         else:
             ty = types.rust(pschema)
+            if (name, pname) in UNTYPED_REQUEST_STRINGS:
+                ty = "String"
+                pschema = dict(pschema)
+                pschema["description"] = (
+                    (pschema.get("description") or "")
+                    + "\n\nA plain string, not a `Uuid`: the text is sent exactly as given, "
+                    "so a value that is not a UUID reaches the server and its `400` "
+                    "(`validation_error`) is what the caller sees (CONTRACT §27.11 rule 5, "
+                    "contract 1.62). `None` omits the key; `null` is never sent."
+                )
             if (pname not in required or pname in projected_names) and not ty.startswith(
                 "Option<"
             ):
@@ -1726,8 +1751,10 @@ def call_arguments(
     extra = extra_query_params(op)
     required_q = [q for q in extra if q["required"]]
     optional_q = [q for q in extra if not q["required"]]
-    for _ in required_q:
-        args.append('"example"')
+    for q in required_q:
+        # A required query argument has the Rust type `query_rust_type` gives
+        # it: `delete_segment`'s `version` is an `i64`, not a string.
+        args.append({"i64": "1", "bool": "true"}.get(query_rust_type(q["type"]), '"example"'))
     if len(optional_q) > 2:
         filter_ty = f"{pascal(namespace)}{pascal(opname)}Filter"
         args.append(f"&{namespace}::{filter_ty}::default()")
