@@ -502,8 +502,7 @@ fn wire(input: &models::SsfStreamInput) -> Value {
         )
         .await;
         client.ssf().update_stream(id, input).await.expect("200");
-        let sent = seen.lock().unwrap()[0].clone();
-        sent
+        seen.lock().unwrap()[0].clone()
     })
 }
 
