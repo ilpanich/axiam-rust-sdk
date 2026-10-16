@@ -7,38 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1] - 2026-10-13
+## [1.1.0] - 2026-10-16
 
-Contract 1.61 (axiam `058d8e0`, branch `claude/release-1.0.1`): additive and clarifying, no
-route and no operation. `CONTRACT.md`, `openapi.json`, `management-registry.json` and
-`proto/` are vendored from that commit.
+`axiam-sdk` 1.1.0 carries **contract 1.62** (axiam `d76c5a80b`, the release branch of AXIAM 1.1.0)
+and, because the never-tagged 1.0.1 is folded into it, **contract 1.61** (axiam `058d8e0`) as
+well. `CONTRACT.md`, `openapi.json`, `management-registry.json` and `proto/` are vendored
+byte for byte from `d76c5a80b`. The surface is 202 operations in 29 namespaces.
+
+### Source-breaking changes
+
+A contract record may add a member or widen a type in a minor release (see the README's
+Stability section); these are the places where that is visible in Rust source. Wire
+behaviour is additive in every case.
+
+- **The request `user_id` is a plain string** (contract 1.62, §27.11 rule 5):
+  `CreateCertificateRequest::user_id` and `SignCertificateCsrRequest::user_id` are
+  `Option<String>`, not `Option<Uuid>`, so that a value that is not a UUID can be sent and the
+  server's `400` is what the caller sees. *Migrating:* `Some(id)` becomes `Some(id.to_string())`.
+  The **response** members — `Certificate::user_id`, `GeneratedCertificate::user_id` — stay
+  `Option<Uuid>`.
+- **`ManagementManifest` gains a public field, `network`** (contract 1.62, §27.6.2). A struct
+  literal that names every field needs `network: Default::default()`; the fluent constructors
+  and `manifest!` are unaffected.
+- **Contract 1.61:** `Certificate`, `GeneratedCertificate`, `CreateCertificateRequest`,
+  `SignCertificateCsrRequest` and `SsfStreamInput` gain a field, so a struct literal that names
+  every field needs `user_id: None` / `expected_updated_at: None`. Decoding and the request
+  builders are unaffected.
+- Generated management models gain members from the 1.62 spec (documentation text and the
+  new `network` types); `AxiamError::Authz` gains the field `reason_code`. The variant is
+  `#[non_exhaustive]`, so a pattern that ends in `..` is unaffected.
 
 ### Added
 
-- **`Certificate::user_id`** (§27.11 rule 5): `Option<Uuid>` on `Certificate` and
+- **The `network` management namespace** (contract 1.62, §36; item l): `client.network()` —
+  `list_segments`, `list_profiles` (each with an auto-paging `*_all`), `create_segment`,
+  `get_segment`, `replace_segment`, `delete_segment`, `create_profile`, `get_profile`,
+  `replace_profile`, `delete_profile`, `get_policy` and `replace_policy`, with the models
+  `NetworkSegmentResponse`, `NetworkReplyProfile`, `NetworkReplyProfileInput`,
+  `NetworkPolicyResponse`, the create and replace requests, and the open enums
+  `NetworkSegmentKind`, `RadiusServiceType` and `RadiusTerminationAction`. Every write is
+  version-conditional and issued exactly once; `delete_*` take the `version` as an argument.
+  The decision route `POST /api/v1/network/decide` is not SDK work and has no method.
+- **`AxiamError::reason_code()`** (§36.4): the `reason_code` of a `409` — `stale_version`,
+  `strands_profile`, `has_children`, `site_gone`, `duplicate_name`, `duplicate_vlan`,
+  `duplicate_rank`, `profile_exists`, `other` — surfaced verbatim when it is a value this SDK has
+  never seen (the vocabulary is open), `None` for anything that is not a `409`. Branch on it,
+  never on the message.
+- **`network` in a manifest** (§27.6.2; item n): `NetworkSpec`, `NetworkSegmentSpec`,
+  `NetworkProfileSpec`, `NetworkPolicySpec` and `ManagementManifest::with_network_policy` /
+  `with_network_segment` / `with_network_profile`. A segment is keyed by site + kind + name
+  (`access` or `quarantine`, the wire spelling), a profile by its segment, the policy is a
+  singleton; they plan last, in that order. Every stated member is judged on the value as read:
+  `filter_ids` compare as a set (and a segment listing one twice is refused before any request),
+  and a stated `session_timeout_secs` above the cap is an `Update` whose `apply` the server
+  refuses with `403`, reported as given with `apply` stopped and nothing retried. The replace
+  bodies are built from the read with its `version`, a profile's `segment_version` is the response
+  of the segment write the same `apply` made, and a `409` is that action's failure
+  (`Outcome::Conflict { message, reason_code }`, `Outcome::reason_code()`,
+  `ApplyReport::reason_code()`). `Target` gains `NetworkPolicy`, `NetworkSegment` and
+  `NetworkProfile`. There is still no pruning, so no `Delete` is planned for `network` either.
+- **`SsfStreamInput::from_stream_with(&stream, SsfStreamChanges)`** (§32.2; item e): the
+  change-taking read-modify-write form. It sends `events_requested` and `expected_updated_at` as
+  read (`[]` stays `[]`; the timestamp is the server's own string) and cuts `events_requested` to
+  a lowered `events_allowed`; an `events_requested` the caller names is sent as given. The plain
+  `From<&SsfStream>` converter remains, and its documentation now names the caller's duty.
+- **Certificate.user_id** (§27.11 rule 5, contract 1.61): `Option<Uuid>` on `Certificate` and
   `GeneratedCertificate` — a UUID decodes, `null` and an absent member both read `None`, never
   synthesised from `metadata` — and an optional request member on `CreateCertificateRequest`
   and `SignCertificateCsrRequest`, sent exactly as given and left out when `None`.
-- **`SsfStreamInput::expected_updated_at`** (§32.2, §32.3 rule 4): `Option<String>`, sent
-  exactly as the stream's `updated_at` was read and left out when `None`. A `409` on the
+- **`SsfStreamInput::expected_updated_at`** (§32.2, §32.3 rule 4; contract 1.61): `Option<String>`,
+  sent exactly as the stream's `updated_at` was read and left out when `None`. A `409` on the
   update is a conflict error and is not retried.
 
 ### Changed
 
-- **`SsfStreamInput::from(&SsfStream)` sets `expected_updated_at`** — the read's `updated_at`
-  — so an update built from a read of a stream written since (a receiver's pause or
+- **The device grant authenticates its client** (§14.1 rule 2, items m and t; replaces 1.60's
+  "never sends `client_secret`"): `device_authorize` and every `device_poll` send the client's
+  configured secret as `client_secret` in the **form body** — never `Authorization: Basic`,
+  whether the client is registered `client_secret_post` or `client_secret_basic` — and the client
+  certificate goes with the connection. A public client sends no credential and is not refused.
+  The poll sends `client_id` (it already did). A `401 invalid_client` from either is an
+  `OAuthProtocolError`, one request, never retried or refreshed. This SDK does not produce DPoP
+  proofs or `private_key_jwt` assertions, so neither is sent.
+- **`ssf.update_stream` documents the three meanings of `events_requested`** at the call
+  (§32.2, item h): absent resets, an empty list is "none", a list is stored as given and refused
+  `400` outside `events_allowed`.
+- **`SsfStreamInput::from(&SsfStream)` sets `expected_updated_at`** — the read's `updated_at` —
+  so an update built from a read of a stream written since (a receiver's pause or
   narrowing) answers `409` instead of putting the old value back; set it to `None` for the
   previous last-writer-wins. It already carried `events_requested` as read; `Some(vec![])`
   stays `[]` (§32.2: absent would reset the receiver's narrowing to every allowed event).
-- **Breaking for a struct literal:** `Certificate`, `GeneratedCertificate`,
-  `CreateCertificateRequest`, `SignCertificateCsrRequest` and `SsfStreamInput` gain a field,
-  so a struct literal that names every field needs `user_id: None` / `expected_updated_at: None`.
-  Decoding and the request builders are unaffected.
+  (Contract 1.61.)
 
 ### Notes
 
+- Items already held, with a test or a check: an assigned `null` is "none" (item f) — the four
+  members are `Option<String>`, so `None` is the only way to leave them unset and the key is
+  omitted; `expected_updated_at` is the server's own string (item g) — `SsfStream::updated_at` and
+  `ScimTargetResponse::updated_at` are strings, sent back byte for byte.
 - `CibaPendingList::total_pending` and `truncated` (§33.3 rule 16) are not modelled: the type
-  belongs to a console route no operation returns and no SDK drives.
+  belongs to a console route no operation returns and no SDK drives (item d: "SDK work: no").
+- The `[1.0.1]` section of this file, never tagged, is merged into this one.
 
 ## [1.0.0] - 2026-10-10
 
