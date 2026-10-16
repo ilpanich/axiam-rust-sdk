@@ -410,8 +410,7 @@ async fn a_manifest_without_a_network_section_reads_nothing_of_it() {
             .await
             .iter()
             .all(|(_, p)| !p.starts_with("/api/v1/network/")),
-        "{:?}",
-        fake.requests().await
+        "a plan sends no request to the network surface"
     );
 }
 
@@ -434,7 +433,7 @@ async fn apply_creates_segment_then_profile_and_converges() {
         );
 
     let report = fake.client.manifest().apply(&manifest).await.unwrap();
-    assert!(report.is_complete(), "{:?}", report.failure());
+    assert!(report.is_complete(), "the apply has a failing step");
     assert_eq!(report.changed(), 3);
 
     let writes = fake.writes();
@@ -472,7 +471,7 @@ async fn apply_creates_segment_then_profile_and_converges() {
     );
 
     let again = fake.client.manifest().plan(&manifest).await.unwrap();
-    assert!(again.is_converged(), "{again:?}");
+    assert!(again.is_converged(), "a second plan still has changes");
     assert!(again.actions.iter().all(|a| a.change == Change::NoChange));
 }
 
@@ -502,7 +501,7 @@ async fn an_update_sends_the_full_body_from_the_read() {
         );
 
     let report = fake.client.manifest().apply(&manifest).await.unwrap();
-    assert!(report.is_complete(), "{:?}", report.failure());
+    assert!(report.is_complete(), "the apply has a failing step");
 
     let writes = fake.writes();
     let segment = &writes[0];
@@ -534,7 +533,7 @@ async fn an_update_sends_the_full_body_from_the_read() {
     let input = &profile.body["profile"];
     assert!(
         input.get("idle_timeout_secs").is_none(),
-        "a stated none is left out: {input}"
+        "a stated none is left out of the profile body"
     );
     assert_eq!(input["termination_action"], json!("default"));
     assert_eq!(input["filter_id"], json!("lab-in"), "carried from the read");
@@ -560,7 +559,7 @@ async fn the_profile_follows_the_segment_write_version() {
         .with_network_profile(NetworkProfileSpec::new("lab", 900));
 
     let report = fake.client.manifest().apply(&manifest).await.unwrap();
-    assert!(report.is_complete(), "{:?}", report.failure());
+    assert!(report.is_complete(), "the apply has a failing step");
 
     let writes = fake.writes();
     assert_eq!(writes.len(), 2);
@@ -628,20 +627,16 @@ async fn a_409_stops_the_apply_and_the_outcome_exposes_the_reason_code() {
         let outcomes: Vec<&Outcome> = report.steps.iter().map(|(_, o)| o).collect();
         assert!(
             matches!(outcomes[0], Outcome::Conflict { reason_code: Some(c), .. } if c == code),
-            "{outcomes:?}"
+            "the first step is not a conflict carrying the expected reason code"
         );
         assert_eq!(outcomes[0].reason_code(), Some(code));
         assert!(
             matches!(outcomes[1], Outcome::NotAttempted),
-            "later actions are not attempted: {outcomes:?}"
+            "later actions are not attempted"
         );
         // Retry is ON for this client, and the write still went out once.
         let writes = fake.writes();
-        assert_eq!(
-            writes.len(),
-            1,
-            "exactly one write, never retried: {writes:?}"
-        );
+        assert_eq!(writes.len(), 1, "exactly one write, never retried");
     }
 }
 
@@ -720,13 +715,12 @@ async fn unreconcilable_manifests_are_refused_with_zero_wire_calls() {
             let error = result.expect_err(name);
             assert!(
                 matches!(error, AxiamError::Network { .. }),
-                "{name}: {error:?}"
+                "{name}: expected a Network error"
             );
         }
         assert!(
             fake.requests().await.is_empty(),
-            "{name}: {:?}",
-            fake.requests().await
+            "{name}: a rejected manifest sends no request"
         );
     }
 }
@@ -828,7 +822,7 @@ async fn a_clamped_profile_is_judged_on_the_read() {
         .with_network_segment(lab())
         .with_network_profile(NetworkProfileSpec::new("lab", 900));
     let plan = fake.client.manifest().plan(&at_cap).await.unwrap();
-    assert!(plan.is_converged(), "{plan:?}");
+    assert!(plan.is_converged(), "a profile at the cap is not a change");
     fake.client.manifest().apply(&at_cap).await.unwrap();
     assert!(fake.writes().is_empty());
 
@@ -839,7 +833,11 @@ async fn a_clamped_profile_is_judged_on_the_read() {
         .with_network_profile(NetworkProfileSpec::new("lab", 1800))
         .with_network_profile(NetworkProfileSpec::new("lab2", 1800));
     let plan = fake.client.manifest().plan(&above).await.unwrap();
-    assert_eq!(plan.change_count(), 2, "{plan:?}");
+    assert_eq!(
+        plan.change_count(),
+        2,
+        "both profiles above the cap differ from the read"
+    );
 
     fake.refuse_next(
         "PUT",
@@ -857,7 +855,7 @@ async fn a_clamped_profile_is_judged_on_the_read() {
     assert_eq!(failed.target, Target::NetworkProfile);
     assert!(
         message.contains("above the tenant's cap of 900"),
-        "{message}"
+        "the failure message does not name the tenant cap"
     );
     assert!(
         matches!(
@@ -876,13 +874,12 @@ async fn a_clamped_profile_is_judged_on_the_read() {
         .iter()
         .find(|(a, _)| a.key == "lab2" && a.target == Target::NetworkProfile)
         .unwrap();
-    assert!(matches!(later.1, Outcome::NotAttempted), "{later:?}");
-    let writes = fake.writes();
-    assert_eq!(
-        writes.len(),
-        1,
-        "exactly one replace_profile, no retry: {writes:?}"
+    assert!(
+        matches!(later.1, Outcome::NotAttempted),
+        "the later profile action is not attempted"
     );
+    let writes = fake.writes();
+    assert_eq!(writes.len(), 1, "exactly one replace_profile, no retry");
     assert_eq!(
         writes[0].body["profile"]["session_timeout_secs"],
         json!(1800),
@@ -911,7 +908,7 @@ async fn an_update_of_a_clamped_profile_carries_the_clamped_timeout() {
         .with_network_profile(NetworkProfileSpec::new("lab", 900).with_filter_id("lab-out"));
 
     let report = fake.client.manifest().apply(&manifest).await.unwrap();
-    assert!(report.is_complete(), "{:?}", report.failure());
+    assert!(report.is_complete(), "the apply has a failing step");
     let writes = fake.writes();
     assert_eq!(writes.len(), 1);
     assert_eq!(
