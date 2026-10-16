@@ -138,12 +138,26 @@ impl<'c> Ssf<'c> {
     /// unless a note below says otherwise. Read first, change the field you mean,
     /// send the whole thing back.
     ///
-    /// An omitted optional member takes its default (§32.2) -- **except
-    /// `authorization_header`, which absent keeps the stored one** -- unless the
-    /// update moves `endpoint_url` to another scheme, host or port while a header
-    /// is stored: then it must carry `authorization_header` again or
-    /// `clear_authorization_header: true`, else `400` (§32.3 rule 5). An update
-    /// overtaken by the receiver's own write is `409`: read the stream again.
+    /// **`events_requested` has three meanings on an update** (§32.2, contract
+    /// 1.62), and they must be kept apart. Left `None` (absent) it **resets** the
+    /// stream to *every* event of `events_allowed`, as on create -- widening a
+    /// narrowing the receiver made, so AXIAM then sends the receiver more events
+    /// about the tenant's users than it asked for. An explicitly **empty list**
+    /// (`Some` of an empty vector) is stored as the receiver's "none": it does
+    /// not widen, and the stream carries nothing. A list of event types is stored
+    /// as given and refused (`400`) if any is outside `events_allowed`. A raw API
+    /// client is bound by the same meaning: an `events_requested` left out of the
+    /// `PUT` resets the stream. The other omitted optional members take their
+    /// defaults on an update too. To edit a stream you read, start from
+    /// `SsfStreamInput::from_stream_with(&stream, changes)`, which sends
+    /// `events_requested` and `expected_updated_at` as read and cuts
+    /// `events_requested` to a lowered `events_allowed`. An omitted optional
+    /// member takes its default (§32.2) -- **except `authorization_header`, which
+    /// absent keeps the stored one** -- unless the update moves `endpoint_url` to
+    /// another scheme, host or port while a header is stored: then it must carry
+    /// `authorization_header` again or `clear_authorization_header: true`, else
+    /// `400` (§32.3 rule 5). An update overtaken by the receiver's own write is
+    /// `409`: read the stream again.
     /// Not retried on failure (§27.4 rule 8): every write on this surface is
     /// issued exactly once, including the ones that look idempotent.
     pub async fn update_stream(
