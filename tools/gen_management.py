@@ -84,6 +84,21 @@ DEFAULT_TRUE_WHEN_ABSENT = {"inherit"}
 DEFAULT_FALSE_WHEN_ABSENT = {"allow_sha1_signatures"}
 
 
+# Request members the registry's OpenAPI types as `format: uuid` and this SDK
+# nevertheless models as a plain optional string.
+#
+# CONTRACT.md §27.11 rule 5 (contract 1.62, item (i)): the request `user_id`
+# on `certificates.generate` and `certificates.sign_csr` "is passed as a
+# string, so that a malformed value reaches the server and its `400` is
+# surfaced". A `Uuid`-typed member makes the malformed value unrepresentable,
+# which is a client-side judgement of the value however it is spelled. The
+# *response* `Certificate.user_id` stays `Option<Uuid>`.
+UNTYPED_REQUEST_STRINGS = {
+    ("CreateCertificateRequest", "user_id"),
+    ("SignCertificateCsrRequest", "user_id"),
+}
+
+
 def skip_attr(ident: str, ty: str, indent: str) -> str:
     """The `serde` attribute for an optional field, honouring OMIT_WHEN_EMPTY."""
     if ty.startswith("Option<Option<"):
@@ -231,6 +246,21 @@ CALL_SITE_NOTES: dict[str, str] = {
         "into `next`, wait until every SP has refreshed the metadata, then promote."
     ),
     "ssf.update_stream": (
+        "**`events_requested` has three meanings on an update** (§32.2, contract "
+        "1.62), and they must be kept apart. Left `None` (absent) it **resets** the "
+        "stream to *every* event of `events_allowed`, as on create -- widening a "
+        "narrowing the receiver made, so AXIAM then sends the receiver more events "
+        "about the tenant's users than it asked for. An explicitly **empty list** "
+        "(`Some` of an empty vector) is stored "
+        "as the receiver's \"none\": it does not widen, and the stream carries "
+        "nothing. A list of event types is stored as given and refused (`400`) if "
+        "any is outside `events_allowed`. A raw API client is bound by the same "
+        "meaning: an `events_requested` left out of the `PUT` resets the stream. "
+        "The other omitted optional members take their defaults on an update too. "
+        "To edit a stream you read, start from "
+        "`SsfStreamInput::from_stream_with(&stream, changes)`, which sends "
+        "`events_requested` and `expected_updated_at` as read and cuts "
+        "`events_requested` to a lowered `events_allowed`. "
         "An omitted optional member takes its default (§32.2) -- **except "
         "`authorization_header`, which absent keeps the stored one** -- unless the "
         "update moves `endpoint_url` to another scheme, host or port while a header "
@@ -967,6 +997,16 @@ def emit_struct(
                 ty = f"Option<{ty}>"
         else:
             ty = types.rust(pschema)
+            if (name, pname) in UNTYPED_REQUEST_STRINGS:
+                ty = "String"
+                pschema = dict(pschema)
+                pschema["description"] = (
+                    (pschema.get("description") or "")
+                    + "\n\nA plain string, not a `Uuid`: the text is sent exactly as given, "
+                    "so a value that is not a UUID reaches the server and its `400` "
+                    "(`validation_error`) is what the caller sees (CONTRACT §27.11 rule 5, "
+                    "contract 1.62). `None` omits the key; `null` is never sent."
+                )
             if (pname not in required or pname in projected_names) and not ty.startswith(
                 "Option<"
             ):
@@ -1726,8 +1766,10 @@ def call_arguments(
     extra = extra_query_params(op)
     required_q = [q for q in extra if q["required"]]
     optional_q = [q for q in extra if not q["required"]]
-    for _ in required_q:
-        args.append('"example"')
+    for q in required_q:
+        # A required query argument has the Rust type `query_rust_type` gives
+        # it: `delete_segment`'s `version` is an `i64`, not a string.
+        args.append({"i64": "1", "bool": "true"}.get(query_rust_type(q["type"]), '"example"'))
     if len(optional_q) > 2:
         filter_ty = f"{pascal(namespace)}{pascal(opname)}Filter"
         args.append(f"&{namespace}::{filter_ty}::default()")

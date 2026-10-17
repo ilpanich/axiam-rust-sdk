@@ -49,6 +49,23 @@ pub enum Target {
     ServiceAccount,
     /// A role assigned to a service account (contract 1.51).
     ServiceAccountRole,
+    /// The tenant's network policy — the `Session-Timeout` cap (contract 1.62).
+    NetworkPolicy,
+    /// A network segment (contract 1.62).
+    NetworkSegment,
+    /// A network segment's reply profile (contract 1.62).
+    NetworkProfile,
+}
+
+impl Target {
+    /// Whether this action belongs to the `network` namespace (contract 1.62).
+    #[must_use]
+    pub fn is_network(self) -> bool {
+        matches!(
+            self,
+            Target::NetworkPolicy | Target::NetworkSegment | Target::NetworkProfile
+        )
+    }
 }
 
 /// One step of a plan.
@@ -68,8 +85,9 @@ pub struct PlannedAction {
 ///
 /// Ordering is derived, not incidental (§27.6 rule 5): resources (parents
 /// before children), then scopes, permissions, roles, role grants, groups,
-/// group bindings, users and their bindings, and finally service accounts and
-/// theirs.
+/// group bindings, users and their bindings, service accounts and theirs, and
+/// — from contract 1.62 — the `network` namespace: its policy, then its
+/// segments, then its profiles.
 /// Two plans over unchanged state are equal, in the same order (§27.6 rule 8)
 /// — a plan that reorders between runs cannot be diffed, and diffing it is
 /// most of the reason it exists.
@@ -115,6 +133,23 @@ pub enum Outcome {
     Unchanged,
     /// The step failed. Everything before it has already happened.
     Failed(String),
+    /// A `network` write was refused `409` (contract 1.62, §27.6.2 item 5).
+    ///
+    /// Everything before it has already happened and nothing after it was
+    /// attempted. The recovery is to run `apply` again, which re-reads; this
+    /// SDK never repeats the write itself, and never refreshes the version and
+    /// sends again (§36.9). Branch on [`Outcome::reason_code`], never on the
+    /// message.
+    Conflict {
+        /// The server's refusal, as the error rendered it.
+        message: String,
+        /// The body's `reason_code` — `stale_version`, `strands_profile`,
+        /// `has_children`, `profile_exists`, `duplicate_name`, `duplicate_vlan`,
+        /// `duplicate_rank`, `site_gone`, `other`, or a value this SDK has not
+        /// seen, verbatim (the vocabulary is open). `None` from a server that
+        /// predates the member.
+        reason_code: Option<String>,
+    },
     /// A role binding's `Update` failed at its re-assignment (§27.6.1 item 2).
     ///
     /// The previous assignment had already been removed, so `apply` tried to
@@ -129,6 +164,18 @@ pub enum Outcome {
     },
     /// The step was never attempted, because an earlier one failed.
     NotAttempted,
+}
+
+impl Outcome {
+    /// The `reason_code` of a [`Outcome::Conflict`]; `None` for every other
+    /// outcome.
+    #[must_use]
+    pub fn reason_code(&self) -> Option<&str> {
+        match self {
+            Outcome::Conflict { reason_code, .. } => reason_code.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// The server's answer to a service-account `Create`, carried on
@@ -179,9 +226,19 @@ impl ApplyReport {
             .iter()
             .find_map(|(action, outcome)| match outcome {
                 Outcome::Failed(message) => Some((action, message.as_str())),
+                Outcome::Conflict { message, .. } => Some((action, message.as_str())),
                 Outcome::BindingUpdateFailed { error, .. } => Some((action, error.as_str())),
                 _ => None,
             })
+    }
+
+    /// The `reason_code` of the `409` that stopped the apply, when one did
+    /// (contract 1.62, §27.6.2 item 5). `None` when the apply completed, failed
+    /// otherwise, or the server sent no code.
+    pub fn reason_code(&self) -> Option<&str> {
+        self.steps
+            .iter()
+            .find_map(|(_, outcome)| outcome.reason_code())
     }
 
     /// Every service account this apply created, with the one-time secret the
@@ -232,6 +289,11 @@ pub(crate) struct Resolved {
     pub groups: HashMap<String, Uuid>,
     pub users: HashMap<String, Uuid>,
     pub service_accounts: HashMap<String, Uuid>,
+    /// Network segment key → id (contract 1.62).
+    pub network_segments: HashMap<String, Uuid>,
+    /// Network segment key → the `version` last known: the read's, replaced by
+    /// the response of the write `apply` made to it (§27.6.2 item 4).
+    pub network_segment_versions: HashMap<String, i64>,
 }
 
 /// Reject a manifest that cannot be reconciled, before any request is made.
@@ -367,6 +429,8 @@ pub(crate) fn validate(manifest: &ManagementManifest) -> Result<(), AxiamError> 
     if let Err(cycle) = topological_order(manifest) {
         problems.push(cycle);
     }
+
+    super::network::validate(&manifest.network, &mut problems);
 
     if problems.is_empty() {
         Ok(())

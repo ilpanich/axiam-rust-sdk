@@ -178,8 +178,10 @@ async fn device_authorize_is_unauthenticated_and_form_encoded() {
         .mount(&server)
         .await;
 
-    // Built WITHOUT a client secret: §14.1 says a device that cannot show a
-    // browser cannot hold one, and the SDK must not refuse such a client.
+    // Built WITHOUT a client secret: a PUBLIC client (§14.1 rule 1) is
+    // unauthenticated at this endpoint, and the SDK must not refuse it. (A
+    // client configured with a credential sends it — contract 1.62, §14.1
+    // rule 2; `device_client_auth_test.rs` pins that.)
     let client = build_client(&server.uri(), false);
     let auth = client
         .device_authorize(DeviceAuthorizeParams {
@@ -210,7 +212,7 @@ async fn device_authorize_is_unauthenticated_and_form_encoded() {
     );
     assert!(
         !form.contains_key("client_secret"),
-        "§14.1: device_authorize MUST NOT send client_secret"
+        "§14.1 rule 1: a public client sends no client_secret"
     );
     assert_eq!(
         form.get("scope").map(String::as_str),

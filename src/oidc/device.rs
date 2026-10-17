@@ -41,18 +41,28 @@ pub const SLOW_DOWN_INCREMENT_SECS: u64 = 5;
 // Wire types
 // ---------------------------------------------------------------------------
 
+/// The form of `device_authorize`. The client's secret rides **in the body**
+/// when — and only when — the client was configured with one (§14.1 rule 2,
+/// contract 1.62): never as `Authorization: Basic`, whatever the client is
+/// registered for (§12.1 rule 3 stands for these two routes).
 #[derive(Serialize)]
 struct DeviceAuthorizationForm<'a> {
     client_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'a str>,
 }
 
+/// The form of every `device_poll`: it names its client (`client_id`, §14.1
+/// rule 3) and carries the same credential as `device_authorize`.
 #[derive(Serialize)]
 struct DeviceTokenForm<'a> {
     grant_type: &'a str,
     device_code: &'a str,
     client_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret: Option<&'a str>,
 }
 
 /// Not `Debug`: it holds the `device_code` until it is wrapped (§7 rule 1).
@@ -217,9 +227,28 @@ impl AxiamClient {
     /// `POST /oauth2/device_authorization` (CONTRACT.md §14.1) — start the
     /// grant and obtain the code pair.
     ///
-    /// **Unauthenticated by design.** A device that cannot show a browser
-    /// also cannot hold a client secret, so this operation never sends
-    /// `client_secret` and never refuses a client built without one (§14.1).
+    /// **The client authenticates as it does at every other token request**
+    /// (§14.1 rule 2, contract 1.62; this replaces 1.60's "never sends
+    /// `client_secret`"):
+    ///
+    /// * A client built **with** `.oidc_client_secret(..)` sends it as
+    ///   `client_secret` in the form body — also when it is registered
+    ///   `client_secret_basic`, and never as `Authorization: Basic` (§12.1
+    ///   rule 3). The same secret goes with every [`Self::device_poll`].
+    /// * A client built **with** `.with_client_cert(..)` presents its
+    ///   certificate on the connection, and goes to the `mtls_endpoint_aliases`
+    ///   entry for this endpoint when the discovery document publishes one.
+    /// * A **public** client — the usual device, which cannot hold a secret —
+    ///   sends `client_id` and no credential, and is never refused client-side.
+    ///   The server refuses a public client that sends one.
+    ///
+    /// The SDK sends a credential only if its caller configured one: it never
+    /// borrows a secret from elsewhere and never invents one. `private_key_jwt`
+    /// assertions are not produced by this SDK.
+    ///
+    /// A failed client authentication is `401 invalid_client`, surfaced as an
+    /// [`AxiamError::Auth`] carrying an [`crate::OAuthProtocolError`] — one
+    /// request, no retry, and it never enters the §9 refresh guard.
     pub async fn device_authorize(
         &self,
         params: DeviceAuthorizeParams,
@@ -249,8 +278,12 @@ impl AxiamClient {
         })?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
+        // §14.1 rule 2: the credential this client was configured with, and
+        // none when it was configured with none.
+        let client_secret = self.oidc_client_secret().map(|s| s.expose().clone());
         let form = DeviceAuthorizationForm {
             client_id: &client_id,
+            client_secret: client_secret.as_deref(),
             scope: params.scope.as_deref(),
         };
 
@@ -304,6 +337,24 @@ impl AxiamClient {
     /// dispatches on — `authorization_pending` and `slow_down` included, so
     /// a hand-rolled loop sees exactly what [`Self::device_login`] sees.
     ///
+    /// **The poll names its client and authenticates it** (§14.1 rules 2 and
+    /// 3, contract 1.62): every poll sends `client_id`, and the credential the
+    /// client was configured with — a `client_secret` in the form body (never
+    /// `Authorization: Basic`), or the client certificate on the connection —
+    /// exactly as [`Self::device_authorize`] does. A public client sends none.
+    /// The sixth answer, `401 invalid_client` (a failed or missing credential, a
+    /// public client that sent one, a deleted client, a client that no longer
+    /// holds the grant, a sender-constrained client's missing proof), is
+    /// terminal: an [`crate::OAuthProtocolError`] with `error == "invalid_client"`,
+    /// one request, never retried, never refreshed (§14.2 rule 5).
+    ///
+    /// **DPoP (§14.2 rule 8).** This SDK verifies DPoP proofs but does not
+    /// generate them (§21.7.3), so it cannot drive a client registered for
+    /// DPoP-bound tokens: the server's `401 invalid_client` for the missing
+    /// proof is surfaced as above. A response whose `token_type` is `DPoP` is
+    /// returned as the server said it, in [`OidcTokenSet::token_type`](super::OidcTokenSet) —
+    /// never assumed to be `Bearer`.
+    ///
     /// Most callers want [`Self::device_login`] instead.
     pub async fn device_poll(&self, params: DevicePollParams) -> Result<OidcTokenSet, AxiamError> {
         let configuration = match params.configuration {
@@ -319,10 +370,14 @@ impl AxiamClient {
         )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
 
+        // §14.1 rules 2 and 3: the poll names its client on every request and
+        // carries the credential `device_authorize` carried.
+        let client_secret = self.oidc_client_secret().map(|s| s.expose().clone());
         let form = DeviceTokenForm {
             grant_type: DEVICE_CODE_GRANT_TYPE,
             device_code: params.device_code.expose().as_str(),
             client_id: &client_id,
+            client_secret: client_secret.as_deref(),
         };
 
         let response = self

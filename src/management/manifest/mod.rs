@@ -80,14 +80,25 @@
 //!
 //! `webhooks` is named by §27.6 and deliberately not implemented: no consumer
 //! has asked for it, and contract 1.51 does not require it.
+//!
+//! # Contract 1.62: `network`
+//!
+//! §27.6.2 makes the network namespace — segments, their reply profiles and the
+//! tenant's `Session-Timeout` cap — a manifest namespace, planned last: the
+//! policy, then the segments, then the profiles. See [`NetworkSpec`] for the
+//! natural keys, the version-conditional `replace_*` bodies, how a clamped
+//! profile and `filter_ids` are judged, and what a `409` and its `reason_code`
+//! mean to an `apply`.
 
 mod builder;
 #[macro_use]
 mod macros;
+mod network;
 mod plan;
 mod spec;
 
 pub use builder::ManifestBuilder;
+pub use network::{NetworkPolicySpec, NetworkProfileSpec, NetworkSegmentSpec, NetworkSpec};
 pub use plan::{
     ApplyReport, Change, CreatedServiceAccount, ManagementPlan, Outcome, PlannedAction, Target,
 };
@@ -148,6 +159,9 @@ struct Snapshot {
     role_groups: HashMap<Uuid, Vec<Held>>,
     role_service_accounts: HashMap<Uuid, Vec<Held>>,
     group_members: HashMap<Uuid, Vec<Uuid>>,
+    /// Read only when the manifest has a `network` section (§27.6.2), so a
+    /// manifest without one costs no request it did not cost before 1.62.
+    network: network::NetworkSnapshot,
 }
 
 /// One assignment of a role, as the server holds it — everything a binding
@@ -331,6 +345,12 @@ impl<'c> Manifest<'c> {
             );
         }
 
+        let network = if manifest.network.is_empty() {
+            network::NetworkSnapshot::default()
+        } else {
+            self.read_network(&manifest.network).await?
+        };
+
         Ok(Snapshot {
             resources,
             scopes,
@@ -344,6 +364,7 @@ impl<'c> Manifest<'c> {
             role_groups,
             role_service_accounts,
             group_members,
+            network,
         })
     }
 }
@@ -452,6 +473,8 @@ enum Step {
         group: String,
         user: String,
     },
+    /// A `network` action (contract 1.62, §27.6.2).
+    Network(network::NetStep),
 }
 
 impl<'c> Manifest<'c> {
@@ -939,6 +962,16 @@ impl<'c> Manifest<'c> {
             }
         }
 
+        // §27.6.2 item 2: the `network` namespace, appended last — policy,
+        // segments, profiles — so that a manifest without a `network` section
+        // plans exactly as it did before 1.62.
+        network::plan(
+            &manifest.network,
+            &snapshot.network,
+            &mut resolved,
+            &mut steps,
+        )?;
+
         let (actions, pending): (Vec<_>, Vec<_>) = steps.into_iter().unzip();
         Ok((ManagementPlan { actions }, resolved, pending))
     }
@@ -1063,6 +1096,19 @@ impl<'c> Manifest<'c> {
                     action,
                     Outcome::CreatedServiceAccount(CreatedServiceAccount(response)),
                 )),
+                // §27.6.2 item 5: a `409` on a network write is that action's
+                // failure, and its `reason_code` is data on the outcome — the
+                // caller branches on it, never on the message.
+                Err(StepError::Plain(e)) if action.target.is_network() && e.is_conflict() => {
+                    stopped = true;
+                    out.push((
+                        action,
+                        Outcome::Conflict {
+                            message: e.to_string(),
+                            reason_code: e.reason_code().map(str::to_string),
+                        },
+                    ));
+                }
                 Err(StepError::Plain(e)) => {
                     stopped = true;
                     out.push((action, Outcome::Failed(e.to_string())));
@@ -1403,6 +1449,7 @@ impl<'c> Manifest<'c> {
                     .add_member(group_id, &models::AddMemberRequest { user_id })
                     .await?;
             }
+            Step::Network(step) => return self.run_network(step, resolved).await,
         }
         Ok(Done::Plain)
     }
