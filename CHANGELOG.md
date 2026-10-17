@@ -117,6 +117,12 @@ behaviour is additive in every case.
   in any namespace. A regression test (`tests/oauth2_no_session_bearer_test.rs`) pins that neither
   an adopted device credential nor a cookie session puts an `Authorization` header on
   `/oauth2/device_authorization` or `/oauth2/token` (§14.6, C162-05); no source changed.
+- **Re-vendor of the atomicity-race fixes** (axiam `e8722b668`, release PR #716): `openapi.json` and
+  `management-registry.json` now document the `409` responses (and `403`/`404` on the account-deletion
+  cancel) the server gained; digest
+  `sha256:7c3a5091d9d515b1aa3e157e74d342faf64a2c88e735f3c873b66951b3fac8a1`. `CONTRACT.md` and `proto/`
+  are unchanged and the generated management surface is unchanged (`tools/gen_management.py --check`
+  is clean); no source changed.
 
 ## [1.0.0] - 2026-10-10
 
