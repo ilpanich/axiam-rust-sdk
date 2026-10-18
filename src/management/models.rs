@@ -1075,7 +1075,10 @@ pub struct CreateCaCertificateRequest {
     ///
     /// A **common name**, not a distinguished name. A single `CN=` prefix is
     /// accepted and stripped; anything else containing `=` — `O=Acme, CN=ACME
-    /// Corp Root CA` — is refused with `400`.
+    /// Corp Root CA` — is refused with `400`, as is a name of more than 64
+    /// characters (RFC 5280 `ub-common-name`) or one holding a control character,
+    /// a tab or line break, an invisible or bidirectional formatting character,
+    /// or two spaces in a row.
     pub subject: String,
     /// Validity duration in days.
     pub validity_days: i32,
@@ -1093,7 +1096,12 @@ pub struct CreateCertificateRequest {
     /// `metadata`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-    /// `subject`.
+    /// The certificate's common name, e.g. `device-001`: a bare name or one `CN=`
+    /// component, at most 64 characters (RFC 5280 `ub-common-name`), printable —
+    /// a control character, tab or line break, an invisible or bidirectional
+    /// formatting character, or two spaces in a row is refused with `400`. A name
+    /// that is to be written into another system's configuration (a FreeRADIUS
+    /// table, an ACL) should match `^\[A-Za-z0-9\]\[A-Za-z0-9._-\]{0,63}$`.
     pub subject: String,
     /// The names a `Server` certificate is issued for, as `\[{"dns":
     /// "api.lakeside.internal"}, {"ip": "10.0.0.5"}\]`. Required for `cert_type:
@@ -1109,8 +1117,13 @@ pub struct CreateCertificateRequest {
     /// erased. A `metadata.user_id` in the same request must agree with it.
     /// Revoking the account's certificates — directory linking, deletion, erasure
     /// — matches on it.
+    ///
+    /// A plain string, not a `Uuid`: the text is sent exactly as given, so a
+    /// value that is not a UUID reaches the server and its `400`
+    /// (`validation_error`) is what the caller sees (CONTRACT §27.11 rule 5,
+    /// contract 1.62). `None` omits the key; `null` is never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<Uuid>,
+    pub user_id: Option<String>,
     /// Validity duration in days.
     pub validity_days: i32,
 }
@@ -1305,6 +1318,44 @@ pub struct CreateIntermediateCaRequest {
     pub subject: String,
     /// Validity duration in days, capped to the parent's own expiry.
     pub validity_days: i32,
+}
+
+/// The body of `POST /api/v1/network/profiles`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateNetworkReplyProfileRequest {
+    /// The profile: a typed record of the `axiam-radius-reply/1` dictionary. The
+    /// VLAN is never a field; it is the segment's.
+    pub profile: NetworkReplyProfileInput,
+    /// The segment the profile belongs to (at most one profile per segment).
+    pub segment_id: Uuid,
+    /// The segment's `version` as the caller read it: the envelope the profile
+    /// was written against. A segment written since is `409`.
+    pub segment_version: i64,
+}
+
+/// The body of `POST /api/v1/network/segments`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateNetworkSegmentRequest {
+    /// Whether the segment starts as a placement candidate. Defaults to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The `Filter-Id` names the segment's profile may choose from: its envelope.
+    /// At most 32, each matching the pattern above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_ids: Option<Vec<String>>,
+    /// `access` or `quarantine`. Decides the branch the segment lives under.
+    pub kind: NetworkSegmentKind,
+    /// The segment's name, same pattern, unique within the site.
+    pub name: String,
+    /// The placement rank (unique within the site): required for `access`, absent
+    /// for `quarantine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<i32>,
+    /// The site key (`^\[A-Za-z0-9\]\[A-Za-z0-9._-\]{0,62}$`). A single-site tenant
+    /// uses `default`.
+    pub site_key: String,
+    /// The VLAN (1 to 4094), unique within the site.
+    pub vlan_id: i32,
 }
 
 /// `CreateNotificationRuleRequest` (generated from openapi.json).
@@ -2279,6 +2330,11 @@ pub struct GeneratedCaCertificate {
     /// PEM-encoded private key — returned only on generation, and only when there
     /// is one to return.
     ///
+    /// An unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key is RFC 8410
+    /// version 1 (`version` INTEGER 0, the 32-byte seed and no embedded public
+    /// key), which OpenSSL 3.0 reads; an RSA-4096 key is the usual PKCS#8
+    /// `RSAPrivateKey`.
+    ///
     /// Absent under `vault_pki` custody, where the key was generated inside Vault
     /// and no API exports it. The field is omitted rather than sent as `null` so
     /// a client that has always read it keeps working unchanged for every
@@ -2408,6 +2464,11 @@ pub struct GeneratedCertificate {
     /// Validity start.
     pub not_before: String,
     /// PEM-encoded private key — returned only on generation.
+    ///
+    /// An unencrypted PKCS#8 `PRIVATE KEY` block. An Ed25519 key AXIAM generated
+    /// is RFC 8410 version 1 (`version` INTEGER 0, the 32-byte seed and no
+    /// embedded public key), which OpenSSL 3.0 reads; the longer RFC 5958 v2 form
+    /// it does not. An RSA-4096 key is the usual PKCS#8 `RSAPrivateKey`.
     ///
     /// **Secret.** Redacted from every debug and log rendering; call `.expose()`
     /// to read it.
@@ -2988,6 +3049,159 @@ pub enum NameIdFormat {
     /// understand.
     #[serde(untagged)]
     Unknown(String),
+}
+
+/// The tenant's network policy, as the management API returns it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkPolicyResponse {
+    /// `network.session_timeout_max_secs`: the most a reply profile's `Session-
+    /// Timeout` may be, in seconds (300 to 86 400; 3600 until the tenant writes
+    /// one). A stored profile above it is clamped at read.
+    pub session_timeout_max_secs: i32,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// Last write time; absent while it is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    /// The administrator who last wrote it; absent while it is the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<Uuid>,
+    /// The version the next `PUT` must name; `0` until the tenant first writes.
+    pub version: i64,
+}
+
+/// A segment's reply profile as read: **the effective one**, with the
+/// `Session-Timeout` already clamped to the tenant's current cap (design note
+/// §3.4) and `Idle-Timeout` kept within it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkReplyProfile {
+    /// Creation time.
+    pub created_at: String,
+    /// The administrator who created it.
+    pub created_by: Uuid,
+    /// The dictionary version the profile was validated against.
+    pub dictionary: String,
+    /// `Filter-Id`, one of the segment's declared names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_id: Option<String>,
+    /// `Idle-Timeout`, seconds, never above the effective `Session-Timeout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<i32>,
+    /// The owning segment, which is also this profile's id: one profile per
+    /// segment, at most.
+    pub segment_id: Uuid,
+    /// `service_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<RadiusServiceType>,
+    /// Whether the stored value was above the cap and has been lowered.
+    pub session_timeout_clamped: bool,
+    /// `Session-Timeout`, seconds: the stored value lowered to the tenant's
+    /// current cap. This is the value a reply carries.
+    pub session_timeout_secs: i32,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// `Termination-Action`.
+    pub termination_action: RadiusTerminationAction,
+    /// Last write time.
+    pub updated_at: String,
+    /// The administrator who last wrote it.
+    pub updated_by: Uuid,
+    /// The version the next replace or delete must name. Starts at 1.
+    pub version: i64,
+}
+
+/// What a writer supplies for a profile. Closed: an unknown key is a refusal
+/// naming it, never ignored (design note §3.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkReplyProfileInput {
+    /// The dictionary version the profile is written against; defaults to
+    /// \[`REPLY_DICTIONARY_V1`\]. An unknown version is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary: Option<String>,
+    /// `Filter-Id`: one of the owning segment's declared `filter_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_id: Option<String>,
+    /// `Idle-Timeout`, seconds: \[`IDLE_TIMEOUT_FLOOR_SECS`\] up to
+    /// `session_timeout_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<i32>,
+    /// `service_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<RadiusServiceType>,
+    /// `Session-Timeout`, seconds: \[`SESSION_TIMEOUT_FLOOR_SECS`\] up to the
+    /// tenant cap. Never zero.
+    pub session_timeout_secs: i32,
+    /// `Termination-Action`; defaults to `RADIUS-Request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_action: Option<RadiusTerminationAction>,
+}
+
+/// What a segment is for.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`NetworkSegmentKind::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum NetworkSegmentKind {
+    /// `access`
+    #[serde(rename = "access")]
+    Access,
+    /// `quarantine`
+    #[serde(rename = "quarantine")]
+    Quarantine,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// A network segment, as the management API returns it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkSegmentResponse {
+    /// Creation time.
+    pub created_at: String,
+    /// The administrator who created it.
+    pub created_by: Uuid,
+    /// Whether the segment is a placement candidate.
+    pub enabled: bool,
+    /// The `Filter-Id` names the segment's profile may choose from.
+    pub filter_ids: Vec<String>,
+    /// The segment id; also the id of its resource node, which `check_access` is
+    /// asked about, and of its reply profile.
+    pub id: Uuid,
+    /// `access` (under `/network/zones`) or `quarantine` (under
+    /// `/network/quarantine`); fixed for the segment's life.
+    pub kind: NetworkSegmentKind,
+    /// The segment's name, unique within its site.
+    pub name: String,
+    /// The segment's place in the reserved subtree,
+    /// `/network/{zones|quarantine}/\<site_key>/\<name>`.
+    pub path: String,
+    /// The placement rank among a site's `access` segments (lowest wins); absent
+    /// for a quarantine segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<i32>,
+    /// The site key.
+    pub site_key: String,
+    /// The owning tenant.
+    pub tenant_id: Uuid,
+    /// Last write time.
+    pub updated_at: String,
+    /// The administrator who last wrote it.
+    pub updated_by: Uuid,
+    /// The version the next replace or delete must name.
+    pub version: i64,
+    /// The VLAN the tunnel attributes carry (1 to 4094), unique per site.
+    pub vlan_id: i32,
 }
 
 /// Events that can trigger an admin notification.
@@ -3861,6 +4075,60 @@ pub enum ProviderConfig {
     Brevo(ApiProviderConfig),
 }
 
+/// `Service-Type` (RFC 2865 §5.6). Option B accepts only `framed_user`; the
+/// administrative values are refused with a 400.
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`RadiusServiceType::Unknown`\] carrying the string, rather than failing
+/// the response it arrived in -- CONTRACT §27.11 rule 1. A closed enum here
+/// turns the next value the server adds into a parse error on the whole
+/// `list`, taking down every record on the page over one field of one of
+/// them. `#\[non_exhaustive\]` is what makes adding a known variant later non-
+/// breaking for callers; this is what makes *not* knowing it survivable at
+/// runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum RadiusServiceType {
+    /// `framed_user`
+    #[serde(rename = "framed_user")]
+    FramedUser,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// `Termination-Action` (RFC 2865 §5.29).
+/// An **open** enum. A value this SDK does not know decodes to
+/// \[`RadiusTerminationAction::Unknown`\] carrying the string, rather than
+/// failing the response it arrived in -- CONTRACT §27.11 rule 1. A closed
+/// enum here turns the next value the server adds into a parse error on the
+/// whole `list`, taking down every record on the page over one field of one
+/// of them. `#\[non_exhaustive\]` is what makes adding a known variant later
+/// non-breaking for callers; this is what makes *not* knowing it survivable
+/// at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum RadiusTerminationAction {
+    /// `default`
+    #[serde(rename = "default")]
+    Default,
+    /// `radius_request`
+    #[serde(rename = "radius_request")]
+    RadiusRequest,
+    /// A value not in this SDK's copy of the spec, kept verbatim.
+    ///
+    /// Reachable only by decoding; nothing in this SDK constructs it. Re-
+    /// serializing round-trips the original string, so reading a record and
+    /// writing it back does not silently rewrite a field this SDK did not
+    /// understand.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
 /// One hookable event, as the registry describes it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReactorEventDescriptor {
@@ -3984,6 +4252,49 @@ pub struct RegistrationTokenResponse {
     /// registration a token produced is recorded in the audit log, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_by_client_id: Option<String>,
+}
+
+/// The body of `PUT /api/v1/network/policy`: a **replacement** of the policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplaceNetworkPolicyRequest {
+    /// The new cap on a reply profile's `Session-Timeout`, in seconds: 300 to 86
+    /// 400. Lowering it below an existing profile's value is fine (reads clamp);
+    /// raising it is allowed and audited as a raise.
+    pub session_timeout_max_secs: i32,
+    /// The policy's `version` as the caller read it (`0` for a tenant that has
+    /// never written one). A stale one is `409`.
+    pub version: i64,
+}
+
+/// The body of `PUT /api/v1/network/profiles/{segment_id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplaceNetworkReplyProfileRequest {
+    /// The profile.
+    pub profile: NetworkReplyProfileInput,
+    /// The segment's `version` as the caller read it, as for
+    /// \[`CreateReplyProfileRequest::segment_version`\].
+    pub segment_version: i64,
+    /// The profile's `version` as the caller read it. A stale one is `409`.
+    pub version: i64,
+}
+
+/// The body of `PUT /api/v1/network/segments/{id}`: a **replacement** of the
+/// envelope. The kind and the place in the tree do not change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplaceNetworkSegmentRequest {
+    /// Whether the segment is a placement candidate.
+    pub enabled: bool,
+    /// The `Filter-Id` names the segment's profile may choose from. Removing the
+    /// one the profile uses is `409`, naming the profile.
+    pub filter_ids: Vec<String>,
+    /// The placement rank: required for an `access` segment, absent for a
+    /// `quarantine` one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<i32>,
+    /// The segment's `version` as the caller read it. A stale one is `409`.
+    pub version: i64,
+    /// The VLAN (1 to 4094).
+    pub vlan_id: i32,
 }
 
 /// A permission grant with its scopes resolved.
@@ -5222,7 +5533,11 @@ pub struct SignAuditBatchRequest {
 /// No `subject` and no `key_algorithm`: both are read out of the CSR, which
 /// is the only place they can be stated without the row and the certificate
 /// being able to disagree. No key is returned, so there is no key field
-/// anywhere on this exchange.
+/// anywhere on this exchange. The CSR's common name meets the rules of
+/// `subject` on `POST /api/v1/certificates` (printable, at most 64
+/// characters) and is refused, not rewritten, when it does not. So does the
+/// value of every other attribute of the CSR's subject, and a subject with
+/// more than one common name is refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignCertificateCsrRequest {
     /// `cert_type`.
@@ -5242,8 +5557,13 @@ pub struct SignCertificateCsrRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_alt_names: Option<Vec<SubjectAltName>>,
     /// See \[`CreateCertificateRequest::user_id`\].
+    ///
+    /// A plain string, not a `Uuid`: the text is sent exactly as given, so a
+    /// value that is not a UUID reaches the server and its `400`
+    /// (`validation_error`) is what the caller sees (CONTRACT §27.11 rule 5,
+    /// contract 1.62). `None` omits the key; `null` is never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<Uuid>,
+    pub user_id: Option<String>,
     /// Validity duration in days.
     pub validity_days: i32,
 }
@@ -6432,7 +6752,10 @@ pub struct UpdateOAuth2ClientRequest {
     /// `require_par`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_par: Option<bool>,
-    /// `scopes`.
+    /// Replace the client's scopes. On a `managed_by: dcr | cimd` client a scope
+    /// the request adds that is outside the tenant's effective
+    /// `dcr_allowed_scopes` is refused with `422` (#636); an administrator-
+    /// managed client is not bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
     /// `self_signed_tls_client_auth_thumbprints`.

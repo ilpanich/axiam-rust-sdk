@@ -7,7 +7,7 @@ mod management_support;
 
 use std::sync::{Arc, Mutex};
 
-use axiam_sdk::management::{PageRequest, models};
+use axiam_sdk::management::{PageRequest, SsfStreamChanges, models};
 use axiam_sdk::{AxiamError, Sensitive};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -463,4 +463,228 @@ async fn a_read_with_no_events_requested_converts_to_an_explicit_empty_list() {
     let sent = &seen.lock().unwrap()[0];
     assert_eq!(sent["events_requested"], json!([]));
     assert_eq!(sent["expected_updated_at"], json!("2026-10-04T08:15:30.5Z"));
+}
+
+// ── 7. The change-taking form (contract 1.62) ───────────────────────────────
+
+const CREDENTIAL: &str = "https://schemas.openid.net/secevent/caep/event-type/credential-change";
+const ACCOUNT_DISABLED: &str =
+    "https://schemas.openid.net/secevent/risc/event-type/account-disabled";
+/// A `+00:00` offset and nine fraction digits: the instant is compared, so any
+/// other spelling of the same instant would not match what the server stored.
+const STAMP: &str = "2026-10-04T12:34:56.123456789+00:00";
+
+fn read_stream(requested: Value) -> models::SsfStream {
+    serde_json::from_value(stream_body(json!({
+        "events_allowed": [REVOKED, CREDENTIAL, ACCOUNT_DISABLED],
+        "events_requested": requested,
+        "events_delivered": requested,
+        "updated_at": STAMP,
+    })))
+    .expect("an SsfStream")
+}
+
+fn wire(input: &models::SsfStreamInput) -> Value {
+    // `PUT` the body through the SDK's own serializer and read what it sent.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let server = MockServer::start().await;
+        let client = logged_in_client(&server).await;
+        let id = Uuid::new_v4();
+        let seen = capture(
+            &server,
+            "PUT",
+            format!("{STREAMS}/{id}"),
+            ResponseTemplate::new(200).set_body_json(stream_body(json!({}))),
+        )
+        .await;
+        client.ssf().update_stream(id, input).await.expect("200");
+        seen.lock().unwrap()[0].clone()
+    })
+}
+
+/// Given a stream read with `events_allowed` of three types and
+/// `events_requested` of two, a change that lowers `events_allowed` to one of
+/// them yields a body whose `events_requested` holds only what is in the new
+/// ceiling.
+#[test]
+fn the_change_taking_form_cuts_events_requested_to_a_lowered_ceiling() {
+    let stream = read_stream(json!([REVOKED, CREDENTIAL]));
+
+    let cut = models::SsfStreamInput::from_stream_with(
+        &stream,
+        SsfStreamChanges {
+            events_allowed: Some(vec![models::SsfEventType::CredentialChange]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        cut.events_allowed,
+        vec![models::SsfEventType::CredentialChange]
+    );
+    assert_eq!(
+        cut.events_requested,
+        Some(vec![models::SsfEventType::CredentialChange]),
+        "only what the new ceiling still holds"
+    );
+
+    // The order of the read list is kept.
+    let kept = models::SsfStreamInput::from_stream_with(
+        &stream,
+        SsfStreamChanges {
+            events_allowed: Some(vec![
+                models::SsfEventType::CredentialChange,
+                models::SsfEventType::SessionRevoked,
+            ]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        kept.events_requested,
+        Some(vec![
+            models::SsfEventType::SessionRevoked,
+            models::SsfEventType::CredentialChange,
+        ])
+    );
+
+    // A ceiling that holds none of them leaves `[]` — "none" — and not an
+    // absent member, which would reset the stream to every allowed event.
+    let none = models::SsfStreamInput::from_stream_with(
+        &stream,
+        SsfStreamChanges {
+            events_allowed: Some(vec![models::SsfEventType::AccountDisabled]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(none.events_requested, Some(vec![]));
+    assert_eq!(wire(&none)["events_requested"], json!([]));
+}
+
+/// A change that says nothing about events sends `events_requested` as read, an
+/// `[]` as `[]`, and `expected_updated_at` as the response's own string — a
+/// fixture whose `updated_at` carries a `+00:00` offset and nine fraction digits
+/// comes back byte for byte (§32.2 "the response's own string").
+#[test]
+fn the_change_taking_form_sends_events_and_the_timestamp_as_read() {
+    let two = read_stream(json!([REVOKED, CREDENTIAL]));
+    let body = models::SsfStreamInput::from_stream_with(
+        &two,
+        SsfStreamChanges {
+            description: Some(Some("renamed".into())),
+            ..Default::default()
+        },
+    );
+    let sent = wire(&body);
+    assert_eq!(sent["events_requested"], json!([REVOKED, CREDENTIAL]));
+    assert_eq!(sent["expected_updated_at"], json!(STAMP), "byte for byte");
+    assert_eq!(sent["description"], json!("renamed"));
+    assert!(
+        sent.get("authorization_header").is_none()
+            && sent.get("clear_authorization_header").is_none(),
+        "absent keeps the stored header"
+    );
+
+    let none = read_stream(json!([]));
+    let sent = wire(&models::SsfStreamInput::from_stream_with(
+        &none,
+        SsfStreamChanges::default(),
+    ));
+    assert_eq!(sent["events_requested"], json!([]), "[] is sent as []");
+    assert_eq!(sent["expected_updated_at"], json!(STAMP));
+
+    // The plain converter sends the same string (§32.2: it is the response's
+    // own, in every helper that builds a body from a read).
+    let plain = models::SsfStreamInput::from(&two);
+    assert_eq!(plain.expected_updated_at.as_deref(), Some(STAMP));
+}
+
+/// An assigned `null` for `expected_updated_at` leaves the key out — and so do
+/// the other stated "none"s; `null` is never sent (§27.11 rule 5).
+#[test]
+fn an_assigned_none_leaves_the_key_out_and_null_is_never_sent() {
+    let stream = read_stream(json!([REVOKED]));
+    let body = models::SsfStreamInput::from_stream_with(
+        &stream,
+        SsfStreamChanges {
+            expected_updated_at: Some(None),
+            description: Some(None),
+            endpoint_url: Some(None),
+            status_reason: Some(None),
+            events_requested: Some(None),
+            ..Default::default()
+        },
+    );
+    let sent = wire(&body);
+    for key in [
+        "expected_updated_at",
+        "description",
+        "status_reason",
+        "events_requested",
+    ] {
+        assert!(sent.get(key).is_none(), "{key} left out: {sent}");
+    }
+    assert!(
+        !sent.to_string().contains("null"),
+        "null is never sent: {sent}"
+    );
+}
+
+/// An `events_requested` the caller names is sent as given, even when it falls
+/// outside a lowered ceiling: the server judges it.
+#[test]
+fn a_named_events_requested_is_sent_as_given() {
+    let stream = read_stream(json!([REVOKED, CREDENTIAL]));
+    let body = models::SsfStreamInput::from_stream_with(
+        &stream,
+        SsfStreamChanges {
+            events_allowed: Some(vec![models::SsfEventType::SessionRevoked]),
+            events_requested: Some(Some(vec![
+                models::SsfEventType::SessionRevoked,
+                models::SsfEventType::CredentialChange,
+            ])),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        body.events_requested,
+        Some(vec![
+            models::SsfEventType::SessionRevoked,
+            models::SsfEventType::CredentialChange,
+        ])
+    );
+}
+
+/// The `update_stream` documentation states the three meanings — a
+/// documentation check, not a mock — and the plain converter's names the
+/// caller's duty.
+#[test]
+fn update_stream_documents_the_three_meanings_and_the_converter_the_duty() {
+    let ops = include_str!("../src/management/ops/ssf.rs");
+    let at = ops.find("pub async fn update_stream").unwrap();
+    // The doc comment as rustdoc renders it: the `///` markers gone and the
+    // line wrapping collapsed.
+    let update = ops[at.saturating_sub(4000)..at]
+        .replace("///", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "`events_requested` has three meanings",
+        "**resets**",
+        "**empty list**",
+        "refused (`400`) if any is outside `events_allowed`",
+        "raw API client",
+        "from_stream_with",
+    ] {
+        assert!(
+            update.contains(needle),
+            "update_stream docs lack {needle:?}"
+        );
+    }
+    let checks = include_str!("../src/management/checks.rs");
+    assert!(checks.contains("# The caller's duty"));
+    assert!(checks.contains("cannot know that you are about to lower `events_allowed`"));
 }

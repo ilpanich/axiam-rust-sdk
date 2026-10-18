@@ -9,6 +9,7 @@
 //! is what makes a manifest something you can deserialize from configuration,
 //! commit to a repository, and diff.
 
+use super::network::{NetworkPolicySpec, NetworkProfileSpec, NetworkSegmentSpec, NetworkSpec};
 use crate::Sensitive;
 use crate::management::models::PermissionEffect;
 
@@ -48,6 +49,10 @@ pub struct ManagementManifest {
     ///
     /// [`Outcome::CreatedServiceAccount`]: super::Outcome::CreatedServiceAccount
     pub service_accounts: Vec<ServiceAccountSpec>,
+    /// The `network` namespace — segments, their reply profiles and the
+    /// tenant's `Session-Timeout` cap (contract 1.62, §27.6.2). Empty by
+    /// default; an empty section costs no request. See [`NetworkSpec`].
+    pub network: NetworkSpec,
 }
 
 impl ManagementManifest {
@@ -97,6 +102,28 @@ impl ManagementManifest {
     #[must_use]
     pub fn with_service_account(mut self, account: ServiceAccountSpec) -> Self {
         self.service_accounts.push(account);
+        self
+    }
+
+    /// State the tenant's `Session-Timeout` cap (contract 1.62). A manifest
+    /// carries at most one: a second call replaces the first.
+    #[must_use]
+    pub fn with_network_policy(mut self, policy: NetworkPolicySpec) -> Self {
+        self.network.policy = Some(policy);
+        self
+    }
+
+    /// Add a network segment (contract 1.62).
+    #[must_use]
+    pub fn with_network_segment(mut self, segment: NetworkSegmentSpec) -> Self {
+        self.network.segments.push(segment);
+        self
+    }
+
+    /// Add a network segment's reply profile (contract 1.62).
+    #[must_use]
+    pub fn with_network_profile(mut self, profile: NetworkProfileSpec) -> Self {
+        self.network.profiles.push(profile);
         self
     }
 }

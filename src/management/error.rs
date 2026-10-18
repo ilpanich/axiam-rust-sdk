@@ -105,6 +105,31 @@ impl AxiamError {
             }
         )
     }
+
+    /// The `reason_code` of a management `409` — `stale_version`,
+    /// `strands_profile`, `has_children`, `site_gone`, `duplicate_name`,
+    /// `duplicate_vlan`, `duplicate_rank`, `profile_exists` or `other`
+    /// (CONTRACT.md §36.3 rule 2, §36.4; contract 1.62).
+    ///
+    /// The vocabulary is **open** (§27.13): a value this SDK has never seen is
+    /// returned verbatim, and a caller treats it as a conflict whose message is
+    /// for a human. `None` for any error that is not a `409`, and for a `409`
+    /// from a server that predates the member. Branch on this, **never** on the
+    /// message (§36.4), which this SDK does not parse. It is not the `reason`
+    /// of an authorization decision (§3).
+    ///
+    /// The `error` slug beside it (`conflict` or `already_exists`) maps to the
+    /// same [`AuthzKind::Conflict`] either way.
+    pub fn reason_code(&self) -> Option<&str> {
+        match self {
+            AxiamError::Authz {
+                kind: AuthzKind::Conflict,
+                reason_code,
+                ..
+            } => reason_code.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Map a failed management response onto the §2 taxonomy.

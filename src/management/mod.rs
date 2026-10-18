@@ -3,8 +3,8 @@
 //! Every other part of this SDK assumes a populated tenant. [`login`] signs a
 //! user in; [`check_access`] asks about a resource; [`webhook`] verifies a
 //! delivery signature. None of them can create the user, declare the resource
-//! or register the webhook. This module is the part that can: **190 operations
-//! across 28 namespaces**, which is the whole server API minus what other
+//! or register the webhook. This module is the part that can: **202 operations
+//! across 29 namespaces** (contract 1.62 added `network`), which is the whole server API minus what other
 //! contract sections already own and minus organization creation and deletion,
 //! which §27.0 keeps deliberately out of reach of a client library.
 //!
@@ -54,13 +54,14 @@
 //! invalidates the secret the first call returned — so no write on this
 //! surface is retried, including the ones that look idempotent.
 //!
-//! **Some `PUT`s replace rather than patch.** Seventeen update bodies are
+//! **Some `PUT`s replace rather than patch.** Eighteen update bodies are
 //! sparse: set the field you mean, leave the rest `None`, and nothing else
-//! changes. Four are replacements — [`settings().set_org()`], the
-//! organization-level email config, the WebAuthn attestation policy, and the
-//! mTLS trust anchor — where the fields you omit are not preserved. The
-//! generated types make the difference visible: a replacement body has
-//! required fields and will not compile half-filled.
+//! changes. Eleven are replacements — [`settings().set_org()`], the
+//! organization-level email config, the WebAuthn attestation policy, the mTLS
+//! trust anchor, the directory configuration, SAML service providers, SSF
+//! streams, SCIM targets and the three `network` `PUT`s — where the fields you
+//! omit are not preserved. The generated types make the difference visible: a
+//! replacement body has required fields and will not compile half-filled.
 //!
 //! [`settings().set_org()`]: crate::management::ops::settings::Settings::set_org
 //!
@@ -95,6 +96,7 @@ pub mod page;
 pub(crate) mod request;
 pub(crate) mod scope;
 
+pub use checks::SsfStreamChanges;
 pub use error::{FieldError, ValidationError};
 pub use page::{Page, PageRequest};
 

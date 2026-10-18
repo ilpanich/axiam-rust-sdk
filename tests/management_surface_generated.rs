@@ -33,7 +33,7 @@ fn example_id() -> Uuid {
 ///
 /// §27.9: assert the count and the names, so a partial regeneration fails
 /// here instead of quietly shipping 140 of 147.
-const EXERCISED: [&str; 190] = [
+const EXERCISED: [&str; 202] = [
     "organizations.list",
     "organizations.get",
     "organizations.update",
@@ -192,6 +192,18 @@ const EXERCISED: [&str; 190] = [
     "scim_targets.update",
     "scim_targets.delete",
     "scim_targets.reconcile",
+    "network.list_segments",
+    "network.create_segment",
+    "network.get_segment",
+    "network.replace_segment",
+    "network.delete_segment",
+    "network.list_profiles",
+    "network.create_profile",
+    "network.get_profile",
+    "network.replace_profile",
+    "network.delete_profile",
+    "network.get_policy",
+    "network.replace_policy",
     "settings.get_org",
     "settings.set_org",
     "settings.get_effective",
@@ -2398,6 +2410,178 @@ async fn scim_targets_surface() {
         .reconcile(example_id())
         .await
         .expect("scim_targets.reconcile");
+}
+
+/// Reaches every operation in the `network` namespace.
+#[tokio::test]
+async fn network_surface() {
+    let server = MockServer::start().await;
+    let client = logged_in_client(&server).await;
+
+    // network.list_segments
+    mount(&server, "GET", "/api/v1/network/segments", 200, r#"{"items": [{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "enabled": true, "filter_ids": [], "id": "11111111-1111-4111-8111-111111111111", "kind": "access", "name": "example", "path": "example", "site_key": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1, "vlan_id": 1}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    client
+        .network()
+        .list_segments(None, PageRequest::first(50))
+        .await
+        .expect("network.list_segments");
+    client
+        .network()
+        .list_segments_all(None, PageRequest::first(50))
+        .await
+        .expect("network.list_segments auto-paging");
+
+    // network.create_segment
+    mount(&server, "POST", "/api/v1/network/segments", 201, r#"{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "enabled": true, "filter_ids": [], "id": "11111111-1111-4111-8111-111111111111", "kind": "access", "name": "example", "path": "example", "site_key": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1, "vlan_id": 1}"#).await;
+    client
+        .network()
+        .create_segment(&models::CreateNetworkSegmentRequest {
+            enabled: None,
+            filter_ids: None,
+            kind: models::NetworkSegmentKind::Access,
+            name: "example".to_string(),
+            rank: None,
+            site_key: "example".to_string(),
+            vlan_id: 1,
+        })
+        .await
+        .expect("network.create_segment");
+
+    // network.get_segment
+    mount(&server, "GET", &format!("/api/v1/network/segments/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "enabled": true, "filter_ids": [], "id": "11111111-1111-4111-8111-111111111111", "kind": "access", "name": "example", "path": "example", "site_key": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1, "vlan_id": 1}"#).await;
+    client
+        .network()
+        .get_segment(example_id())
+        .await
+        .expect("network.get_segment");
+
+    // network.replace_segment
+    mount(&server, "PUT", &format!("/api/v1/network/segments/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "enabled": true, "filter_ids": [], "id": "11111111-1111-4111-8111-111111111111", "kind": "access", "name": "example", "path": "example", "site_key": "example", "tenant_id": "11111111-1111-4111-8111-111111111111", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1, "vlan_id": 1}"#).await;
+    client
+        .network()
+        .replace_segment(
+            example_id(),
+            &models::ReplaceNetworkSegmentRequest {
+                enabled: true,
+                filter_ids: Vec::new(),
+                rank: None,
+                version: 1,
+                vlan_id: 1,
+            },
+        )
+        .await
+        .expect("network.replace_segment");
+
+    // network.delete_segment
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/network/segments/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .network()
+        .delete_segment(example_id(), 1)
+        .await
+        .expect("network.delete_segment");
+
+    // network.list_profiles
+    mount(&server, "GET", "/api/v1/network/profiles", 200, r#"{"items": [{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "dictionary": "example", "segment_id": "11111111-1111-4111-8111-111111111111", "session_timeout_clamped": true, "session_timeout_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "termination_action": "default", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    client
+        .network()
+        .list_profiles(PageRequest::first(50))
+        .await
+        .expect("network.list_profiles");
+    client
+        .network()
+        .list_profiles_all(PageRequest::first(50))
+        .await
+        .expect("network.list_profiles auto-paging");
+
+    // network.create_profile
+    mount(&server, "POST", "/api/v1/network/profiles", 201, r#"{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "dictionary": "example", "segment_id": "11111111-1111-4111-8111-111111111111", "session_timeout_clamped": true, "session_timeout_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "termination_action": "default", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1}"#).await;
+    client
+        .network()
+        .create_profile(&models::CreateNetworkReplyProfileRequest {
+            profile: models::NetworkReplyProfileInput {
+                dictionary: None,
+                filter_id: None,
+                idle_timeout_secs: None,
+                service_type: None,
+                session_timeout_secs: 1,
+                termination_action: None,
+            },
+            segment_id: example_id(),
+            segment_version: 1,
+        })
+        .await
+        .expect("network.create_profile");
+
+    // network.get_profile
+    mount(&server, "GET", &format!("/api/v1/network/profiles/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "dictionary": "example", "segment_id": "11111111-1111-4111-8111-111111111111", "session_timeout_clamped": true, "session_timeout_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "termination_action": "default", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1}"#).await;
+    client
+        .network()
+        .get_profile(example_id())
+        .await
+        .expect("network.get_profile");
+
+    // network.replace_profile
+    mount(&server, "PUT", &format!("/api/v1/network/profiles/{EXAMPLE_ID}"), 200, r#"{"created_at": "2026-08-26T00:00:00Z", "created_by": "11111111-1111-4111-8111-111111111111", "dictionary": "example", "segment_id": "11111111-1111-4111-8111-111111111111", "session_timeout_clamped": true, "session_timeout_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "termination_action": "default", "updated_at": "2026-08-26T00:00:00Z", "updated_by": "11111111-1111-4111-8111-111111111111", "version": 1}"#).await;
+    client
+        .network()
+        .replace_profile(
+            example_id(),
+            &models::ReplaceNetworkReplyProfileRequest {
+                profile: models::NetworkReplyProfileInput {
+                    dictionary: None,
+                    filter_id: None,
+                    idle_timeout_secs: None,
+                    service_type: None,
+                    session_timeout_secs: 1,
+                    termination_action: None,
+                },
+                segment_version: 1,
+                version: 1,
+            },
+        )
+        .await
+        .expect("network.replace_profile");
+
+    // network.delete_profile
+    mount(
+        &server,
+        "DELETE",
+        &format!("/api/v1/network/profiles/{EXAMPLE_ID}"),
+        204,
+        "",
+    )
+    .await;
+    client
+        .network()
+        .delete_profile(example_id(), 1)
+        .await
+        .expect("network.delete_profile");
+
+    // network.get_policy
+    mount(&server, "GET", "/api/v1/network/policy", 200, r#"{"session_timeout_max_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "version": 1}"#).await;
+    client
+        .network()
+        .get_policy()
+        .await
+        .expect("network.get_policy");
+
+    // network.replace_policy
+    mount(&server, "PUT", "/api/v1/network/policy", 200, r#"{"session_timeout_max_secs": 1, "tenant_id": "11111111-1111-4111-8111-111111111111", "version": 1}"#).await;
+    client
+        .network()
+        .replace_policy(&models::ReplaceNetworkPolicyRequest {
+            session_timeout_max_secs: 1,
+            version: 1,
+        })
+        .await
+        .expect("network.replace_policy");
 }
 
 /// Reaches every operation in the `settings` namespace.

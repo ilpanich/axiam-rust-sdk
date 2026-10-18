@@ -283,6 +283,9 @@ impl ManifestBuilder {
             groups,
             users,
             service_accounts,
+            // The flat builder does not declare `network` (contract 1.62);
+            // build that section with `ManagementManifest::with_network_*`.
+            network: Default::default(),
         })
     }
 

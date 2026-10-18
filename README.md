@@ -56,14 +56,21 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Stability
 
-`axiam-sdk` 1.0.0 is the first stable release. Its public API and the wire contract it
-speaks (CONTRACT.md, the REST, gRPC and AMQP surfaces) follow semantic versioning from here: a
-breaking change waits for 2.0.0, and security fixes ship in `1.0.x`.
+`axiam-sdk` 1.0.0 was the first stable release; this is 1.1.0. Its public API and the wire contract
+it speaks (CONTRACT.md, the REST, gRPC and AMQP surfaces) follow semantic versioning from 1.0.0: a
+breaking change waits for 2.0.0, and security fixes ship in `1.1.x`.
+
+**What a minor release may do.** A contract record may **add a member or widen a type** with a
+minor bump: a struct gains a public field, an enum a variant, a request member loses its narrower
+type (1.1.0's request `user_id` went from `Option<Uuid>` to `Option<String>`). In Rust that can
+break a struct literal that names every field, or code that depended on the narrower type, so
+each such change is named under "Source-breaking changes" in the [change log](CHANGELOG.md).
+A **removal** — of a method, a field, a variant or a type — waits for 2.0.0.
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.61**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
-§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32 and §33, with §32.7 and
+This SDK conforms to **contract 1.62**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33 and §36, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
 signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
@@ -72,18 +79,51 @@ including the four public "Sign in with X" entry points, on the same host object
 The MUST-level §16 (retry policy) and §18 (deterministic shutdown) are implemented and so
 are not named — a MUST is not something an SDK opts into.
 
-§27 is implemented **in full**, both halves: the 190-operation imperative surface *and*
+§27 is implemented **in full**, both halves: the 202-operation imperative surface *and*
 the §27.6 declarative manifest with its §27.7 `manifest!` form. The contract asks an SDK
 that ships only one half to say which; this one ships both. (The manifest has no kind for
-the four namespaces contract 1.54–1.57 added, by the contract's design.)
+the four namespaces contract 1.54–1.57 added, by the contract's design; `network` from contract
+1.62 is a manifest namespace here — see below.)
 
-§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26, §27, §28.12, §29, §30, §31, §32, §32.7 and
-§33 are named rather than folded into the range because they landed after this SDK already
+**Manifest pruning: not offered in any namespace** (§27.10). `plan` never emits a `Delete`, so
+§27.6.2 item 6 and §27.9's "with pruning on" assertion have nothing to bind here.
+
+§12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26, §27, §28.12, §29, §30, §31, §32, §32.7,
+§33 and §36 are named rather than folded into the range because they landed after this SDK already
 claimed §1–§13: widening the range silently would turn a statement that was true when written
 into a different claim without anyone editing it. The §21.3.1 amendment of contract 1.58 (the
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.62 (§34.6, released as 1.1.0 together with 1.61 — the never-tagged 1.0.1 is folded in)
+adds one management namespace and tightens a few rules. This SDK carries all of it:
+
+- **`client.network()`** (§36, item l): the twelve operations — `list_segments`, `create_segment`,
+  `get_segment`, `replace_segment`, `delete_segment`, `list_profiles`, `create_profile`,
+  `get_profile`, `replace_profile`, `delete_profile`, `get_policy`, `replace_policy` — generated
+  from the registry like the rest of §27. Every write names the `version` it read and is issued
+  once; a `409` carries a `reason_code`, read with `AxiamError::reason_code()`. The decision route
+  `POST /api/v1/network/decide` is FreeRADIUS's, not an SDK's, and has no method.
+- **`network` in a manifest** (§27.6.2, items n, u, v, w): see "Declarative management" below.
+- **The device grant authenticates its client** (§14.1 rule 2, items m, t): a client configured
+  with a secret sends it as `client_secret` in the form body at `device_authorize` and at every
+  `device_poll`, never as `Authorization: Basic`; an mTLS client presents its certificate; a public
+  client sends nothing. The poll sends `client_id`; `401 invalid_client` is terminal. This SDK
+  generates no DPoP proof and no `private_key_jwt` assertion.
+- **A change-taking SSF form** (§32.2, item e): `SsfStreamInput::from_stream_with(&stream,
+  SsfStreamChanges { .. })` sends `events_requested` and `expected_updated_at` as read and cuts
+  `events_requested` to a lowered `events_allowed`; `update_stream` documents the three meanings of
+  `events_requested` (item h).
+- **The request `user_id` is a plain string** (§27.11 rule 5, item i) — **source-breaking**: it is
+  `Option<String>` on `CreateCertificateRequest` and `SignCertificateCsrRequest`, so a malformed
+  value reaches the server and its `400` is what you see. The response `Certificate.user_id` stays
+  `Option<Uuid>`.
+- **Already held** (items f, g): an assigned "none" never sends `null` (`Option<String>` members are
+  omitted when `None`), and `expected_updated_at` is the response's own string, byte for byte.
+- **Not SDK work for this SDK** (items a – d, k, o – s): the CIBA list's rate limits, the CA
+  revocation row, `slow_down`, `CibaPendingList`, the threat-model entries, the counts and the
+  CRL number are server or contract text.
 
 Contract 1.61 (§34.5) is additive and clarifying — no route, no operation, one optional member
 on each of three models — and this SDK carries it on its REST transport (it has no gRPC or AMQP
@@ -378,14 +418,14 @@ into just `rest`:
 
 ```toml
 [dependencies]
-axiam-sdk = { version = "1.0.0", default-features = false, features = ["rest"] }
+axiam-sdk = { version = "1.1.0", default-features = false, features = ["rest"] }
 ```
 
 ## Usage
 
 ```toml
 [dependencies]
-axiam-sdk = "1.0.0"
+axiam-sdk = "1.1.0"
 ```
 
 Each capability below has a complete, runnable example under [`examples/`](examples/) — they
@@ -920,6 +960,16 @@ implementations go wrong, so they are worth stating:
 - **Polling stops at `expires_in`**, even if the server has not yet said `expired_token`.
 - **A `5xx` mid-poll is not terminal.** A server restart must not lose a grant the user
   has already approved.
+
+**The client authenticates** (§14.1 rule 2, contract 1.62). A client built with
+`.oidc_client_secret(..)` sends it as `client_secret` in the **form body** at `device_authorize`
+and at every poll — never as `Authorization: Basic`, whether the client is registered
+`client_secret_post` or `client_secret_basic` — and a client built with `.with_client_cert(..)`
+presents its certificate and uses the `mtls_endpoint_aliases` entries. A **public** client (the
+usual device) sends `client_id` and nothing else, and is not refused. The poll names its client
+on every request. A failed client authentication is `401 invalid_client`: an `OAuthProtocolError`,
+terminal, never retried and never through the refresh guard. This SDK produces no DPoP proof and
+no `private_key_jwt` assertion, so a client registered for either cannot be driven by it.
 
 `device_code` is `Sensitive`; `user_code` deliberately is not — it exists to be read
 aloud, and wrapping it would defeat the one thing it is for.
@@ -1807,7 +1857,7 @@ why the ~870 lines of group arithmetic the SRP implementation needed are gone.
 Everything above assumes a populated tenant. `login` signs a user in, `check_access` asks
 about a resource, `verify_webhook` checks a delivery signature — and none of them can
 create the user, declare the resource or register the webhook. `client.management` is the
-part that can: **190 operations across 28 namespaces**, generated from
+part that can: **202 operations across 29 namespaces**, generated from
 `management-registry.json`, which is the whole server API minus what other contract
 sections own and minus organization creation and deletion (§27.0 keeps those out of reach
 of a client library on purpose).
@@ -1915,7 +1965,7 @@ the whole `list` — taking down every record on the page over one field of one 
 
 ### Declarative manifests (§27.6, §27.7)
 
-Calling 190 operations one at a time is rarely what an application wants. What it does at
+Calling 202 operations one at a time is rarely what an application wants. What it does at
 start-up, in a migration, or in a test fixture is assert a shape:
 
 ```rust
@@ -1975,6 +2025,47 @@ subject and role and answers `409` to a second), and a global role bound with
 nothing has been changed. One check cannot run this early: a service account's name is not
 unique on the server, so an ambiguous one — more than one existing account sharing a
 manifest entry's name — is caught only once `plan()`'s own `GET`s have run, and fails there.
+
+#### The `network` namespace (§27.6.2, contract 1.62)
+
+Segments, their reply profiles and the tenant's `Session-Timeout` cap are a manifest
+namespace, planned last — policy, then segments, then profiles:
+
+```rust,ignore
+use axiam_sdk::management::manifest::{
+    ManagementManifest, NetworkPolicySpec, NetworkProfileSpec, NetworkSegmentSpec,
+};
+
+let desired = ManagementManifest::new()
+    .with_network_policy(NetworkPolicySpec::new(7200))
+    .with_network_segment(
+        NetworkSegmentSpec::access("lab", "default", "lab", 20, 1).with_filter_ids(["lab-in"]),
+    )
+    .with_network_segment(NetworkSegmentSpec::quarantine("jail", "default", "jail", 999))
+    .with_network_profile(NetworkProfileSpec::new("lab", 1800).with_filter_id("lab-in"));
+let report = client.manifest().apply(&desired).await?;
+```
+
+- **Natural keys.** A segment is keyed by site + kind + name, where the kind is the **wire**
+  spelling `access` or `quarantine`; a profile by its segment; the policy is a singleton. One key
+  named twice, a profile for a segment the manifest does not declare, and a segment that lists
+  one Filter-Id twice are refused before any request.
+- **Judged on the read.** Every stated member is compared with the value the server returns —
+  for a profile, the *effective* one. `filter_ids` compare as a set (a reorder alone is
+  `NoChange`; a write sends them in the order you state). A stated `session_timeout_secs` above the
+  tenant's cap differs from the read, so `plan` shows an `Update` and `apply` sends it; the server
+  refuses it with `403`, `apply` reports that as given and stops, and nothing is lowered or
+  retried for you. State a higher `NetworkPolicySpec` in the same manifest to raise the cap first.
+  A read-modify-write of a clamped profile cannot restore the stored value (§36.3 rule 6): raise
+  the cap, leave the profile alone.
+- **Writes are version-conditional and never retried.** The replace bodies are built from the
+  read with its `version`; a profile's `segment_version` is the response of the segment write the
+  same `apply` just made. A `409` is that action's failure — `Outcome::Conflict { message,
+  reason_code }`, or `report.reason_code()` — and you run `apply` again, which re-reads.
+- **No pruning.** As for every namespace, this SDK offers none: `plan` never emits a `Delete`.
+  Use `client.network().delete_segment(id, version)` and `delete_profile` for that.
+- The `manifest!` macro and `ManifestBuilder` do not declare `network` statements; use the
+  constructors above.
 
 #### Resource-scoped bindings, service accounts, and metadata
 
@@ -2111,6 +2202,29 @@ client.federation().update_config(config_id, &models::UpdateFederationConfigRequ
     ..Default::default()
 }).await?;
 ```
+
+A stream is edited with the **change-taking form**, which does what the plain converter leaves
+to you (§32.2, contract 1.62): it sends `events_requested` and `expected_updated_at` as read
+and cuts `events_requested` to a lowered `events_allowed`.
+
+```rust,ignore
+use axiam_sdk::management::SsfStreamChanges;
+
+let stream = client.ssf().get_stream(stream_id).await?;
+let body = models::SsfStreamInput::from_stream_with(
+    &stream,
+    SsfStreamChanges {
+        events_allowed: Some(vec![models::SsfEventType::SessionRevoked]),
+        ..Default::default()
+    },
+);
+client.ssf().update_stream(stream_id, &body).await?; // 409 if the stream was written since
+```
+
+`events_requested` has three meanings on an update: left `None` it *resets* the stream to every
+event of `events_allowed`; an empty list is the receiver's "none"; a list is stored as given and
+refused `400` outside `events_allowed`. The plain `SsfStreamInput::from(&stream)` also sends it
+as read, but cannot know you will lower the ceiling, so the cut is yours there.
 
 `SamlIdpCredential` has no key member and never will; `delete` on a SCIM target deprovisions
 nothing downstream; retiring the active SAML credential with no successor stops SAML sign-on

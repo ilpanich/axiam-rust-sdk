@@ -284,6 +284,7 @@ impl AxiamExtractorError {
                 message: "CSRF validation failed: missing or mismatched X-CSRF-Token header".into(),
                 action: None,
                 resource_id: None,
+                reason_code: None,
             },
             challenge: None,
         }

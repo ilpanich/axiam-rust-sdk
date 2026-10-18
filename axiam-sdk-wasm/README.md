@@ -29,7 +29,7 @@ if (await client.can("documents:read", "3f8a…-uuid")) {
 
 From 1.0.0 the package is stable and follows semantic versioning, in lockstep
 with the `axiam-sdk` crate it is built from: `latest` names the newest stable
-release, a breaking change waits for 2.0.0, and security fixes ship in `1.0.x`.
+release, a breaking change waits for 2.0.0, and security fixes ship in `1.1.x`.
 
 ## Coming from 1.0.0-alpha31 or earlier?
 
