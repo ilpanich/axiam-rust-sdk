@@ -4,3 +4,6 @@ Cargo.lock
 # Generated gRPC stubs (build.rs codegen, D-09) — bundled at publish time,
 # never committed.
 /src/gen/
+
+# Build artifacts of the vendored crate (C162-13)
+/vendor/axiam-opaque/target/
