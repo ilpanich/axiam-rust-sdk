@@ -223,7 +223,10 @@ mod tests {
         ] {
             let mut m = message(action);
             assert!(m.check_action().is_err(), "{action}");
-            assert!(m.sign(b"key").is_err(), "{action} must not be signed");
+            assert!(
+                m.sign(Uuid::new_v4().as_bytes()).is_err(),
+                "{action} must not be signed"
+            );
             assert!(m.hmac_signature.is_none(), "{action}: nothing signed");
         }
     }
@@ -247,7 +250,8 @@ mod tests {
             "éenants.x",
         ] {
             let mut m = message(action);
-            m.sign(b"key").unwrap_or_else(|e| panic!("{action}: {e}"));
+            m.sign(Uuid::new_v4().as_bytes())
+                .unwrap_or_else(|e| panic!("{action}: {e}"));
             assert!(m.hmac_signature.is_some());
         }
     }
