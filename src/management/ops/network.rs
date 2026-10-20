@@ -5,13 +5,14 @@
 //! The `network` management namespace (CONTRACT §27.1).
 //!
 //! A tenant's network segments and the RADIUS reply profile each owns (RADIUS
-//! D4): a segment is a node of the reserved /network subtree of the resource
-//! tree (kind, VLAN, Filter-Id envelope, placement rank), and its profile is
-//! the typed `axiam-radius-reply/1` record a decision renders. Every write is
-//! conditional on the `version` the caller read and passes the server's write
-//! gate. The tenant's Session-Timeout cap is one more row of it (get_policy,
-//! replace_policy): lowering it is always allowed, raising it is allowed and
-//! audited. The decision route FreeRADIUS calls is not in this registry.
+//! Live profile): a segment is a node of the reserved /network subtree of the
+//! resource tree (kind, VLAN, Filter-Id envelope, placement rank), and its
+//! profile is the typed `axiam-radius-reply/1` record a decision renders.
+//! Every write is conditional on the `version` the caller read and passes the
+//! server's write gate. The tenant's Session-Timeout cap is one more row of
+//! it (get_policy, replace_policy): lowering it is always allowed, raising it
+//! is allowed and audited. The decision route FreeRADIUS calls is not in this
+//! registry.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -27,13 +28,14 @@ use crate::management::scope::Scope;
 /// The `network` namespace handle.
 ///
 /// A tenant's network segments and the RADIUS reply profile each owns (RADIUS
-/// D4): a segment is a node of the reserved /network subtree of the resource
-/// tree (kind, VLAN, Filter-Id envelope, placement rank), and its profile is
-/// the typed `axiam-radius-reply/1` record a decision renders. Every write is
-/// conditional on the `version` the caller read and passes the server's write
-/// gate. The tenant's Session-Timeout cap is one more row of it (get_policy,
-/// replace_policy): lowering it is always allowed, raising it is allowed and
-/// audited. The decision route FreeRADIUS calls is not in this registry.
+/// Live profile): a segment is a node of the reserved /network subtree of the
+/// resource tree (kind, VLAN, Filter-Id envelope, placement rank), and its
+/// profile is the typed `axiam-radius-reply/1` record a decision renders.
+/// Every write is conditional on the `version` the caller read and passes the
+/// server's write gate. The tenant's Session-Timeout cap is one more row of
+/// it (get_policy, replace_policy): lowering it is always allowed, raising it
+/// is allowed and audited. The decision route FreeRADIUS calls is not in this
+/// registry.
 ///
 /// Acquiring one performs no I/O and allocates nothing meaningful (§27.2 rule
 /// 1); it borrows the client and cannot outlive it.
