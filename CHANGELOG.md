@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.1] - 2026-10-20
 
-`axiam-sdk` 1.1.1 carries **contract 1.63** (axiam `a6cd10eba`, the release branch of AXIAM 1.1.1).
+`axiam-sdk` 1.1.1 carries **contract 1.63** (axiam `d919ba0cc`, the release branch of AXIAM 1.1.1).
 `CONTRACT.md`, `openapi.json` and `management-registry.json` are vendored byte for byte from
-`a6cd10eba` (`proto/` is unchanged). The surface stays 202 operations in 29 namespaces; nothing in
+`d919ba0cc` (`proto/` is unchanged). The surface stays 202 operations in 29 namespaces; nothing in
 this release is source-breaking, so it is a patch.
 
 ### Fixed
@@ -36,8 +36,9 @@ this release is source-breaking, so it is a patch.
 - **`AuditEventMessage::check_action` and `AuditEventMessage::sign`** (contract 1.63, §8 "Actions
   the audit ingestion refuses"; #710 item 3): an action beginning with `tenants.` or `gdpr.`, ASCII
   case ignored, is refused locally with a validation error (status 400, source of
-  `AxiamError::Network`) that names the namespace and never the action, and `sign` never signs it,
-  so it is not published. The action-grammar refusal is optional in the contract and is not ported.
+  `AxiamError::Network`) that names the namespace and never the action; `AuditEventMessage::sign`
+  refuses it and never signs it (no SDK ships an audit publisher, §8), and `check_action` is the
+  same test on its own. The action-grammar refusal is optional in the contract and is not ported.
 
 ## [1.1.0] - 2026-10-16
 

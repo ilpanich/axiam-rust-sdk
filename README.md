@@ -98,7 +98,7 @@ honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.
 
 Contract 1.63 (§34.7, released as 1.1.1) changes no operation. This SDK sends no `axiam_*` cookie
 and no `X-CSRF-Token` to any `/oauth2/*` endpoint (§6.1 rule 11, §12.1 rule 3), refuses a reserved
-`tenants.` / `gdpr.` audit action before signing it (`AuditEventMessage::check_action`, §8), and
+`tenants.` / `gdpr.` audit action in `AuditEventMessage::sign` (and in `check_action`, §8), and
 refuses at `plan` an open-enum profile value it cannot send (§27.6.2 item 4). It generates no DPoP
 proofs, so §21.7.4's key-lifetime rule has nothing to bind here.
 
