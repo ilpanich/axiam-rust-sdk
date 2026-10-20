@@ -437,10 +437,7 @@ impl AxiamClient {
         // One `send()`, no retry wrapper. See the rule-6 note above — this is
         // the §16 exception, and it is load-bearing rather than stylistic.
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&form)
             .send()
             .await

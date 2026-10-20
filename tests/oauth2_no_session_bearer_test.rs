@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use axiam_sdk::Sensitive;
 use axiam_sdk::client::AxiamClient;
-use axiam_sdk::oidc::{DeviceAuthorizeParams, DevicePollParams};
+use axiam_sdk::oidc::{DeviceAuthorizeParams, DevicePollParams, LoginClientCredentialsParams};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -262,4 +262,124 @@ async fn a_cookie_session_sends_no_authorization_header_to_the_device_endpoints(
             seen.route
         );
     }
+}
+
+/// CONTRACT.md §14.6 (third paragraph), §6.1 rule 11, §12.1 rule 3 (contract
+/// 1.63): a jar that holds session cookies and a captured CSRF token, then a
+/// device authorization, a device poll and a token request — none of the three
+/// carries a `Cookie` header or an `X-CSRF-Token` header.
+#[tokio::test]
+async fn a_jar_with_session_cookies_sends_neither_cookie_nor_csrf_to_oauth2() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+    let log = mount_oauth2(&server).await;
+
+    let access = sign_claims(&json!({
+        "sub": Uuid::new_v4().to_string(),
+        "tenant_id": TENANT_ID,
+        "org_id": ORG_ID,
+        "iss": "axiam-test",
+        "iat": 0,
+        "exp": 9_999_999_999i64,
+        "jti": Uuid::new_v4().to_string(),
+    }));
+    let mut login = ResponseTemplate::new(200).set_body_json(json!({
+        "user": { "id": Uuid::new_v4(), "username": "admin", "email": "admin@example.com" },
+        "session_id": Uuid::new_v4(),
+        "expires_in": 900,
+    }));
+    for cookie in [
+        format!("axiam_access={access}; Path=/; HttpOnly"),
+        "axiam_refresh=test-refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=test-csrf-token; Path=/".to_string(),
+    ] {
+        login = login.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login)
+        .mount(&server)
+        .await;
+    // A control: the same client does send the session to `/api/v1/*`.
+    let probe: Log = Arc::default();
+    let sink = Arc::clone(&probe);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/logout"))
+        .respond_with(move |req: &Request| {
+            sink.lock().unwrap().push(Seen {
+                route: req.url.path().to_string(),
+                authorization: None,
+                everything: format!("{:?}", req.headers),
+            });
+            ResponseTemplate::new(204)
+        })
+        .mount(&server)
+        .await;
+
+    let client = builder(&server.uri()).build().unwrap();
+    client
+        .login("admin@example.com", &any_password())
+        .await
+        .expect("login");
+    client.logout().await.expect("logout");
+    let control = probe.lock().unwrap().clone();
+    assert_eq!(control.len(), 1);
+    assert!(
+        control[0].everything.contains("axiam_access=")
+            && control[0]
+                .everything
+                .to_lowercase()
+                .contains("x-csrf-token"),
+        "control: /api/v1/* does carry the session: {}",
+        control[0].everything
+    );
+
+    client
+        .login_client_credentials(LoginClientCredentialsParams::default())
+        .await
+        .expect("token request");
+    for seen in run_device_operations_and_token(&client, &log).await {
+        let everything = seen.everything.to_lowercase();
+        assert!(
+            !everything.contains("axiam_") && !everything.contains("cookie:"),
+            "{}: no session cookie (§6.1 rule 11): {}",
+            seen.route,
+            seen.everything
+        );
+        assert!(
+            !everything.contains("x-csrf-token"),
+            "{}: no X-CSRF-Token (§12.1 rule 3): {}",
+            seen.route,
+            seen.everything
+        );
+    }
+}
+
+/// The device operations, then everything the log holds (which already holds
+/// the token request made before them).
+async fn run_device_operations_and_token(client: &AxiamClient, log: &Log) -> Vec<Seen> {
+    client
+        .device_authorize(DeviceAuthorizeParams::default())
+        .await
+        .expect("device_authorize");
+    client
+        .device_poll(DevicePollParams {
+            device_code: Sensitive::new(DEVICE_CODE.to_string()),
+            tenant_id: None,
+            configuration: None,
+        })
+        .await
+        .expect("device_poll");
+    let seen = log.lock().unwrap().clone();
+    let routes: Vec<&str> = seen.iter().map(|s| s.route.as_str()).collect();
+    assert_eq!(
+        routes,
+        [
+            "/oauth2/token",
+            "/oauth2/device_authorization",
+            "/oauth2/token"
+        ],
+        "token request, device authorization, device poll"
+    );
+    seen
 }

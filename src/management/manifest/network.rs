@@ -316,6 +316,17 @@ impl NetworkProfileSpec {
 // Validation (before any request)
 // ---------------------------------------------------------------------------
 
+/// The refusal of §27.6.2 item 4: the read holds an open-enum `value` this SDK
+/// cannot name in `member`, the manifest does not state it, and the profile
+/// would be replaced. State the member to resolve it.
+fn unknown_open_enum(segment: &str, member: &str, value: &str) -> AxiamError {
+    AxiamError::network(format!(
+        "network profile of segment {segment:?}: {member} is {value:?} on the server, a value \
+         this SDK does not know and never re-sends; state {member} in the manifest to replace it \
+         (CONTRACT.md §27.6.2)"
+    ))
+}
+
 /// The wire spelling of a kind, for natural-key comparison and summaries.
 fn kind_wire(kind: &NetworkSegmentKind) -> &str {
     match kind {
@@ -633,6 +644,22 @@ pub(super) fn plan(
                         .service_type
                         .as_ref()
                         .is_some_and(|s| *s != read.service_type);
+                // §27.6.2 item 4 (maintainer, 2026-10-16): an `Update` carries
+                // an unstated member from the read, and an open-enum value this
+                // SDK has no name for is never re-sent. Refuse at `plan`, with
+                // no request, naming the member and the value.
+                if drifted {
+                    if stated.termination_action.is_none()
+                        && let RadiusTerminationAction::Unknown(value) = &read.termination_action
+                    {
+                        return Err(unknown_open_enum(&segment.key, "termination_action", value));
+                    }
+                    if stated.service_type.is_none()
+                        && let Some(RadiusServiceType::Unknown(value)) = &read.service_type
+                    {
+                        return Err(unknown_open_enum(&segment.key, "service_type", value));
+                    }
+                }
                 steps.push((
                     action(
                         change(drifted),

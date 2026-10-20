@@ -725,6 +725,90 @@ async fn unreconcilable_manifests_are_refused_with_zero_wire_calls() {
     }
 }
 
+// ── an open-enum value the SDK cannot name (§27.6.2 item 4) ─────────────────
+
+impl Fake {
+    /// Make the one seeded profile read back `value` in `member`.
+    fn set_profile_member(&self, member: &str, value: &str) {
+        self.state.lock().unwrap().profiles[0][member] = json!(value);
+    }
+}
+
+fn lab_with_profile(profile: NetworkProfileSpec) -> ManagementManifest {
+    ManagementManifest::new()
+        .with_network_segment(NetworkSegmentSpec::access("lab", "default", "lab", 10, 3))
+        .with_network_profile(profile)
+}
+
+/// A profile read with `termination_action: "future"` (or an unknown
+/// `service_type`), a manifest that states another member and not that one:
+/// `plan` and `apply` refuse, naming the member and the value, and no `PUT` is
+/// sent.
+#[tokio::test]
+async fn an_unknown_open_enum_on_an_unstated_member_is_refused_before_any_write() {
+    for (member, value) in [
+        ("termination_action", "future"),
+        ("service_type", "future-service"),
+    ] {
+        let fake = Fake::start().await;
+        let id = fake.seed_segment("access", "lab", 10, Some(3), &["lab-in"], 4);
+        fake.seed_profile(id, 1800, 2);
+        fake.set_profile_member(member, value);
+        // Another member is stated (and differs), so the action is an `Update`.
+        let manifest = lab_with_profile(NetworkProfileSpec::new("lab", 900));
+
+        let planned = fake.client.manifest().plan(&manifest).await;
+        let applied = fake.client.manifest().apply(&manifest).await;
+        for result in [planned.map(|_| ()), applied.map(|_| ())] {
+            let error = result.expect_err(member);
+            assert!(matches!(error, AxiamError::Network { .. }), "{member}");
+            let text = error.to_string();
+            assert!(text.contains(member), "{member}: names the member: {text}");
+            assert!(text.contains(value), "{member}: names the value: {text}");
+        }
+        assert!(
+            fake.writes().is_empty(),
+            "{member}: no PUT, no write of any kind"
+        );
+    }
+}
+
+/// A manifest that states the member resolves it: the stated value replaces
+/// the unknown one and the `Update` proceeds.
+#[tokio::test]
+async fn stating_the_member_resolves_an_unknown_open_enum() {
+    let fake = Fake::start().await;
+    let id = fake.seed_segment("access", "lab", 10, Some(3), &["lab-in"], 4);
+    fake.seed_profile(id, 1800, 2);
+    fake.set_profile_member("termination_action", "future");
+    fake.set_profile_member("service_type", "future-service");
+    let manifest = lab_with_profile(
+        NetworkProfileSpec::new("lab", 900)
+            .with_termination_action(RadiusTerminationAction::Default)
+            .with_service_type(RadiusServiceType::FramedUser),
+    );
+    let report = fake.client.manifest().apply(&manifest).await.unwrap();
+    assert!(report.is_complete());
+    let writes = fake.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    let input = &writes[0].body["profile"];
+    assert_eq!(input["termination_action"], json!("default"));
+    assert_eq!(input["service_type"], json!("framed_user"));
+}
+
+/// A `NoChange` writes nothing, so it is not refused for a value it does not
+/// send.
+#[tokio::test]
+async fn an_unknown_open_enum_does_not_refuse_a_no_change() {
+    let fake = Fake::start().await;
+    let id = fake.seed_segment("access", "lab", 10, Some(3), &["lab-in"], 4);
+    fake.seed_profile(id, 1800, 2);
+    fake.set_profile_member("termination_action", "future");
+    let manifest = lab_with_profile(NetworkProfileSpec::new("lab", 1800));
+    fake.client.manifest().plan(&manifest).await.unwrap();
+    assert!(fake.writes().is_empty());
+}
+
 // ── kind and filter_ids ─────────────────────────────────────────────────────
 
 /// A segment whose `kind` is stated as `access` is `NoChange` against a read

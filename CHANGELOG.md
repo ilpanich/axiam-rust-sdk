@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-20
+
+`axiam-sdk` 1.1.1 carries **contract 1.63** (axiam `a6cd10eba`, the release branch of AXIAM 1.1.1).
+`CONTRACT.md`, `openapi.json` and `management-registry.json` are vendored byte for byte from
+`a6cd10eba` (`proto/` is unchanged). The surface stays 202 operations in 29 namespaces; nothing in
+this release is source-breaking, so it is a patch.
+
+### Fixed
+
+- **No session cookie and no `X-CSRF-Token` on any `/oauth2/*` request** (contract 1.63, §6.1 rule
+  11, §12.1 rule 3; #710 item a): the token, introspection, revocation, device-authorization,
+  PAR, CIBA, token-exchange and UMA-ticket calls now go over the session-free transport and carry
+  only `X-Tenant-ID`; the JWKS fetch does too. Before, the per-client cookie jar attached the
+  `axiam_*` cookies and `maybe_csrf_header` added the captured token. Tested with a jar that holds
+  session cookies followed by a device authorization, a device poll and a token request
+  (§14.6).
+- **`plan` refuses an open-enum value it cannot send** (C162-07; §27.6.2 item 4): a profile whose
+  read carries a `termination_action` or `service_type` this SDK has no name for, on a member the
+  manifest does not state, no longer has that value re-sent by the `Update`; `plan` (and so
+  `apply`) returns an error naming the member and the value, before any write. Stating the member
+  resolves it; a `Create` and a `NoChange` are not refused.
+- **Build artifacts untracked** (C162-13): the 438 files under `vendor/axiam-opaque/target/` are no
+  longer in the index and the path is ignored.
+
+### Added
+
+- **`AuditEventMessage::check_action` and `AuditEventMessage::sign`** (contract 1.63, §8 "Actions
+  the audit ingestion refuses"; #710 item 3): an action beginning with `tenants.` or `gdpr.`, ASCII
+  case ignored, is refused locally with a validation error (status 400, source of
+  `AxiamError::Network`) that names the namespace and never the action, and `sign` never signs it,
+  so it is not published. The action-grammar refusal is optional in the contract and is not ported.
+
 ## [1.1.0] - 2026-10-16
 
 `axiam-sdk` 1.1.0 carries **contract 1.62** (axiam `d25413506`, the release branch of AXIAM 1.1.0)
