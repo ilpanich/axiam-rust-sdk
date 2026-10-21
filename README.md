@@ -56,7 +56,7 @@ See [`examples/version_compatibility.rs`](./examples/version_compatibility.rs).
 
 ## Stability
 
-`axiam-sdk` 1.0.0 was the first stable release; this is 1.1.0. Its public API and the wire contract
+`axiam-sdk` 1.0.0 was the first stable release; this is 1.1.1. Its public API and the wire contract
 it speaks (CONTRACT.md, the REST, gRPC and AMQP surfaces) follow semantic versioning from 1.0.0: a
 breaking change waits for 2.0.0, and security fixes ship in `1.1.x`.
 
@@ -69,7 +69,7 @@ A **removal** — of a method, a field, a variant or a type — waits for 2.0.0.
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.62**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.63**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33 and §36, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -95,6 +95,12 @@ into a different claim without anyone editing it. The §21.3.1 amendment of cont
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.63 (§34.7, released as 1.1.1) changes no operation. This SDK sends no `axiam_*` cookie
+and no `X-CSRF-Token` to any `/oauth2/*` endpoint (§6.1 rule 11, §12.1 rule 3), refuses a reserved
+`tenants.` / `gdpr.` audit action in `AuditEventMessage::sign` (and in `check_action`, §8), and
+refuses at `plan` an open-enum profile value it cannot send (§27.6.2 item 4). It generates no DPoP
+proofs, so §21.7.4's key-lifetime rule has nothing to bind here.
 
 Contract 1.62 (§34.6, released as 1.1.0 together with 1.61 — the never-tagged 1.0.1 is folded in)
 adds one management namespace and tightens a few rules. This SDK carries all of it:
@@ -418,14 +424,14 @@ into just `rest`:
 
 ```toml
 [dependencies]
-axiam-sdk = { version = "1.1.0", default-features = false, features = ["rest"] }
+axiam-sdk = { version = "1.1.1", default-features = false, features = ["rest"] }
 ```
 
 ## Usage
 
 ```toml
 [dependencies]
-axiam-sdk = "1.1.0"
+axiam-sdk = "1.1.1"
 ```
 
 Each capability below has a complete, runnable example under [`examples/`](examples/) — they

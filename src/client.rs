@@ -609,9 +609,9 @@ reason: None,
         // explicitly not a guard, and does not depend on this.
         let jwks_verifier = match &tenant {
             TenantIdentifier::Id(id) => {
-                JwksVerifier::new(http.clone(), &base_url)?.expect_tenant_id(*id)
+                JwksVerifier::new(http_bare.clone(), &base_url)?.expect_tenant_id(*id)
             }
-            TenantIdentifier::Slug(_) => JwksVerifier::new(http.clone(), &base_url)?,
+            TenantIdentifier::Slug(_) => JwksVerifier::new(http_bare.clone(), &base_url)?,
         };
 
         // CONTRACT.md §12.3 rule 6: discovery-cache TTL floored at 5 minutes,
@@ -1091,6 +1091,16 @@ impl AxiamClient {
         &self.inner.http_bare
     }
 
+    /// A `POST` to an `/oauth2/*` endpoint (CONTRACT.md §6.1 rule 11, §12.1
+    /// rule 3): on the session-free transport, so no `axiam_*` cookie rides
+    /// along, and with no `X-CSRF-Token` — only the tenant header. The
+    /// endpoint authenticates the caller by the credential in the form.
+    pub(crate) fn oauth2_post(&self, url: url::Url) -> reqwest::RequestBuilder {
+        self.http_bare()
+            .post(url)
+            .header("X-Tenant-ID", self.tenant_header_value())
+    }
+
     /// Access the token manager (crate-internal use by `rest`/`grpc`).
     pub(crate) fn token_manager(&self) -> &TokenManager {
         &self.inner.token_manager
@@ -1222,7 +1232,10 @@ impl AxiamClient {
             message,
             source: None,
         })?;
-        let verifier = Arc::new(JwksVerifier::for_jwks_url(self.inner.http.clone(), url));
+        let verifier = Arc::new(JwksVerifier::for_jwks_url(
+            self.inner.http_bare.clone(),
+            url,
+        ));
         if let Ok(mut map) = self.inner.oidc_verifiers.write() {
             map.entry(jwks_uri.to_string())
                 .or_insert_with(|| Arc::clone(&verifier));

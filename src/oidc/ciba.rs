@@ -47,7 +47,6 @@ use super::exchange::{OidcTokenSet, TokenResponseWire, oauth2_error_or_fallback}
 use crate::client::AxiamClient;
 use crate::error::AxiamError;
 use crate::management::error::local_refusal;
-use crate::rest::auth::CsrfHeaderExt;
 use crate::sensitive::Sensitive;
 
 /// `grant_type` of the CIBA token request (CIBA Core §10.1).
@@ -460,10 +459,7 @@ impl AxiamClient {
             .collect();
 
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&body)
             .send()
             .await
@@ -580,10 +576,7 @@ impl AxiamClient {
         let wire: TokenResponseWire = runner
             .run_until(retry_bound.as_ref(), |_| async move {
                 let response = self
-                    .http()
-                    .post(url.clone())
-                    .header("X-Tenant-ID", self.tenant_header_value())
-                    .maybe_csrf_header(self)
+                    .oauth2_post(url.clone())
                     .form(form)
                     .send()
                     .await

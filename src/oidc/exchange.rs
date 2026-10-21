@@ -624,10 +624,7 @@ impl AxiamClient {
         )?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(form)
             .send()
             .await
@@ -876,10 +873,7 @@ impl AxiamClient {
         };
 
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&form)
             .send()
             .await
@@ -939,10 +933,7 @@ impl AxiamClient {
         };
 
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&form)
             .send()
             .await

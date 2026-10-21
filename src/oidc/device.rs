@@ -22,7 +22,6 @@ use super::discovery::OidcConfiguration;
 use super::exchange::{OidcTokenSet, oauth2_error_or_fallback};
 use crate::client::AxiamClient;
 use crate::error::AxiamError;
-use crate::rest::auth::CsrfHeaderExt;
 use crate::sensitive::Sensitive;
 
 /// `grant_type` of the device access-token request (RFC 8628 §3.4).
@@ -288,10 +287,7 @@ impl AxiamClient {
         };
 
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&form)
             .send()
             .await
@@ -381,10 +377,7 @@ impl AxiamClient {
         };
 
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&form)
             .send()
             .await

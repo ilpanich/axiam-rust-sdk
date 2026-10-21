@@ -20,7 +20,6 @@ use crate::oidc::authorize::{
 };
 use crate::oidc::discovery::OidcConfiguration;
 use crate::oidc::exchange::oauth2_error_or_fallback;
-use crate::rest::auth::CsrfHeaderExt;
 
 /// The result of [`AxiamClient::oidc_par`] (CONTRACT.md §26.1).
 ///
@@ -220,10 +219,7 @@ impl AxiamClient {
         };
 
         let response = self
-            .http()
-            .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
-            .maybe_csrf_header(self)
+            .oauth2_post(url)
             .form(&form)
             .send()
             .await

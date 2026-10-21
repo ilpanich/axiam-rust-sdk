@@ -27,6 +27,22 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::error::AxiamError;
+
+/// The action namespaces the audit ingestion keeps for the server's own
+/// control records (CONTRACT.md §8, "Actions the audit ingestion refuses").
+const RESERVED_AUDIT_PREFIXES: [&str; 2] = ["tenants.", "gdpr."];
+
+/// Whether `action` begins with a reserved namespace, ASCII case ignored.
+fn is_reserved_audit_action(action: &str) -> bool {
+    RESERVED_AUDIT_PREFIXES.iter().any(|prefix| {
+        action
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    })
+}
+
 /// Authorization check request received from `axiam.authz.request`.
 ///
 /// Field declaration order matches the server's `AuthzRequest`
@@ -118,4 +134,125 @@ pub struct AuditEventMessage {
     /// HMAC-SHA256 of the JSON-serialized message body (CONTRACT.md §8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac_signature: Option<String>,
+}
+
+impl AuditEventMessage {
+    /// Refuse a reserved `action` before anything is published (CONTRACT.md §8,
+    /// contract 1.63): an action that begins with `tenants.` or `gdpr.`, ASCII
+    /// case ignored, is dead-lettered by the ingestion with no error from the
+    /// acknowledging broker, so the producer says no first. The message names
+    /// the namespace, never the payload.
+    ///
+    /// # Errors
+    ///
+    /// A local `ValidationError` (status 400, carried as the `source` of an
+    /// [`AxiamError::Network`], like every other local refusal of this SDK).
+    pub fn check_action(&self) -> Result<(), AxiamError> {
+        if !is_reserved_audit_action(&self.action) {
+            return Ok(());
+        }
+        let message = "action: the `tenants.` and `gdpr.` namespaces are reserved for the \
+                       server's own audit records and are refused by the audit ingestion \
+                       (CONTRACT.md §8)"
+            .to_owned();
+        #[cfg(feature = "rest")]
+        {
+            use crate::management::{FieldError, ValidationError};
+            Err(AxiamError::network_with_source(
+                message.clone(),
+                Box::new(ValidationError {
+                    status: 400,
+                    operation: "audit.publish",
+                    message: message.clone(),
+                    fields: vec![FieldError {
+                        field: "action".to_owned(),
+                        message,
+                    }],
+                }),
+            ))
+        }
+        #[cfg(not(feature = "rest"))]
+        Err(AxiamError::network(message))
+    }
+
+    /// Sign this message in place with the tenant's derived AMQP subkey,
+    /// after [`Self::check_action`]: a message the ingestion would refuse is
+    /// never signed, so it cannot be published.
+    ///
+    /// # Errors
+    ///
+    /// The [`Self::check_action`] refusal, or a serialization failure.
+    pub fn sign(&mut self, signing_key: &[u8]) -> Result<(), AxiamError> {
+        self.check_action()?;
+        self.hmac_signature = None;
+        let bytes = serde_json::to_vec(&*self)
+            .map_err(|e| AxiamError::network(format!("audit event serialization failed: {e}")))?;
+        self.hmac_signature = Some(crate::amqp::hmac::sign_payload(signing_key, &bytes));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(action: &str) -> AuditEventMessage {
+        AuditEventMessage {
+            tenant_id: Uuid::nil(),
+            actor_id: Uuid::nil(),
+            actor_type: "user".into(),
+            action: action.into(),
+            resource_id: None,
+            outcome: "success".into(),
+            ip_address: None,
+            metadata: None,
+            key_version: 2,
+            nonce: Uuid::nil(),
+            issued_at: Utc::now(),
+            hmac_signature: None,
+        }
+    }
+
+    #[test]
+    fn reserved_actions_are_refused_ascii_case_insensitively() {
+        for action in [
+            "tenants.delete",
+            "Tenants.audit_exported",
+            "GDPR.erase",
+            "gdpr.x",
+        ] {
+            let mut m = message(action);
+            assert!(m.check_action().is_err(), "{action}");
+            assert!(
+                m.sign(Uuid::new_v4().as_bytes()).is_err(),
+                "{action} must not be signed"
+            );
+            assert!(m.hmac_signature.is_none(), "{action}: nothing signed");
+        }
+    }
+
+    #[test]
+    fn refusal_names_the_namespace_and_not_the_action() {
+        let e = message("tenants.secret_action").check_action().unwrap_err();
+        let text = e.to_string();
+        assert!(text.contains("tenants."), "{text}");
+        assert!(!text.contains("secret_action"), "{text}");
+    }
+
+    #[test]
+    fn other_actions_pass_and_sign() {
+        for action in [
+            "login",
+            "role.assign",
+            "tenant.x",
+            "gdprx",
+            "tenants",
+            "éenants.x",
+        ] {
+            let mut m = message(action);
+            m.sign(Uuid::new_v4().as_bytes())
+                .unwrap_or_else(|e| panic!("{action}: {e}"));
+            assert!(m.hmac_signature.is_some());
+        }
+    }
 }
