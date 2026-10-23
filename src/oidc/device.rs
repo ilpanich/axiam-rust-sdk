@@ -522,10 +522,17 @@ impl AxiamClient {
                     // The status is read before the body: a `5xx` is the §2
                     // `NetworkError` whatever it says (AXIAM answers a fault
                     // `500 {"error":"server_error"}`), as `ciba_poll` does.
+                    //
+                    // The message is the status alone, never the server's body:
+                    // the §16 runner hands this error's text to the §19
+                    // telemetry sink, and the status is all a retry decision or a
+                    // caller needs.
                     if status >= 500 {
-                        let text = response.text().await.unwrap_or_default();
                         return Err(Attempt {
-                            err: AxiamError::from_http_status(status, text),
+                            err: AxiamError::from_http_status(
+                                status,
+                                format!("device token request failed: HTTP {status}"),
+                            ),
                             retry_after,
                         });
                     }
