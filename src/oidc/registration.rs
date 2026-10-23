@@ -28,7 +28,7 @@
 use serde_json::{Map, Value};
 
 use super::exchange::oauth2_error_or_fallback;
-use crate::client::AxiamClient;
+use crate::client::{AxiamClient, OmitBrowserCredentials};
 use crate::error::AxiamError;
 use crate::sensitive::Sensitive;
 
@@ -308,6 +308,7 @@ impl AxiamClient {
                     .get(url.clone())
                     .bearer_auth(registration_access_token.expose())
                     .header("Accept", "application/json")
+                    .omit_browser_credentials()
                     .send()
                     .await
                     .map_err(|e| {
@@ -371,6 +372,7 @@ impl AxiamClient {
             .bearer_auth(registration_access_token.expose())
             .header("Accept", "application/json")
             .json(&metadata.update_body())
+            .omit_browser_credentials()
             .send()
             .await
             .map_err(|e| {
@@ -399,6 +401,7 @@ impl AxiamClient {
             .http_bare()
             .delete(url)
             .bearer_auth(registration_access_token.expose())
+            .omit_browser_credentials()
             .send()
             .await
             .map_err(|e| {

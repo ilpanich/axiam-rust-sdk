@@ -29,7 +29,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::client::AxiamClient;
+use crate::client::{AxiamClient, OmitBrowserCredentials};
 use crate::error::{AxiamError, SetFailureReason};
 use crate::sensitive::Sensitive;
 use crate::token::jwks::JwksVerifier;
@@ -433,6 +433,7 @@ impl SsfReceiver {
             .client
             .http_bare()
             .get(url)
+            .omit_browser_credentials()
             .send()
             .await
             .map_err(|e| AxiamError::network(format!("SSF configuration fetch failed: {e}")))?;
@@ -676,6 +677,7 @@ impl SsfReceiver {
                     .post(url.clone())
                     .bearer_auth(token.expose())
                     .json(body)
+                    .omit_browser_credentials()
                     .send()
                     .await
                     .map_err(|e| {

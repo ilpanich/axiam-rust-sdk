@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 // `--no-default-features` consumer can apply the rule to a token it obtained
 // through its own transport.
 use crate::AxiamError;
+#[cfg(any(feature = "rest", feature = "actix"))]
+use crate::client::OmitBrowserCredentials;
 
 /// The AXIAM JWKS endpoint path — organization-wide, not tenant-scoped
 /// (RESEARCH.md D-11). This is the only correct path; do not substitute a
@@ -1287,6 +1289,7 @@ impl JwksVerifier {
         let response = self
             .http_client
             .get(self.jwks_url.clone())
+            .omit_browser_credentials()
             .send()
             .await
             .map_err(|e| AxiamError::Network {

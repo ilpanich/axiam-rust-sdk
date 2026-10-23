@@ -28,6 +28,28 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::AxiamError;
+
+/// Keeps the browser from attaching its same-origin credentials (the HttpOnly
+/// `axiam_*` session cookie) to a request that must not carry them: `/oauth2/*`,
+/// the JWKS and SSF discovery fetches, RFC 7592 and the SSF poll
+/// (CONTRACT.md §12.1 rule 3, last paragraph). `fetch_credentials_omit()` on
+/// wasm32; the identity elsewhere, where the session-free transport has no jar.
+pub(crate) trait OmitBrowserCredentials {
+    fn omit_browser_credentials(self) -> Self;
+}
+
+impl OmitBrowserCredentials for reqwest::RequestBuilder {
+    fn omit_browser_credentials(self) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.fetch_credentials_omit()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self
+        }
+    }
+}
 use crate::token::TokenManager;
 use crate::token::jwks::JwksVerifier;
 
@@ -1096,21 +1118,10 @@ impl AxiamClient {
     /// along, and with no `X-CSRF-Token` — only the tenant header. The
     /// endpoint authenticates the caller by the credential in the form.
     pub(crate) fn oauth2_post(&self, url: url::Url) -> reqwest::RequestBuilder {
-        let request = self
-            .http_bare()
+        self.http_bare()
             .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value());
-        // A browser sends same-origin cookies by default; `omit` keeps the
-        // session cookie off `/oauth2/*` there as the bare transport does on
-        // native targets.
-        #[cfg(target_arch = "wasm32")]
-        {
-            request.fetch_credentials_omit()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            request
-        }
+            .header("X-Tenant-ID", self.tenant_header_value())
+            .omit_browser_credentials()
     }
 
     /// Access the token manager (crate-internal use by `rest`/`grpc`).
