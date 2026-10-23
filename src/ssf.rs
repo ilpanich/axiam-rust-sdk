@@ -397,7 +397,7 @@ impl SsfReceiver {
                 // §34.2 P6: the key cache expires within ten minutes, and a
                 // failed fetch counts toward the once-a-minute limit.
                 Ok::<_, AxiamError>(
-                    JwksVerifier::for_jwks_url(self.client.http().clone(), url)
+                    JwksVerifier::for_jwks_url(self.client.http_bare().clone(), url)
                         .limiting_failed_fetches(),
                 )
             })
@@ -431,7 +431,7 @@ impl SsfReceiver {
         let url = parse_secure("discovery_url", discovery_url)?;
         let response = self
             .client
-            .http()
+            .http_bare()
             .get(url)
             .send()
             .await

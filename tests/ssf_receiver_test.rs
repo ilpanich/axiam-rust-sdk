@@ -5,6 +5,8 @@
 
 #![cfg(feature = "rest")]
 
+mod management_support;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -961,4 +963,111 @@ async fn c5_a_failed_ssf_configuration_fetch_counts_too() {
         assert!(matches!(e, AxiamError::Network { .. }), "{e}");
     }
     assert_eq!(*hits.lock().unwrap(), 1);
+}
+
+// ── C163-13 (contract 1.63 §6.1 rule 11) ──
+/// A client whose jar holds the `axiam_*` session cookies never sends them to
+/// the JWKS endpoint or the discovery document the receiver fetches: both go
+/// over the session-free transport.
+#[tokio::test]
+async fn the_jwks_and_discovery_fetches_carry_no_session_cookie() {
+    let server = MockServer::start().await;
+    management_support::mount_jwks(&server).await;
+    let access = management_support::sign_claims(&json!({
+        "sub": Uuid::new_v4().to_string(),
+        "tenant_id": management_support::TENANT_ID,
+        "org_id": management_support::ORG_ID,
+        "iss": "axiam-test",
+        "iat": 0,
+        "exp": 9_999_999_999i64,
+        "jti": Uuid::new_v4().to_string(),
+    }));
+    let key = Key::generate();
+    let seen: Arc<Mutex<Vec<(String, bool)>>> = Arc::default();
+
+    let mut login = ResponseTemplate::new(200).set_body_json(json!({
+        "user": {"id": Uuid::new_v4(), "username": "admin", "email": "admin@example.com"},
+        "session_id": Uuid::new_v4(),
+        "expires_in": 900,
+    }));
+    for cookie in [
+        format!("axiam_access={access}; Path=/; HttpOnly"),
+        "axiam_refresh=refresh-token; Path=/; HttpOnly".to_string(),
+        "axiam_csrf=csrf-token; Path=/".to_string(),
+    ] {
+        login = login.append_header("Set-Cookie", cookie.as_str());
+    }
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(login)
+        .mount(&server)
+        .await;
+    // Control: the same jar does send the cookie to a management request.
+    let control = Arc::clone(&seen);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/logout"))
+        .respond_with(move |req: &Request| {
+            control.lock().unwrap().push((
+                req.url.path().to_string(),
+                req.headers.contains_key("cookie"),
+            ));
+            ResponseTemplate::new(204)
+        })
+        .mount(&server)
+        .await;
+    for route in ["/ssf/jwks", "/.well-known/ssf-configuration"] {
+        let sink = Arc::clone(&seen);
+        let body = if route == "/ssf/jwks" {
+            json!({"keys": [key.jwk()]})
+        } else {
+            json!({"issuer": ISSUER, "jwks_uri": format!("{}/ssf/jwks", server.uri())})
+        };
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(move |req: &Request| {
+                sink.lock().unwrap().push((
+                    req.url.path().to_string(),
+                    req.headers.contains_key("cookie"),
+                ));
+                ResponseTemplate::new(200).set_body_json(body.clone())
+            })
+            .mount(&server)
+            .await;
+    }
+
+    let client = AxiamClient::builder()
+        .base_url(server.uri())
+        .unwrap()
+        .tenant_id(Uuid::parse_str(management_support::TENANT_ID).unwrap())
+        .org_id(Uuid::parse_str(management_support::ORG_ID).unwrap())
+        .build()
+        .unwrap();
+    client
+        .login("admin@example.com", &Uuid::new_v4().to_string())
+        .await
+        .expect("cookie login");
+    client.logout().await.expect("logout");
+
+    for keys in [
+        SsfKeySource::JwksUri(format!("{}/ssf/jwks", server.uri())),
+        SsfKeySource::DiscoveryUrl(format!("{}/.well-known/ssf-configuration", server.uri())),
+    ] {
+        let config = SsfReceiverConfig::new(ISSUER, AUDIENCE, keys);
+        let receiver = SsfReceiver::new(&client, config).unwrap();
+        receiver
+            .verify_set(&key.sign_set(&claims()))
+            .await
+            .expect("verifies");
+    }
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[0],
+        ("/api/v1/auth/logout".to_string(), true),
+        "control: the jar holds the session and a management request carries it"
+    );
+    assert!(seen.len() >= 3, "{seen:?}");
+    for (route, had_cookie) in &seen[1..] {
+        assert!(!had_cookie, "{route}: no session cookie (§6.1 rule 11)");
+    }
 }
