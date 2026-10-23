@@ -588,8 +588,13 @@ impl AxiamClient {
                     return PollFailure::from(device_expired());
                 }
                 // What outlived §16's retries is a transport failure or a
-                // `5xx`: the loop's next interval, not a verdict.
-                PollFailure::from(ended.err)
+                // `5xx`: the loop's next poll, not a verdict. The last
+                // `Retry-After` rides along as that poll's floor.
+                PollFailure {
+                    err: ended.err,
+                    retry_after: ended.retry_after,
+                    status: None,
+                }
             })??;
 
         // No nonce: the device grant has no authorization request to carry
@@ -738,12 +743,15 @@ impl AxiamClient {
                         continue;
                     }
                     PollOutcome::Terminal => {
-                        let e = failure.err;
+                        let (e, retry_after) = (failure.err, failure.retry_after);
                         // §14.2 rule 6: a transport/5xx failure is not one of
                         // the five protocol answers and is not terminal.
                         // `oauth_error_code()` is `None` for those, which is
-                        // exactly what distinguishes them here.
+                        // exactly what distinguishes them here. The last
+                        // attempt's `Retry-After` is the next poll's floor
+                        // (§16.1): an exhausted budget does not lift it.
                         if e.oauth_error_code().is_none() && e.is_retryable_transport() {
+                            retry_after_secs = retry_after.map_or(0, |d| d.as_secs());
                             continue;
                         }
                         return Err(e);
@@ -1409,6 +1417,197 @@ mod tests {
         // The 4th request (the tokens) is the first of the loop's poll.
         assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert_eq!(waits_of(&sleeps), [Duration::from_secs(5)]);
+    }
+
+    // §14.6 (contract 1.64 amended; C164-41): when the in-poll budget is
+    // exhausted on a 5xx that carried `Retry-After`, the loop's next poll waits
+    // at least that long (§16.1: the hint is a floor), not one interval.
+    #[tokio::test]
+    async fn an_exhausted_budget_keeps_the_last_retry_after_as_the_next_polls_floor() {
+        let busy = || {
+            ResponseTemplate::new(503)
+                .insert_header("Retry-After", "40")
+                .set_body_json(json!({"error": "temporarily_unavailable"}))
+        };
+        let (_server, client, polls) =
+            device_fixture(vec![busy(), busy(), busy(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(
+            waits_of(&sleeps),
+            [
+                Duration::from_secs(5),
+                Duration::from_secs(40),
+                Duration::from_secs(40),
+                Duration::from_secs(40),
+            ],
+            "the two in-poll retries, then the next poll at the floor"
+        );
+    }
+
+    /// A token endpoint on a raw socket, so a transport failure is a real one:
+    /// it reads each request and drops the first `drops` connections without
+    /// answering, then answers `200` with the tokens. Counts connections.
+    async fn raw_token_server(
+        drops: usize,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let connections = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&connections);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    // Read the request: the head, then `Content-Length` bytes.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        let Ok(read) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..read]);
+                        let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                        let wanted = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= head_end + 4 + wanted {
+                            break;
+                        }
+                    }
+                    if n < drops {
+                        drop(stream);
+                        return;
+                    }
+                    let body = r#"{"access_token":"device-access-token","token_type":"Bearer","expires_in":900}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (addr, connections)
+    }
+
+    /// A client whose token endpoint is the raw socket above (discovery and the
+    /// device authorization stay on a mock).
+    async fn raw_client(raw: std::net::SocketAddr, retry: bool) -> (MockServer, AxiamClient) {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": "https://iam.example.com",
+                "authorization_endpoint": format!("{base}/oauth2/authorize"),
+                "token_endpoint": format!("http://{raw}/oauth2/token"),
+                "userinfo_endpoint": format!("{base}/oauth2/userinfo"),
+                "jwks_uri": format!("{base}/oauth2/jwks"),
+                "revocation_endpoint": format!("{base}/oauth2/revoke"),
+                "introspection_endpoint": format!("{base}/oauth2/introspect"),
+                "scopes_supported": ["openid"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                "claims_supported": ["sub"],
+                "grant_types_supported": ["urn:ietf:params:oauth:grant-type:device_code"],
+                "device_authorization_endpoint": format!("{base}/oauth2/device_authorization"),
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["EdDSA"],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device_authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": "dc",
+                "user_code": "WDJB-MJHT",
+                "verification_uri": "https://iam.example.com/device",
+                "expires_in": 600,
+                "interval": 5,
+            })))
+            .mount(&server)
+            .await;
+        let client = AxiamClient::builder()
+            .base_url(&base)
+            .expect("valid base url")
+            .tenant_id(uuid::Uuid::nil())
+            .org_id(uuid::Uuid::nil())
+            .oidc_client_id("axiam-rp")
+            .retry_enabled(retry)
+            .build()
+            .expect("client builds");
+        (server, client)
+    }
+
+    // §14.6 (contract 1.64 amended, "the same holds for a transport failure"):
+    // two dropped connections then a 200 are three requests and the tokens; a
+    // third drop exhausts the cap and surfaces the network error; with retry
+    // off there is one request.
+    #[tokio::test]
+    async fn a_transport_failure_is_retried_inside_the_poll() {
+        use std::sync::atomic::Ordering;
+        let (raw, connections) = raw_token_server(2).await;
+        let (_server, client) = raw_client(raw, true).await;
+        let set = client
+            .device_poll(poll_params())
+            .await
+            .expect("two drops, then the tokens");
+        assert_eq!(set.access_token.expose(), "device-access-token");
+        assert_eq!(connections.load(Ordering::SeqCst), 3);
+
+        let (raw, connections) = raw_token_server(3).await;
+        let (_server, client) = raw_client(raw, true).await;
+        let err = client
+            .device_poll(poll_params())
+            .await
+            .expect_err("three drops exhaust the cap");
+        assert!(matches!(err, AxiamError::Network { .. }));
+        assert!(err.is_retryable_transport());
+        assert_eq!(connections.load(Ordering::SeqCst), 3);
+
+        let (raw, connections) = raw_token_server(1).await;
+        let (_server, client) = raw_client(raw, false).await;
+        client
+            .device_poll(poll_params())
+            .await
+            .expect_err("retry off: one request");
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    // The same through `device_login`: the loop completes within one interval.
+    #[tokio::test]
+    async fn device_login_completes_within_one_interval_over_a_flaky_transport() {
+        let (raw, connections) = raw_token_server(2).await;
+        let (_server, client) = raw_client(raw, true).await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let waits = waits_of(&sleeps);
+        assert_eq!(waits.len(), 3, "the interval and two backoff waits");
+        assert_eq!(waits[0], Duration::from_secs(5));
+        assert!(waits[1] <= Duration::from_millis(200));
+        assert!(waits[2] <= Duration::from_millis(400));
     }
 }
 

@@ -211,6 +211,10 @@ pub(crate) struct Ended {
     /// True when the retry's wait was capped at the deadline and served: no
     /// request follows it, and the caller reports its own deadline outcome.
     pub(crate) at_deadline: bool,
+    /// The last attempt's `Retry-After`, if it carried one. A caller whose own
+    /// loop polls again next (§14.2 rule 6) waits at least that long: §16.1
+    /// makes the hint a floor, and an exhausted budget does not lift it.
+    pub(crate) retry_after: Option<Duration>,
 }
 
 impl RetryRunner<'_> {
@@ -250,6 +254,7 @@ impl RetryRunner<'_> {
                         return Err(Ended {
                             err,
                             at_deadline: false,
+                            retry_after,
                         });
                     }
                     let mut delay = delay_for(attempt, retry_after, self.jitter);
@@ -281,6 +286,7 @@ impl RetryRunner<'_> {
                         return Err(Ended {
                             err,
                             at_deadline: true,
+                            retry_after,
                         });
                     }
                     attempt += 1;
