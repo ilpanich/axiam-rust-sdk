@@ -162,6 +162,9 @@ enum PollOutcome {
     /// `429 rate_limit_exceeded` — not terminal (§14.2 rule 9, contract 1.64):
     /// wait `Retry-After` as a minimum, without raising the interval.
     RateLimited,
+    /// A `5xx` whatever its body (§14.2 rule 6, contract 1.64 amended): a
+    /// transport failure, not terminal.
+    Transient,
     /// `expired_token`, `access_denied`, `invalid_grant`, or anything else.
     Terminal,
 }
@@ -225,10 +228,22 @@ impl PollSchedule {
     }
 }
 
+/// The typed `expired_token` outcome of §14.2 rule 4, raised locally.
+fn device_expired() -> AxiamError {
+    AxiamError::oauth_protocol_error(
+        "expired_token",
+        "the device authorization expired before the user completed it \
+         (client-side deadline from expires_in; CONTRACT.md §14.2 rule 4)",
+    )
+}
+
 /// A failed poll and the `Retry-After` it carried, if any.
 struct PollFailure {
     err: AxiamError,
     retry_after: Option<std::time::Duration>,
+    /// The HTTP status of the answer; `None` for a failure with no answer
+    /// (transport, discovery, local).
+    status: Option<u16>,
 }
 
 impl From<AxiamError> for PollFailure {
@@ -236,6 +251,7 @@ impl From<AxiamError> for PollFailure {
         Self {
             err,
             retry_after: None,
+            status: None,
         }
     }
 }
@@ -246,6 +262,23 @@ fn classify(err: &AxiamError) -> PollOutcome {
         Some("slow_down") => PollOutcome::SlowDown,
         Some("rate_limit_exceeded") => PollOutcome::RateLimited,
         _ => PollOutcome::Terminal,
+    }
+}
+
+/// [`classify`], with the status read **before** the body (§14.2 rules 6 and
+/// 9, contract 1.64 amended): a `5xx` is a transport failure whatever it says
+/// (AXIAM answers an internal fault `500 {"error":"server_error"}`), any `429`
+/// is the rate-limit wait whatever its body names (a `429 slow_down` from an
+/// older server or an intermediary included), and `slow_down` raises the
+/// interval only as the `400` of the answer table.
+fn classify_failure(failure: &PollFailure) -> PollOutcome {
+    match failure.status {
+        Some(s) if s >= 500 => PollOutcome::Transient,
+        Some(429) => PollOutcome::RateLimited,
+        Some(400) | None => classify(&failure.err),
+        // An answer at any other status is not one of the table's rows;
+        // `authorization_pending` and `slow_down` mean nothing there.
+        Some(_) => PollOutcome::Terminal,
     }
 }
 
@@ -440,9 +473,11 @@ impl AxiamClient {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(crate::retry::parse_retry_after);
+            let status = response.status().as_u16();
             return Err(PollFailure {
                 err: oauth2_error_or_fallback(response).await,
                 retry_after,
+                status: Some(status),
             });
         }
 
@@ -507,8 +542,13 @@ impl AxiamClient {
     where
         F: FnOnce(&DeviceAuthorization),
     {
-        self.device_login_with(params, on_user_code, &crate::retry::TokioSleeper)
-            .await
+        self.device_login_with(
+            params,
+            on_user_code,
+            &crate::retry::TokioSleeper,
+            &crate::time::Instant::now,
+        )
+        .await
     }
 
     /// [`Self::device_login`] on an injected clock, so the §14.6 tests record
@@ -518,6 +558,7 @@ impl AxiamClient {
         params: DeviceLoginParams,
         on_user_code: F,
         sleeper: &dyn crate::retry::Sleeper,
+        now: &(dyn Fn() -> crate::time::Instant + Send + Sync),
     ) -> Result<OidcTokenSet, AxiamError>
     where
         F: FnOnce(&DeviceAuthorization),
@@ -538,6 +579,10 @@ impl AxiamClient {
         // §14.3 rule 2 — before any polling.
         on_user_code(&authorization);
 
+        // The deadline is a point on the clock, anchored when the grant was
+        // issued: request round trips, the callback above and slow answers
+        // count against it, not only the waits (§14.2 rule 4, C164-05).
+        let deadline = now() + std::time::Duration::from_secs(authorization.expires_in);
         let mut schedule = PollSchedule::new(authorization.interval, authorization.expires_in);
         // The `Retry-After` of a `429` poll, which stands in for the next
         // interval when it is longer (§14.2 rule 9).
@@ -551,17 +596,15 @@ impl AxiamClient {
             // not care which side noticed first.
             let wait_secs = schedule.interval_secs().max(retry_after_secs);
             retry_after_secs = 0;
-            if !schedule.tick_for(wait_secs) {
-                return Err(AxiamError::oauth_protocol_error(
-                    "expired_token",
-                    "the device authorization expired before the user completed it \
-                     (client-side deadline from expires_in; CONTRACT.md §14.2 rule 4)",
-                ));
+            let wait = std::time::Duration::from_secs(wait_secs);
+            if now() + wait >= deadline {
+                return Err(device_expired());
             }
 
-            sleeper
-                .sleep(std::time::Duration::from_secs(wait_secs))
-                .await;
+            sleeper.sleep(wait).await;
+            if now() >= deadline {
+                return Err(device_expired());
+            }
 
             match self
                 .device_poll_step(DevicePollParams {
@@ -572,21 +615,19 @@ impl AxiamClient {
                 .await
             {
                 Ok(tokens) => return Ok(tokens),
-                Err(PollFailure {
-                    err: e,
-                    retry_after,
-                }) => match classify(&e) {
-                    PollOutcome::Pending => continue,
+                Err(failure) => match classify_failure(&failure) {
+                    PollOutcome::Pending | PollOutcome::Transient => continue,
                     PollOutcome::SlowDown => {
                         // §14.2 rule 1: cumulative, and never reset.
                         schedule.slow_down();
                         continue;
                     }
                     PollOutcome::RateLimited => {
-                        retry_after_secs = retry_after.map_or(0, |d| d.as_secs());
+                        retry_after_secs = failure.retry_after.map_or(0, |d| d.as_secs());
                         continue;
                     }
                     PollOutcome::Terminal => {
+                        let e = failure.err;
                         // §14.2 rule 6: a transport/5xx failure is not one of
                         // the five protocol answers and is not terminal.
                         // `oauth_error_code()` is `None` for those, which is
@@ -727,6 +768,20 @@ mod tests {
         AxiamClient,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) {
+        device_fixture_with(script, expires_in, std::sync::Arc::new(|| {})).await
+    }
+
+    /// [`device_fixture`], running `on_poll` as each poll arrives (a fake
+    /// clock advances by the request's duration there).
+    async fn device_fixture_with(
+        script: Vec<ResponseTemplate>,
+        expires_in: u64,
+        on_poll: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> (
+        MockServer,
+        AxiamClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let server = MockServer::start().await;
         let base = server.uri();
@@ -765,9 +820,11 @@ mod tests {
         let polls = std::sync::Arc::new(AtomicUsize::new(0));
         let seen = std::sync::Arc::clone(&polls);
         let script = Mutex::new(script);
+        let on_poll = std::sync::Arc::clone(&on_poll);
         Mock::given(method("POST"))
             .and(path("/oauth2/token"))
             .respond_with(move |_: &wiremock::Request| {
+                on_poll();
                 let i = seen.fetch_add(1, Ordering::SeqCst);
                 let script = script.lock().unwrap();
                 script
@@ -815,7 +872,12 @@ mod tests {
             device_fixture(vec![rate_limited("12"), pending(), tokens()], 600).await;
         let sleeps = Recorded::default();
         let set = client
-            .device_login_with(DeviceLoginParams::default(), |_| {}, &sleeps)
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
             .await
             .expect("the loop completes after the 429");
         assert_eq!(set.access_token.expose(), "device-access-token");
@@ -838,7 +900,12 @@ mod tests {
         let (_server, client, _) = device_fixture(vec![rate_limited("1"), tokens()], 600).await;
         let sleeps = Recorded::default();
         client
-            .device_login_with(DeviceLoginParams::default(), |_| {}, &sleeps)
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
             .await
             .expect("completes");
         let secs: Vec<u64> = sleeps
@@ -859,7 +926,12 @@ mod tests {
             device_fixture(vec![rate_limited("3600"), tokens()], 60).await;
         let sleeps = Recorded::default();
         let err = client
-            .device_login_with(DeviceLoginParams::default(), |_| {}, &sleeps)
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
             .await
             .expect_err("the deadline wins");
         assert_eq!(err.oauth_error_code(), Some("expired_token"));
@@ -880,6 +952,181 @@ mod tests {
         assert!(s.tick_for(30));
         assert_eq!(s.interval_secs(), 5);
         assert!(!s.tick_for(70), "the wait that reaches the deadline stops");
+    }
+
+    fn server_error() -> ResponseTemplate {
+        ResponseTemplate::new(500)
+            .set_body_json(json!({"error": "server_error", "error_description": "db"}))
+    }
+
+    // §14.2 rule 6 (contract 1.64 amended; C164-03): a `5xx` is a transport
+    // failure whatever its body. AXIAM's own datastore fault is
+    // `500 {"error":"server_error"}`; it does not end the flow.
+    #[tokio::test]
+    async fn a_500_with_an_error_body_mid_poll_is_not_terminal() {
+        let (_server, client, polls) =
+            device_fixture(vec![server_error(), pending(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("a 500 mid-poll does not lose the grant");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 5, 5], "the interval is unchanged");
+    }
+
+    // §14.2 rule 9 (amended; C164-04): the status decides. A `429` whose body
+    // says `slow_down` is the wait, and does not raise the interval.
+    #[tokio::test]
+    async fn a_429_slow_down_waits_and_does_not_raise_the_interval() {
+        let slow = ResponseTemplate::new(429)
+            .insert_header("Retry-After", "1")
+            .set_body_json(json!({"error": "slow_down"}));
+        let (_server, client, _) = device_fixture(vec![slow, pending(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 5, 5]);
+    }
+
+    // The `400 slow_down` is the one that raises it (rule 1), unchanged.
+    #[tokio::test]
+    async fn a_400_slow_down_still_raises_the_interval() {
+        let slow = ResponseTemplate::new(400).set_body_json(json!({"error": "slow_down"}));
+        let (_server, client, _) = device_fixture(vec![slow, tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 10]);
+    }
+
+    // A bodiless `429` honours `Retry-After` as a floor (rule 9).
+    #[tokio::test]
+    async fn a_bodiless_429_honours_retry_after() {
+        let bare = ResponseTemplate::new(429).insert_header("Retry-After", "12");
+        let (_server, client, _) = device_fixture(vec![bare, tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 12]);
+    }
+
+    /// A clock the test moves: the sleeper advances it by the wait, and the
+    /// mock advances it by the time a poll took.
+    struct FakeClock {
+        base: crate::time::Instant,
+        offset_secs: std::sync::atomic::AtomicU64,
+        waits: Mutex<Vec<Duration>>,
+    }
+
+    impl FakeClock {
+        fn now(&self) -> crate::time::Instant {
+            self.base
+                + Duration::from_secs(self.offset_secs.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    impl Sleeper for FakeClock {
+        fn sleep(&self, d: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.waits.lock().unwrap().push(d);
+            self.offset_secs
+                .fetch_add(d.as_secs(), std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    // §14.2 rule 4 (C164-05): the deadline is `authorization time +
+    // expires_in` on the clock, so the time a poll takes counts against it.
+    // `expires_in` 60, interval 5, each poll takes 30 s: a poll at t=5 ends at
+    // 35, the next waits to 40 and ends at 70, and nothing follows.
+    #[tokio::test]
+    async fn the_time_a_poll_takes_counts_against_the_deadline() {
+        let clock = std::sync::Arc::new(FakeClock {
+            base: crate::time::Instant::now(),
+            offset_secs: std::sync::atomic::AtomicU64::new(0),
+            waits: Mutex::new(Vec::new()),
+        });
+        let tick = std::sync::Arc::clone(&clock);
+        let (_server, client, polls) = device_fixture_with(
+            vec![pending()],
+            60,
+            std::sync::Arc::new(move || {
+                tick.offset_secs
+                    .fetch_add(30, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .await;
+        let reader = std::sync::Arc::clone(&clock);
+        let err = client
+            .device_login_with(DeviceLoginParams::default(), |_| {}, &*clock, &move || {
+                reader.now()
+            })
+            .await
+            .expect_err("the deadline wins");
+        assert_eq!(err.oauth_error_code(), Some("expired_token"));
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let secs: Vec<u64> = clock
+            .waits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 5]);
     }
 }
 
