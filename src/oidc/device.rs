@@ -506,10 +506,10 @@ impl AxiamClient {
                     .send()
                     .await
                     .map_err(|e| {
-                        Attempt::bare(AxiamError::Network {
-                            message: format!("device token request failed: {e}"),
-                            source: Some(Box::new(e)),
-                        })
+                        Attempt::bare(super::exchange::network_err(
+                            "device token request failed",
+                            e,
+                        ))
                     })?;
 
                 if !response.status().is_success() {
