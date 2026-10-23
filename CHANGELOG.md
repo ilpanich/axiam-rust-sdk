@@ -47,6 +47,11 @@ is a patch.
 - The §14.6 control of the no-cookie test (a `logout`) now runs after the `/oauth2/*` calls;
   `check_action` loses its dead non-`rest` branch; `sign_payload`'s doc points to
   `AuditEventMessage::sign`.
+- The message of the reserved-action refusal (`AuditEventMessage::check_action` / `sign`) now reads
+  `audit.publish: action: the `tenants.` and `gdpr.` namespaces are reserved … (CONTRACT.md §8); no
+  request was sent`, as every local refusal of this SDK does (`local_refusal`). Its type, status 400,
+  `ValidationError` source, `operation` and `fields[0].field == "action"` are unchanged; it still
+  never names the action.
 
 ## [1.1.1] - 2026-10-20
 
