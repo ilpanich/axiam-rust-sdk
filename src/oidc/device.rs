@@ -235,6 +235,20 @@ impl PollSchedule {
     }
 }
 
+/// Whether a transport failure is a failure to connect. A browser's `fetch`
+/// does not say, so on wasm32 it is never reported.
+fn is_connect_error(e: &reqwest::Error) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        e.is_connect()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = e;
+        false
+    }
+}
+
 /// The typed `expired_token` outcome of §14.2 rule 4, raised locally.
 fn device_expired() -> AxiamError {
     AxiamError::oauth_protocol_error(
@@ -506,10 +520,21 @@ impl AxiamClient {
                     .send()
                     .await
                     .map_err(|e| {
-                        Attempt::bare(super::exchange::network_err(
-                            "device token request failed",
-                            e,
-                        ))
+                        // The text names the kind of failure, not the
+                        // transport error's own message: the §16 runner hands
+                        // this error's text to the §19 telemetry sink, and the
+                        // original stays reachable as the error's `source`.
+                        let kind = if e.is_timeout() {
+                            "timed out"
+                        } else if is_connect_error(&e) {
+                            "could not connect"
+                        } else {
+                            "transport error"
+                        };
+                        Attempt::bare(AxiamError::Network {
+                            message: format!("device token request failed: {kind}"),
+                            source: Some(Box::new(e)),
+                        })
                     })?;
 
                 if !response.status().is_success() {
