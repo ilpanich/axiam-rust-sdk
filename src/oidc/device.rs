@@ -1339,6 +1339,30 @@ mod tests {
         assert_eq!(err.oauth_error_code(), Some("rate_limit_exceeded"));
         assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
+
+    // §14.6 (contract 1.64 amended): a third 5xx in a row exhausts the cap of
+    // three attempts; the poll surfaces the failure, and the loop takes its
+    // next interval.
+    #[tokio::test]
+    async fn three_5xx_exhaust_the_attempt_cap() {
+        let (_server, client, polls) = device_fixture(
+            vec![server_error(), server_error(), server_error(), tokens()],
+            600,
+        )
+        .await;
+        let err = client
+            .device_poll(poll_params())
+            .await
+            .expect_err("three attempts, all 5xx");
+        assert!(matches!(err, AxiamError::Network { .. }), "{err:?}");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        // The 4th request (the tokens) is the first of the loop's poll.
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(waits_of(&sleeps), [Duration::from_secs(5)]);
+    }
 }
 
 /// CONTRACT.md §7 rule 1: these wire structs hold the plaintext of a value

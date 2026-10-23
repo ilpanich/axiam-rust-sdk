@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.2] - 2026-10-23
 
-`axiam-sdk` 1.1.2 carries **contract 1.64** (axiam `fb92ec4`, the release branch of AXIAM 1.1.2).
-`CONTRACT.md`, `openapi.json` and `management-registry.json` are vendored byte for byte from
-`fb92ec4` (`proto/` is unchanged). The surface stays 202 operations in 29 namespaces. Nothing in this
+`axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
+AXIAM 1.1.2). `CONTRACT.md` is vendored byte for byte from `b3f8687`; `openapi.json` and
+`management-registry.json` from `fb92ec4` (unchanged since; `proto/` is unchanged). The surface stays 202 operations in 29 namespaces. Nothing in this
 release is source-breaking (the gating below only changes feature sets that did not compile), so it
 is a patch.
 
@@ -50,6 +50,14 @@ is a patch.
 - **The `device_login` deadline is `expires_in` on the clock** (§14.2 rule 4; C164-05): taken when
   the grant is issued, so the time requests and the callback take counts against it, not only the
   waits. Before, a slow server could be polled after the real deadline.
+- **The device poll is retried inside the attempt on a `5xx` or a transport failure** (§14.2 rule
+  6, §16.2; C164-25): with retry on (the default), a poll that meets one makes up to three requests,
+  honouring `Retry-After` as a floor and never waiting past `expires_in`, before `device_login`
+  takes its next interval; a `429` and every other `4xx` are not retried. `.retry_enabled(false)`
+  keeps one request per poll.
+- **A single `device_poll` types a `5xx` as `AxiamError::Network` whatever its body** (§14.2 rule 6;
+  C164-27): `500 {"error":"server_error"}` was an `Auth` error with `oauth_error_code()` set, which
+  ended a hand-rolled loop. It is now a network error with no OAuth code, as `ciba_poll` has it.
 - On wasm32, `/oauth2/*` requests, the JWKS and SSF discovery GETs, the SSF poll and the RFC 7592
   calls use `credentials: "omit"` (C163-17, C164-07).
 

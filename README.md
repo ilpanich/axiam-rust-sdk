@@ -99,8 +99,12 @@ honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.
 Contract 1.64 (§34.8, released as 1.1.2) adds no operation. This SDK ports its one rule: the
 `device_login` loop waits out a `429 rate_limit_exceeded` on a poll (§14.2 rule 9) — `Retry-After`
 as a minimum, capped at the `expires_in` deadline, counted as one interval, the interval not
-raised — while a single `device_poll` still raises the `OAuthProtocolError`. A refusal at `plan`
-names the member and the value (§27.6.2 item 4: this SDK keeps the value).
+raised — while a single `device_poll` still raises the `OAuthProtocolError`. The amended rules
+(CONTRACT.md as of axiam `21beda0` and after) are carried too: the poll's status decides — a `5xx`
+is not terminal whatever its body (`500 {"error":"server_error"}` is the §2 `NetworkError`, retried
+under §16 inside the poll), any `429` is the wait, and only the `400` `slow_down` raises the
+interval. A refusal at `plan` names the member and the value (§27.6.2 item 4: this SDK keeps the
+value).
 
 Contract 1.63 (§34.7, released as 1.1.1) changes no operation. This SDK sends no `axiam_*` cookie
 and no `X-CSRF-Token` to any `/oauth2/*` endpoint (§6.1 rule 11, §12.1 rule 3), refuses a reserved
