@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 `axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
 AXIAM 1.1.2). `CONTRACT.md` is vendored byte for byte from `b3f8687`; `openapi.json` and
-`management-registry.json` from `fb92ec4` (unchanged since; `proto/` is unchanged). The surface stays 202 operations in 29 namespaces. Nothing in this
-release is source-breaking (the gating below only changes feature sets that did not compile), so it
+`management-registry.json` from `fb92ec4` (unchanged since; `proto/` is unchanged). The surface
+stays 202 operations in 29 namespaces. Nothing in this release is source-breaking (the gating below only changes feature sets that did not compile), so it
 is a patch.
 
 ### Changed
@@ -58,6 +58,12 @@ is a patch.
 - **A single `device_poll` types a `5xx` as `AxiamError::Network` whatever its body** (§14.2 rule 6;
   C164-27): `500 {"error":"server_error"}` was an `Auth` error with `oauth_error_code()` set, which
   ended a hand-rolled loop. It is now a network error with no OAuth code, as `ciba_poll` has it.
+- **Test strength and one more floor, from the second review round** (C164-38, C164-41): the
+  in-poll retry is now tested against a real transport failure (a raw socket that drops the
+  connection: two drops then the tokens are three requests; three drops surface the network error;
+  retry off is one request), through a single `device_poll` and through `device_login`. When the
+  in-poll budget is exhausted on a `5xx` that carried `Retry-After`, the loop's next poll now waits
+  at least that long (§16.1: the hint is a floor) instead of one interval.
 - On wasm32, `/oauth2/*` requests, the JWKS and SSF discovery GETs, the SSF poll and the RFC 7592
   calls use `credentials: "omit"` (C163-17, C164-07).
 
