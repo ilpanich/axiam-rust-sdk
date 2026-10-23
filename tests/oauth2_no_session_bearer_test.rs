@@ -342,9 +342,8 @@ async fn a_jar_with_session_cookies_sends_neither_cookie_nor_csrf_to_oauth2() {
         );
     }
 
-    // The control comes last: `logout` ends the session and clears the jar, so
-    // run before the `/oauth2/*` calls it would leave nothing for them to leak
-    // and the assertions above could pass for want of a cookie.
+    // The control comes last, so the `/oauth2/*` assertions above run while the
+    // session is live.
     client.logout().await.expect("logout");
     let control = probe.lock().unwrap().clone();
     assert_eq!(control.len(), 1);

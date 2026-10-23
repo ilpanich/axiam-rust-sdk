@@ -1046,7 +1046,6 @@ async fn the_jwks_and_discovery_fetches_carry_no_session_cookie() {
         .login("admin@example.com", &Uuid::new_v4().to_string())
         .await
         .expect("cookie login");
-    client.logout().await.expect("logout");
 
     for keys in [
         SsfKeySource::JwksUri(format!("{}/ssf/jwks", server.uri())),
@@ -1060,14 +1059,18 @@ async fn the_jwks_and_discovery_fetches_carry_no_session_cookie() {
             .expect("verifies");
     }
 
+    // The control comes last, so the fetches above ran while the session was
+    // live: the jar holds the cookies and a management request carries them.
+    client.logout().await.expect("logout");
+
     let seen = seen.lock().unwrap().clone();
     assert_eq!(
-        seen[0],
-        ("/api/v1/auth/logout".to_string(), true),
+        seen.last().cloned(),
+        Some(("/api/v1/auth/logout".to_string(), true)),
         "control: the jar holds the session and a management request carries it"
     );
     assert!(seen.len() >= 3, "{seen:?}");
-    for (route, had_cookie) in &seen[1..] {
+    for (route, had_cookie) in &seen[..seen.len() - 1] {
         assert!(!had_cookie, "{route}: no session cookie (§6.1 rule 11)");
     }
 }

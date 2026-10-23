@@ -21,7 +21,8 @@ is a patch.
   has been so since 1.1.1, when those calls moved to the session-free transport, which is built
   with redirects off): a `3xx` from the token, introspection, revocation, device-authorization,
   PAR, CIBA, token-exchange or UMA-ticket endpoint, or from the JWKS URI, is the answer and is
-  not followed. The SSF receiver's JWKS and discovery fetches use that transport too (below).
+  not followed (native targets; in the browser build, redirects are the browser's). The SSF
+  receiver's JWKS and discovery fetches use that transport too (below).
 
 ### Fixed
 
@@ -40,7 +41,17 @@ is a patch.
   `uma`, `management` and `token` modules were added): the modules that need the REST transport
   are gated on `rest`; `management::error` (the `ValidationError` of `AuditEventMessage::check_action`)
   is not. CI builds that feature set from now on.
-- On wasm32, `/oauth2/*` requests use `credentials: "omit"` (C163-17).
+- **A `5xx` on the device poll is a transport failure whatever its body** (contract 1.64 amended,
+  §14.2 rule 6; C164-03): AXIAM answers an internal fault `500 {"error":"server_error"}`, which
+  ended `device_login` with an authentication error; it is now retried like a bodiless `5xx`.
+- **Any `429` on a device poll is the rate-limit wait, whatever its body** (§14.2 rule 9 amended;
+  C164-04): a `429 {"error":"slow_down"}` (an older server or an intermediary) no longer raises the
+  interval, and a bodiless `429` honours `Retry-After` as a floor. Only the `400 slow_down` raises it.
+- **The `device_login` deadline is `expires_in` on the clock** (§14.2 rule 4; C164-05): taken when
+  the grant is issued, so the time requests and the callback take counts against it, not only the
+  waits. Before, a slow server could be polled after the real deadline.
+- On wasm32, `/oauth2/*` requests, the JWKS and SSF discovery GETs, the SSF poll and the RFC 7592
+  calls use `credentials: "omit"` (C163-17, C164-07).
 
 ### Internal
 

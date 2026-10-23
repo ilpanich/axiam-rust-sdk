@@ -391,7 +391,8 @@ impl AxiamClient {
     /// §3.5 answers surface as [`AxiamError::Auth`] carrying an
     /// [`crate::OAuthProtocolError`] whose `error` field the caller
     /// dispatches on — `authorization_pending` and `slow_down` included, so
-    /// a hand-rolled loop sees exactly what [`Self::device_login`] sees.
+    /// a hand-rolled loop sees the same answers [`Self::device_login`] does
+    /// (a `429`'s `Retry-After` apart, below).
     ///
     /// **The poll names its client and authenticates it** (§14.1 rules 2 and
     /// 3, contract 1.62): every poll sends `client_id`, and the credential the
@@ -410,6 +411,14 @@ impl AxiamClient {
     /// proof is surfaced as above. A response whose `token_type` is `DPoP` is
     /// returned as the server said it, in [`OidcTokenSet::token_type`](super::OidcTokenSet) —
     /// never assumed to be `Bearer`.
+    ///
+    /// **A `429` is not terminal (§14.2 rule 9, contract 1.64).** It surfaces
+    /// here as an [`crate::OAuthProtocolError`] with
+    /// `error == "rate_limit_exceeded"`: wait at least the server's
+    /// `Retry-After` (or one interval) without raising the interval, and poll
+    /// again. This call does not expose the `Retry-After`, so a hand-rolled
+    /// loop waits the interval; [`Self::device_login`] reads it and does the
+    /// rest for you. A `5xx` is a transport failure whatever its body (rule 6).
     ///
     /// Most callers want [`Self::device_login`] instead.
     pub async fn device_poll(&self, params: DevicePollParams) -> Result<OidcTokenSet, AxiamError> {
