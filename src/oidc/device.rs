@@ -1063,7 +1063,10 @@ mod tests {
         let waits = sleeps.0.lock().unwrap().clone();
         assert_eq!(waits.len(), 3);
         assert_eq!(waits[0], Duration::from_secs(5));
-        assert!(waits[1] <= Duration::from_millis(200), "{waits:?}");
+        assert!(
+            waits[1] <= Duration::from_millis(200),
+            "unexpected retry waits"
+        );
         assert_eq!(waits[2], Duration::from_secs(5));
     }
 
@@ -1238,10 +1241,16 @@ mod tests {
         login_recording(&client, &sleeps).await.expect("completes");
         assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
         let waits = waits_of(&sleeps);
-        assert_eq!(waits.len(), 3, "{waits:?}");
+        assert_eq!(waits.len(), 3, "unexpected retry waits");
         assert_eq!(waits[0], Duration::from_secs(5), "the one interval");
-        assert!(waits[1] <= Duration::from_millis(200), "{waits:?}");
-        assert!(waits[2] <= Duration::from_millis(400), "{waits:?}");
+        assert!(
+            waits[1] <= Duration::from_millis(200),
+            "unexpected retry waits"
+        );
+        assert!(
+            waits[2] <= Duration::from_millis(400),
+            "unexpected retry waits"
+        );
     }
 
     #[tokio::test]
@@ -1288,10 +1297,10 @@ mod tests {
         // The interval, then the retry's wait capped at the time left (§33.7
         // rule 5 allows serving it); nothing is sent after the deadline.
         let waits = waits_of(&sleeps);
-        assert_eq!(waits.len(), 2, "{waits:?}");
+        assert_eq!(waits.len(), 2, "unexpected retry waits");
         assert_eq!(waits[0], Duration::from_secs(5));
-        assert!(waits[1] < Duration::from_secs(60), "{waits:?}");
-        assert!(waits[1] > Duration::from_secs(50), "{waits:?}");
+        assert!(waits[1] < Duration::from_secs(60), "unexpected retry waits");
+        assert!(waits[1] > Duration::from_secs(50), "unexpected retry waits");
     }
 
     fn poll_params() -> DevicePollParams {
@@ -1317,7 +1326,10 @@ mod tests {
                 .device_poll(poll_params())
                 .await
                 .expect_err("a 5xx is an error");
-            assert!(matches!(err, AxiamError::Network { .. }), "{err:?}");
+            assert!(
+                matches!(err, AxiamError::Network { .. }),
+                "expected a network error"
+            );
             assert_eq!(err.oauth_error_code(), None);
             assert!(err.is_retryable_transport());
             assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1354,7 +1366,10 @@ mod tests {
             .device_poll(poll_params())
             .await
             .expect_err("three attempts, all 5xx");
-        assert!(matches!(err, AxiamError::Network { .. }), "{err:?}");
+        assert!(
+            matches!(err, AxiamError::Network { .. }),
+            "expected a network error"
+        );
         assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
 
         let sleeps = Recorded::default();
