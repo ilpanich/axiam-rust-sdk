@@ -1096,9 +1096,21 @@ impl AxiamClient {
     /// along, and with no `X-CSRF-Token` — only the tenant header. The
     /// endpoint authenticates the caller by the credential in the form.
     pub(crate) fn oauth2_post(&self, url: url::Url) -> reqwest::RequestBuilder {
-        self.http_bare()
+        let request = self
+            .http_bare()
             .post(url)
-            .header("X-Tenant-ID", self.tenant_header_value())
+            .header("X-Tenant-ID", self.tenant_header_value());
+        // A browser sends same-origin cookies by default; `omit` keeps the
+        // session cookie off `/oauth2/*` there as the bare transport does on
+        // native targets.
+        #[cfg(target_arch = "wasm32")]
+        {
+            request.fetch_credentials_omit()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            request
+        }
     }
 
     /// Access the token manager (crate-internal use by `rest`/`grpc`).
