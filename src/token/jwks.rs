@@ -441,7 +441,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// consumer that already has the thumbprint from its TLS stack (most do —
 /// rustls, OpenSSL and Go's `crypto/tls` all expose the peer certificate) can
 /// apply the rule without pulling either crate in.
-#[cfg(any(feature = "rest", feature = "actix", feature = "amqp"))]
+#[cfg(any(feature = "rest", feature = "actix"))]
 pub fn certificate_thumbprint_s256(der: &[u8]) -> String {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};

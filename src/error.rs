@@ -446,6 +446,7 @@ impl AxiamError {
     /// diagnostic detail rather than something a caller matches on. `Display`
     /// output is byte-identical in every case, because every variant's
     /// `#[error(...)]` format string reads only `message`.
+    #[cfg_attr(not(feature = "rest"), allow(dead_code))]
     pub(crate) fn clone_for_waiter(&self) -> AxiamError {
         match self {
             AxiamError::Auth {

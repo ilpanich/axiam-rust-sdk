@@ -122,7 +122,7 @@ pub mod middleware;
 // `verify_webhook` is available out of the box); `amqp` is included because an
 // AMQP-only consumer already has the identical crypto stack and gating a pure
 // HMAC helper away from it would be arbitrary.
-#[cfg(any(feature = "rest", feature = "amqp"))]
+#[cfg(feature = "rest")]
 pub mod uma;
 pub mod webhook;
 

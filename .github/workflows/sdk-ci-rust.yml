@@ -251,6 +251,27 @@ jobs:
       - name: Dry-run publish gate (SC#5)
         run: cd axiam-sdk-macros && cargo publish --dry-run --all-features --allow-dirty
 
+  # `--no-default-features --features amqp` is a supported build (an AMQP-only
+  # audit producer or reactor daemon has no use for the REST transport), and it
+  # did not compile for a release (C163-17, 52 errors) because no job built it.
+  # The library and its unit tests are the surface; the integration tests and
+  # examples are written against `rest` and are not part of this cell.
+  amqp-only:
+    name: Build (amqp only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable (2026-03-27)
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - name: Clippy (lib, amqp only)
+        run: cargo clippy --lib --no-default-features --features amqp -- -D warnings
+      - name: Test (lib, amqp only)
+        run: cargo test --lib --no-default-features --features amqp
+
   # CONTRACT §27.8: the management surface is generated from the vendored
   # management-registry.json and committed. This fails when the two have
   # drifted -- which happens whenever the registry is re-vendored and nobody

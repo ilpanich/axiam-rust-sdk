@@ -24,6 +24,7 @@
 
 /// Returns `true` if `host` is a loopback / localhost literal — the sole
 /// allowed exception to the plaintext-transport ban.
+#[cfg_attr(not(any(feature = "rest", feature = "grpc")), allow(dead_code))]
 pub(crate) fn is_loopback_host(host: &str) -> bool {
     // `url` reports an IPv6 host without the surrounding brackets, but accept
     // the bracketed form too in case a raw authority string is passed in.
@@ -39,6 +40,7 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 ///
 /// `label` names the transport for the error message (e.g. `"base_url"`,
 /// `"gRPC base_url"`, `"AMQP url"`).
+#[cfg_attr(not(any(feature = "rest", feature = "grpc")), allow(dead_code))]
 pub(crate) fn ensure_secure_scheme(
     label: &str,
     scheme: &str,
