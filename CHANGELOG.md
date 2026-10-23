@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-23
+
+`axiam-sdk` 1.1.2 carries **contract 1.64** (axiam `fb92ec4`, the release branch of AXIAM 1.1.2).
+`CONTRACT.md`, `openapi.json` and `management-registry.json` are vendored byte for byte from
+`fb92ec4` (`proto/` is unchanged). The surface stays 202 operations in 29 namespaces. Nothing in this
+release is source-breaking (the gating below only changes feature sets that did not compile), so it
+is a patch.
+
+### Changed
+
+- **`/oauth2/*` and the JWKS fetch no longer follow redirects** (recorded here as C163-17 asks; this
+  has been so since 1.1.1, when those calls moved to the session-free transport, which is built
+  with redirects off): a `3xx` from the token, introspection, revocation, device-authorization,
+  PAR, CIBA, token-exchange or UMA-ticket endpoint, or from the JWKS URI, is the answer and is
+  not followed. The SSF receiver's JWKS and discovery fetches use that transport too (below).
+
+### Fixed
+
+- **A `429 rate_limit_exceeded` on a device poll is waited out** (contract 1.64, §14.2 rule 9; item
+  b): `device_login` waits `Retry-After` as a minimum (never less than one interval, capped at the
+  `expires_in` deadline), counts it as one interval, does not raise the interval for it, and polls
+  again. Only the `400 slow_down` raises the interval. A single `device_poll` still returns the
+  `OAuthProtocolError`. Tested on a recorded sleeper, not the wall clock (§14.6).
+- **The SSF receiver's JWKS and discovery fetches send no session cookie** (C163-13): they use
+  the session-free transport, so a client that signed in by cookie no longer sends `axiam_*` to
+  `/oauth2/jwks`.
+- **The `plan` refusal for an open-enum value this SDK cannot send carries a `ValidationError`**
+  (C163-07): `e.validation()` is `Some`, `fields[0].field` is the member; the message still names
+  the value, which `Unknown(String)` keeps.
+- **`--no-default-features --features amqp` compiles again** (C163-17; 52 errors since the
+  `uma`, `management` and `token` modules were added): the modules that need the REST transport
+  are gated on `rest`; `management::error` (the `ValidationError` of `AuditEventMessage::check_action`)
+  is not. CI builds that feature set from now on.
+- On wasm32, `/oauth2/*` requests use `credentials: "omit"` (C163-17).
+
+### Internal
+
+- The §14.6 control of the no-cookie test (a `logout`) now runs after the `/oauth2/*` calls;
+  `check_action` loses its dead non-`rest` branch; `sign_payload`'s doc points to
+  `AuditEventMessage::sign`.
+
 ## [1.1.1] - 2026-10-20
 
 `axiam-sdk` 1.1.1 carries **contract 1.63** (axiam `d919ba0cc`, the release branch of AXIAM 1.1.1).
