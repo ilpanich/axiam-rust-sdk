@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
 AXIAM 1.1.2). `CONTRACT.md` is vendored byte for byte from `b3f8687`; `openapi.json` and
 `management-registry.json` from `fb92ec4` (unchanged since; `proto/` is unchanged). The surface
-stays 202 operations in 29 namespaces. Nothing in this release is source-breaking (the gating below only changes feature sets that did not compile), so it
-is a patch.
+stays 202 operations in 29 namespaces. Nothing in this release is source-breaking (the gating
+below only changes feature sets that did not compile), so it is a patch.
 
 ### Changed
 
@@ -39,8 +39,8 @@ is a patch.
   the value, which `Unknown(String)` keeps.
 - **`--no-default-features --features amqp` compiles again** (C163-17; 52 errors since the
   `uma`, `management` and `token` modules were added): the modules that need the REST transport
-  are gated on `rest`; `management::error` (the `ValidationError` of `AuditEventMessage::check_action`)
-  is not. CI builds that feature set from now on.
+  are gated on `rest`; `management::error` (the `ValidationError` of
+  `AuditEventMessage::check_action`) is not. CI builds that feature set from now on.
 - **A `5xx` on the device poll is a transport failure whatever its body** (contract 1.64 amended,
   §14.2 rule 6; C164-03): AXIAM answers an internal fault `500 {"error":"server_error"}`, which
   ended `device_login` with an authentication error; it is now retried like a bodiless `5xx`.
@@ -69,6 +69,8 @@ is a patch.
 
 ### Internal
 
+- CHANGELOG text (C164-48): the 1.1.2 intro paragraph and one bullet are wrapped at about 100
+  columns, as the rest of the file is.
 - The §14.6 control of the no-cookie test (a `logout`) now runs after the `/oauth2/*` calls;
   `check_action` loses its dead non-`rest` branch; `sign_payload`'s doc points to
   `AuditEventMessage::sign`.
