@@ -159,11 +159,24 @@ enum PollOutcome {
     Pending,
     /// `slow_down` — back off permanently by [`SLOW_DOWN_INCREMENT_SECS`].
     SlowDown,
+    /// `429 rate_limit_exceeded` — not terminal (§14.2 rule 9, contract 1.64):
+    /// wait `Retry-After` as a minimum, without raising the interval.
+    RateLimited,
+    /// A `5xx` whatever its body (§14.2 rule 6, contract 1.64 amended): a
+    /// transport failure, not terminal.
+    Transient,
     /// `expired_token`, `access_denied`, `invalid_grant`, or anything else.
     Terminal,
 }
 
-/// The §14.2 polling schedule: the interval, and the deadline it stops at.
+/// The §14.2 polling schedule: the interval, and a budget of waited seconds.
+///
+/// [`AxiamClient::device_login`] takes its **deadline from the clock**
+/// (`expires_in` from the moment the grant was issued, §14.2 rule 4), so that
+/// the time requests take counts against it, and uses this type for the
+/// interval arithmetic only (rules 1 and 2). [`Self::tick`] and
+/// [`Self::tick_for`] count waits alone, which suits a loop that also checks
+/// its own clock.
 ///
 /// Extracted as a plain value type with no I/O so the arithmetic §14.2
 /// rules 1, 2 and 4 describe can be tested exhaustively and instantly.
@@ -199,18 +212,68 @@ impl PollSchedule {
         self.interval_secs += SLOW_DOWN_INCREMENT_SECS;
     }
 
-    /// Consume one interval's worth of the grant's remaining life.
+    /// Consume one interval's worth of the budget of waited seconds.
     ///
     /// Returns `false` when the deadline has been reached, at which point the
     /// caller MUST stop (§14.2 rule 4) — the deadline is authoritative even
     /// if the server is still answering `authorization_pending`.
     pub fn tick(&mut self) -> bool {
-        if self.interval_secs >= self.remaining_secs {
+        self.tick_for(self.interval_secs)
+    }
+
+    /// [`Self::tick`] for a wait of `wait_secs` rather than one interval: a
+    /// wait such as a `429`'s `Retry-After` (a minimum, §14.2 rule 9, contract
+    /// 1.64) counts as one interval and leaves the interval itself untouched.
+    /// A wait that reaches the end of the budget is `false`, as for an interval.
+    pub fn tick_for(&mut self, wait_secs: u64) -> bool {
+        if wait_secs >= self.remaining_secs {
             self.remaining_secs = 0;
             return false;
         }
-        self.remaining_secs -= self.interval_secs;
+        self.remaining_secs -= wait_secs;
         true
+    }
+}
+
+/// Whether a transport failure is a failure to connect. A browser's `fetch`
+/// does not say, so on wasm32 it is never reported.
+fn is_connect_error(e: &reqwest::Error) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        e.is_connect()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = e;
+        false
+    }
+}
+
+/// The typed `expired_token` outcome of §14.2 rule 4, raised locally.
+fn device_expired() -> AxiamError {
+    AxiamError::oauth_protocol_error(
+        "expired_token",
+        "the device authorization expired before the user completed it \
+         (client-side deadline from expires_in; CONTRACT.md §14.2 rule 4)",
+    )
+}
+
+/// A failed poll and the `Retry-After` it carried, if any.
+struct PollFailure {
+    err: AxiamError,
+    retry_after: Option<std::time::Duration>,
+    /// The HTTP status of the answer; `None` for a failure with no answer
+    /// (transport, discovery, local).
+    status: Option<u16>,
+}
+
+impl From<AxiamError> for PollFailure {
+    fn from(err: AxiamError) -> Self {
+        Self {
+            err,
+            retry_after: None,
+            status: None,
+        }
     }
 }
 
@@ -218,7 +281,25 @@ fn classify(err: &AxiamError) -> PollOutcome {
     match err.oauth_error_code() {
         Some("authorization_pending") => PollOutcome::Pending,
         Some("slow_down") => PollOutcome::SlowDown,
+        Some("rate_limit_exceeded") => PollOutcome::RateLimited,
         _ => PollOutcome::Terminal,
+    }
+}
+
+/// [`classify`], with the status read **before** the body (§14.2 rules 6 and
+/// 9, contract 1.64 amended): a `5xx` is a transport failure whatever it says
+/// (AXIAM answers an internal fault `500 {"error":"server_error"}`), any `429`
+/// is the rate-limit wait whatever its body names (a `429 slow_down` from an
+/// older server or an intermediary included), and `slow_down` raises the
+/// interval only as the `400` of the answer table.
+fn classify_failure(failure: &PollFailure) -> PollOutcome {
+    match failure.status {
+        Some(s) if s >= 500 => PollOutcome::Transient,
+        Some(429) => PollOutcome::RateLimited,
+        Some(400) | None => classify(&failure.err),
+        // An answer at any other status is not one of the table's rows;
+        // `authorization_pending` and `slow_down` mean nothing there.
+        Some(_) => PollOutcome::Terminal,
     }
 }
 
@@ -331,7 +412,8 @@ impl AxiamClient {
     /// §3.5 answers surface as [`AxiamError::Auth`] carrying an
     /// [`crate::OAuthProtocolError`] whose `error` field the caller
     /// dispatches on — `authorization_pending` and `slow_down` included, so
-    /// a hand-rolled loop sees exactly what [`Self::device_login`] sees.
+    /// a hand-rolled loop sees the same answers [`Self::device_login`] does
+    /// (a `429`'s `Retry-After` apart, below).
     ///
     /// **The poll names its client and authenticates it** (§14.1 rules 2 and
     /// 3, contract 1.62): every poll sends `client_id`, and the credential the
@@ -351,20 +433,61 @@ impl AxiamClient {
     /// returned as the server said it, in [`OidcTokenSet::token_type`](super::OidcTokenSet) —
     /// never assumed to be `Bearer`.
     ///
+    /// **A `429` is not terminal (§14.2 rule 9, contract 1.64).** It surfaces
+    /// here as an [`crate::OAuthProtocolError`] with
+    /// `error == "rate_limit_exceeded"`: wait at least the server's
+    /// `Retry-After` (or one interval) without raising the interval, and poll
+    /// again. This call does not expose the `Retry-After`, so a hand-rolled
+    /// loop waits the interval; [`Self::device_login`] reads it and does the
+    /// rest for you.
+    ///
+    /// **A `5xx` is the §2 `NetworkError` whatever its body** (rule 6): AXIAM
+    /// answers an internal fault `500 {"error":"server_error"}`, and this call
+    /// returns it as [`AxiamError::Network`] (`oauth_error_code()` is `None`),
+    /// not as an authentication error. It is retried inside this call under the
+    /// bounded read-only policy of §16 (at most three attempts; off with
+    /// `.retry_enabled(false)`); a `429` and every other `4xx` are returned at
+    /// once, never retried.
+    ///
     /// Most callers want [`Self::device_login`] instead.
     pub async fn device_poll(&self, params: DevicePollParams) -> Result<OidcTokenSet, AxiamError> {
+        self.device_poll_step(params, None).await.map_err(|f| f.err)
+    }
+
+    /// [`Self::device_poll`], keeping the `Retry-After` of a failed poll for
+    /// [`Self::device_login`]'s loop. `bound`, when set, is the loop's deadline
+    /// and clock: a §16 retry here never waits past it, and no request follows
+    /// it (`expired_token` is then the outcome).
+    async fn device_poll_step(
+        &self,
+        params: DevicePollParams,
+        bound: Option<&crate::retry::RetryBound<'_>>,
+    ) -> Result<OidcTokenSet, PollFailure> {
+        use crate::retry::{
+            Attempt, RetryRunner, ThreadRngJitter, TokioSleeper, parse_retry_after,
+        };
         let configuration = match params.configuration {
             Some(c) => c,
-            None => self.oidc_discover().await?,
+            None => self.oidc_discover().await.map_err(PollFailure::from)?,
         };
-        let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
-        let client_id = self.oidc_client_id_or_err()?.to_string();
-        let endpoint = self.mtls_preferred(
-            &configuration,
-            |a| a.token_endpoint.as_deref(),
-            &configuration.token_endpoint,
-        )?;
-        let url = self.oidc_endpoint_url(endpoint, tenant_id)?;
+        let tenant_id = self
+            .resolve_oidc_tenant_id(params.tenant_id)
+            .await
+            .map_err(PollFailure::from)?;
+        let client_id = self
+            .oidc_client_id_or_err()
+            .map_err(PollFailure::from)?
+            .to_string();
+        let endpoint = self
+            .mtls_preferred(
+                &configuration,
+                |a| a.token_endpoint.as_deref(),
+                &configuration.token_endpoint,
+            )
+            .map_err(PollFailure::from)?;
+        let url = self
+            .oidc_endpoint_url(endpoint, tenant_id)
+            .map_err(PollFailure::from)?;
 
         // §14.1 rules 2 and 3: the poll names its client on every request and
         // carries the credential `device_authorize` carried.
@@ -376,31 +499,109 @@ impl AxiamClient {
             client_secret: client_secret.as_deref(),
         };
 
-        let response = self
-            .idp_form_post(url)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| AxiamError::Network {
-                message: format!("device token request failed: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+        // §14.2 rule 6, §16.2: a `5xx` or a transport failure is retried under
+        // the bounded read-only policy, inside this one poll attempt (the
+        // budget is per poll, separate from the grant's own loop). Every
+        // `4xx` — the `400` answers and the `429` wait among them — is
+        // decisive here and is returned to the loop, never retried.
+        let runner = RetryRunner {
+            enabled: self.retry_enabled(),
+            operation: "device_poll",
+            telemetry: self.telemetry(),
+            jitter: &ThreadRngJitter,
+            sleeper: &TokioSleeper,
+        };
+        let (url, form) = (&url, &form);
+        let wire = runner
+            .run_until(bound, |_| async move {
+                let response = self
+                    .idp_form_post(url.clone())
+                    .form(form)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        // The text names the kind of failure, not the
+                        // transport error's own message: the §16 runner hands
+                        // this error's text to the §19 telemetry sink, and the
+                        // original stays reachable as the error's `source`.
+                        let kind = if e.is_timeout() {
+                            "timed out"
+                        } else if is_connect_error(&e) {
+                            "could not connect"
+                        } else {
+                            "transport error"
+                        };
+                        Attempt::bare(AxiamError::Network {
+                            message: format!("device token request failed: {kind}"),
+                            source: Some(Box::new(e)),
+                        })
+                    })?;
 
-        if !response.status().is_success() {
-            return Err(oauth2_error_or_fallback(response).await);
-        }
+                if !response.status().is_success() {
+                    let retry_after = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(parse_retry_after);
+                    let status = response.status().as_u16();
+                    // The status is read before the body: a `5xx` is the §2
+                    // `NetworkError` whatever it says (AXIAM answers a fault
+                    // `500 {"error":"server_error"}`), as `ciba_poll` does.
+                    //
+                    // The message is the status alone, never the server's body:
+                    // the §16 runner hands this error's text to the §19
+                    // telemetry sink, and the status is all a retry decision or a
+                    // caller needs.
+                    if status >= 500 {
+                        return Err(Attempt {
+                            err: AxiamError::from_http_status(
+                                status,
+                                format!("device token request failed: HTTP {status}"),
+                            ),
+                            retry_after,
+                        });
+                    }
+                    return Ok(Err(PollFailure {
+                        err: oauth2_error_or_fallback(response).await,
+                        retry_after,
+                        status: Some(status),
+                    }));
+                }
 
-        let wire = response
-            .json::<super::exchange::TokenResponseWire>()
+                // The 200 is consumed outside the retry: the grant may already
+                // be redeemed, so a body that does not parse is not re-sent.
+                Ok(response
+                    .json::<super::exchange::TokenResponseWire>()
+                    .await
+                    .map_err(|e| {
+                        PollFailure::from(AxiamError::Network {
+                            message: format!("failed to parse device token response: {e}"),
+                            source: Some(Box::new(e)),
+                        })
+                    }))
+            })
             .await
-            .map_err(|e| AxiamError::Network {
-                message: format!("failed to parse device token response: {e}"),
-                source: Some(Box::new(e)),
-            })?;
+            .map_err(|ended| {
+                if ended.at_deadline {
+                    // The retry's wait ended at the deadline: no request
+                    // follows it (§14.2 rule 4).
+                    return PollFailure::from(device_expired());
+                }
+                // What outlived §16's retries is a transport failure or a
+                // `5xx`: the loop's next poll, not a verdict. The last
+                // `Retry-After` rides along as that poll's floor.
+                PollFailure {
+                    err: ended.err,
+                    retry_after: ended.retry_after,
+                    status: None,
+                }
+            })??;
 
         // No nonce: the device grant has no authorization request to carry
         // one, and §12.4 rule 6 applies to the authorization-code flow.
-        self.to_token_set(wire, &configuration, None).await
+        self.to_token_set(wire, &configuration, None)
+            .await
+            .map_err(PollFailure::from)
     }
 
     /// The composed §14.3 helper: start the grant, hand the caller the user
@@ -433,10 +634,37 @@ impl AxiamClient {
     /// rule 6) — the loop absorbs it and tries again on the next tick,
     /// bounded by the same deadline. A server restart must not lose a grant
     /// the user has already approved.
+    ///
+    /// A `429 rate_limit_exceeded` is not terminal either (§14.2 rule 9,
+    /// contract 1.64): the loop waits the `Retry-After` as a minimum (never
+    /// less than one interval, and capped at the `expires_in` deadline),
+    /// counts the wait as one interval, does **not** raise the interval for
+    /// it, and polls again. Only the `400 slow_down` raises the interval.
     pub async fn device_login<F>(
         &self,
         params: DeviceLoginParams,
         on_user_code: F,
+    ) -> Result<OidcTokenSet, AxiamError>
+    where
+        F: FnOnce(&DeviceAuthorization),
+    {
+        self.device_login_with(
+            params,
+            on_user_code,
+            &crate::retry::TokioSleeper,
+            &crate::time::Instant::now,
+        )
+        .await
+    }
+
+    /// [`Self::device_login`] on an injected clock, so the §14.6 tests record
+    /// the waits instead of sleeping them.
+    pub(crate) async fn device_login_with<F>(
+        &self,
+        params: DeviceLoginParams,
+        on_user_code: F,
+        sleeper: &dyn crate::retry::Sleeper,
+        now: &(dyn Fn() -> crate::time::Instant + Send + Sync),
     ) -> Result<OidcTokenSet, AxiamError>
     where
         F: FnOnce(&DeviceAuthorization),
@@ -457,7 +685,21 @@ impl AxiamClient {
         // §14.3 rule 2 — before any polling.
         on_user_code(&authorization);
 
+        // The deadline is a point on the clock, anchored when the grant was
+        // issued: request round trips, the callback above and slow answers
+        // count against it, not only the waits (§14.2 rule 4, C164-05).
+        let deadline = now() + std::time::Duration::from_secs(authorization.expires_in);
         let mut schedule = PollSchedule::new(authorization.interval, authorization.expires_in);
+        // A §16 retry inside a poll is served on this loop's clock and never
+        // waits past the deadline (the P10 pattern `ciba_await` follows).
+        let retry_bound = crate::retry::RetryBound {
+            deadline,
+            now,
+            sleeper,
+        };
+        // The `Retry-After` of a `429` poll, which stands in for the next
+        // interval when it is longer (§14.2 rule 9).
+        let mut retry_after_secs = 0;
 
         loop {
             // §14.2 rule 4: the deadline is authoritative. Checking *before*
@@ -465,38 +707,51 @@ impl AxiamClient {
             // refused, and reports the outcome under the same `expired_token`
             // code the server would have used — so a caller's match arm does
             // not care which side noticed first.
-            if !schedule.tick() {
-                return Err(AxiamError::oauth_protocol_error(
-                    "expired_token",
-                    "the device authorization expired before the user completed it \
-                     (client-side deadline from expires_in; CONTRACT.md §14.2 rule 4)",
-                ));
+            let wait_secs = schedule.interval_secs().max(retry_after_secs);
+            retry_after_secs = 0;
+            let wait = std::time::Duration::from_secs(wait_secs);
+            if now() + wait >= deadline {
+                return Err(device_expired());
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(schedule.interval_secs())).await;
+            sleeper.sleep(wait).await;
+            if now() >= deadline {
+                return Err(device_expired());
+            }
 
             match self
-                .device_poll(DevicePollParams {
-                    device_code: authorization.device_code.clone(),
-                    tenant_id: params.tenant_id,
-                    configuration: Some(configuration.clone()),
-                })
+                .device_poll_step(
+                    DevicePollParams {
+                        device_code: authorization.device_code.clone(),
+                        tenant_id: params.tenant_id,
+                        configuration: Some(configuration.clone()),
+                    },
+                    Some(&retry_bound),
+                )
                 .await
             {
                 Ok(tokens) => return Ok(tokens),
-                Err(e) => match classify(&e) {
-                    PollOutcome::Pending => continue,
+                Err(failure) => match classify_failure(&failure) {
+                    PollOutcome::Pending | PollOutcome::Transient => continue,
                     PollOutcome::SlowDown => {
                         // §14.2 rule 1: cumulative, and never reset.
                         schedule.slow_down();
                         continue;
                     }
+                    PollOutcome::RateLimited => {
+                        retry_after_secs = failure.retry_after.map_or(0, |d| d.as_secs());
+                        continue;
+                    }
                     PollOutcome::Terminal => {
+                        let (e, retry_after) = (failure.err, failure.retry_after);
                         // §14.2 rule 6: a transport/5xx failure is not one of
                         // the five protocol answers and is not terminal.
                         // `oauth_error_code()` is `None` for those, which is
-                        // exactly what distinguishes them here.
+                        // exactly what distinguishes them here. The last
+                        // attempt's `Retry-After` is the next poll's floor
+                        // (§16.1): an exhausted budget does not lift it.
                         if e.oauth_error_code().is_none() && e.is_retryable_transport() {
+                            retry_after_secs = retry_after.map_or(0, |d| d.as_secs());
                             continue;
                         }
                         return Err(e);
@@ -597,6 +852,762 @@ mod tests {
         // Classified Terminal, but the loop consults `is_retryable_transport`
         // for exactly this case (§14.2 rule 6) and keeps polling.
         assert_eq!(classify(&err), PollOutcome::Terminal);
+    }
+
+    // --- §14.6 (contract 1.64): a `429` on a poll is waited out -----------
+
+    use crate::client::AxiamClient;
+    use crate::oidc::DeviceLoginParams;
+    use crate::retry::Sleeper;
+    use serde_json::json;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Records the waits instead of sleeping them (no wall clock).
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<Duration>>);
+
+    impl Sleeper for Recorded {
+        fn sleep(&self, d: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.0.lock().unwrap().push(d);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    /// A mock authorization server whose `/oauth2/token` answers from `script`
+    /// in order (the last answer repeats), and a client for it. `expires_in` is
+    /// the grant's lifetime; the interval is 5 s.
+    async fn device_fixture(
+        script: Vec<ResponseTemplate>,
+        expires_in: u64,
+    ) -> (
+        MockServer,
+        AxiamClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        device_fixture_with(script, expires_in, std::sync::Arc::new(|| {}), true).await
+    }
+
+    /// [`device_fixture`], running `on_poll` as each poll arrives (a fake
+    /// clock advances by the request's duration there).
+    async fn device_fixture_with(
+        script: Vec<ResponseTemplate>,
+        expires_in: u64,
+        on_poll: std::sync::Arc<dyn Fn() + Send + Sync>,
+        retry: bool,
+    ) -> (
+        MockServer,
+        AxiamClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": "https://iam.example.com",
+                "authorization_endpoint": format!("{base}/oauth2/authorize"),
+                "token_endpoint": format!("{base}/oauth2/token"),
+                "userinfo_endpoint": format!("{base}/oauth2/userinfo"),
+                "jwks_uri": format!("{base}/oauth2/jwks"),
+                "revocation_endpoint": format!("{base}/oauth2/revoke"),
+                "introspection_endpoint": format!("{base}/oauth2/introspect"),
+                "scopes_supported": ["openid"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                "claims_supported": ["sub"],
+                "grant_types_supported": ["urn:ietf:params:oauth:grant-type:device_code"],
+                "device_authorization_endpoint": format!("{base}/oauth2/device_authorization"),
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["EdDSA"],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device_authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": "dc",
+                "user_code": "WDJB-MJHT",
+                "verification_uri": "https://iam.example.com/device",
+                "expires_in": expires_in,
+                "interval": 5,
+            })))
+            .mount(&server)
+            .await;
+        let polls = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&polls);
+        let script = Mutex::new(script);
+        let on_poll = std::sync::Arc::clone(&on_poll);
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token"))
+            .respond_with(move |_: &wiremock::Request| {
+                on_poll();
+                let i = seen.fetch_add(1, Ordering::SeqCst);
+                let script = script.lock().unwrap();
+                script
+                    .get(i)
+                    .or(script.last())
+                    .cloned()
+                    .expect("non-empty script")
+            })
+            .mount(&server)
+            .await;
+        let client = AxiamClient::builder()
+            .base_url(&base)
+            .expect("valid base url")
+            .tenant_id(uuid::Uuid::nil())
+            .org_id(uuid::Uuid::nil())
+            .oidc_client_id("axiam-rp")
+            .retry_enabled(retry)
+            .build()
+            .expect("client builds");
+        (server, client, polls)
+    }
+
+    fn rate_limited(retry_after: &str) -> ResponseTemplate {
+        ResponseTemplate::new(429)
+            .insert_header("Retry-After", retry_after)
+            .set_body_json(json!({"error": "rate_limit_exceeded"}))
+    }
+
+    fn pending() -> ResponseTemplate {
+        ResponseTemplate::new(400).set_body_json(json!({"error": "authorization_pending"}))
+    }
+
+    fn tokens() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "device-access-token",
+            "token_type": "Bearer",
+            "expires_in": 900,
+        }))
+    }
+
+    // §14.6: one poll answered `429` + `Retry-After`; the loop waits at least
+    // that long, polls again, completes, and the interval is unchanged.
+    #[tokio::test]
+    async fn a_429_on_a_poll_is_waited_out_and_the_interval_is_unchanged() {
+        let (_server, client, polls) =
+            device_fixture(vec![rate_limited("12"), pending(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        let set = client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("the loop completes after the 429");
+        assert_eq!(set.access_token.expose(), "device-access-token");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        // interval, then the Retry-After (a minimum, above the interval), then
+        // the interval again: not 10 s, as a `slow_down` would have made it.
+        assert_eq!(secs, [5, 12, 5]);
+    }
+
+    // A `Retry-After` shorter than the interval does not shorten the wait.
+    #[tokio::test]
+    async fn a_short_retry_after_never_goes_below_the_interval() {
+        let (_server, client, _) = device_fixture(vec![rate_limited("1"), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 5]);
+    }
+
+    // A `Retry-After` past the `expires_in` deadline is capped at it: the
+    // typed `expired_token` outcome, and nothing is sent after the deadline.
+    #[tokio::test]
+    async fn a_retry_after_past_the_deadline_ends_in_expired_token() {
+        let (_server, client, polls) =
+            device_fixture(vec![rate_limited("3600"), tokens()], 60).await;
+        let sleeps = Recorded::default();
+        let err = client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect_err("the deadline wins");
+        assert_eq!(err.oauth_error_code(), Some("expired_token"));
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5], "no wait is served past the deadline");
+    }
+
+    #[test]
+    fn a_retry_after_wait_counts_as_one_interval_and_keeps_the_interval() {
+        let mut s = PollSchedule::new(5, 100);
+        assert!(s.tick_for(30));
+        assert_eq!(s.interval_secs(), 5);
+        assert!(!s.tick_for(70), "the wait that reaches the deadline stops");
+    }
+
+    fn server_error() -> ResponseTemplate {
+        ResponseTemplate::new(500)
+            .set_body_json(json!({"error": "server_error", "error_description": "db"}))
+    }
+
+    // §14.2 rule 6 (contract 1.64 amended; C164-03): a `5xx` is a transport
+    // failure whatever its body. AXIAM's own datastore fault is
+    // `500 {"error":"server_error"}`; it does not end the flow.
+    #[tokio::test]
+    async fn a_500_with_an_error_body_mid_poll_is_not_terminal() {
+        let (_server, client, polls) =
+            device_fixture(vec![server_error(), pending(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("a 500 mid-poll does not lose the grant");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // The interval, the §16 backoff inside the poll that met the 500, and
+        // the interval again: not a raised interval.
+        let waits = sleeps.0.lock().unwrap().clone();
+        assert_eq!(waits.len(), 3);
+        assert_eq!(waits[0], Duration::from_secs(5));
+        assert!(
+            waits[1] <= Duration::from_millis(200),
+            "unexpected retry waits"
+        );
+        assert_eq!(waits[2], Duration::from_secs(5));
+    }
+
+    // §14.2 rule 9 (amended; C164-04): the status decides. A `429` whose body
+    // says `slow_down` is the wait, and does not raise the interval.
+    #[tokio::test]
+    async fn a_429_slow_down_waits_and_does_not_raise_the_interval() {
+        let slow = ResponseTemplate::new(429)
+            .insert_header("Retry-After", "1")
+            .set_body_json(json!({"error": "slow_down"}));
+        let (_server, client, _) = device_fixture(vec![slow, pending(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 5, 5]);
+    }
+
+    // The `400 slow_down` is the one that raises it (rule 1), unchanged.
+    #[tokio::test]
+    async fn a_400_slow_down_still_raises_the_interval() {
+        let slow = ResponseTemplate::new(400).set_body_json(json!({"error": "slow_down"}));
+        let (_server, client, _) = device_fixture(vec![slow, tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 10]);
+    }
+
+    // A bodiless `429` honours `Retry-After` as a floor (rule 9).
+    #[tokio::test]
+    async fn a_bodiless_429_honours_retry_after() {
+        let bare = ResponseTemplate::new(429).insert_header("Retry-After", "12");
+        let (_server, client, _) = device_fixture(vec![bare, tokens()], 600).await;
+        let sleeps = Recorded::default();
+        client
+            .device_login_with(
+                DeviceLoginParams::default(),
+                |_| {},
+                &sleeps,
+                &crate::time::Instant::now,
+            )
+            .await
+            .expect("completes");
+        let secs: Vec<u64> = sleeps
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 12]);
+    }
+
+    /// A clock the test moves: the sleeper advances it by the wait, and the
+    /// mock advances it by the time a poll took.
+    struct FakeClock {
+        base: crate::time::Instant,
+        offset_secs: std::sync::atomic::AtomicU64,
+        waits: Mutex<Vec<Duration>>,
+    }
+
+    impl FakeClock {
+        fn now(&self) -> crate::time::Instant {
+            self.base
+                + Duration::from_secs(self.offset_secs.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    impl Sleeper for FakeClock {
+        fn sleep(&self, d: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.waits.lock().unwrap().push(d);
+            self.offset_secs
+                .fetch_add(d.as_secs(), std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    // §14.2 rule 4 (C164-05): the deadline is `authorization time +
+    // expires_in` on the clock, so the time a poll takes counts against it.
+    // `expires_in` 60, interval 5, each poll takes 30 s: a poll at t=5 ends at
+    // 35, the next waits to 40 and ends at 70, and nothing follows.
+    #[tokio::test]
+    async fn the_time_a_poll_takes_counts_against_the_deadline() {
+        let clock = std::sync::Arc::new(FakeClock {
+            base: crate::time::Instant::now(),
+            offset_secs: std::sync::atomic::AtomicU64::new(0),
+            waits: Mutex::new(Vec::new()),
+        });
+        let tick = std::sync::Arc::clone(&clock);
+        let (_server, client, polls) = device_fixture_with(
+            vec![pending()],
+            60,
+            std::sync::Arc::new(move || {
+                tick.offset_secs
+                    .fetch_add(30, std::sync::atomic::Ordering::SeqCst);
+            }),
+            true,
+        )
+        .await;
+        let reader = std::sync::Arc::clone(&clock);
+        let err = client
+            .device_login_with(DeviceLoginParams::default(), |_| {}, &*clock, &move || {
+                reader.now()
+            })
+            .await
+            .expect_err("the deadline wins");
+        assert_eq!(err.oauth_error_code(), Some("expired_token"));
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let secs: Vec<u64> = clock
+            .waits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_secs())
+            .collect();
+        assert_eq!(secs, [5, 5]);
+    }
+
+    fn run_params() -> DeviceLoginParams {
+        DeviceLoginParams::default()
+    }
+
+    async fn login_recording(
+        client: &AxiamClient,
+        sleeps: &Recorded,
+    ) -> Result<crate::oidc::OidcTokenSet, AxiamError> {
+        client
+            .device_login_with(run_params(), |_| {}, sleeps, &crate::time::Instant::now)
+            .await
+    }
+
+    fn waits_of(sleeps: &Recorded) -> Vec<Duration> {
+        sleeps.0.lock().unwrap().clone()
+    }
+
+    // §14.2 rule 6, §16.2 (C164-25): with retry on, the poll that meets a 5xx
+    // retries inside the attempt (at most three), so the loop completes in one
+    // interval; with retry off there is one request per poll.
+    #[tokio::test]
+    async fn a_5xx_is_retried_inside_the_poll() {
+        let (_server, client, polls) =
+            device_fixture(vec![server_error(), server_error(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let waits = waits_of(&sleeps);
+        assert_eq!(waits.len(), 3, "unexpected retry waits");
+        assert_eq!(waits[0], Duration::from_secs(5), "the one interval");
+        assert!(
+            waits[1] <= Duration::from_millis(200),
+            "unexpected retry waits"
+        );
+        assert!(
+            waits[2] <= Duration::from_millis(400),
+            "unexpected retry waits"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_retry_off_a_5xx_costs_an_interval() {
+        let (_server, client, polls) = device_fixture_with(
+            vec![server_error(), server_error(), tokens()],
+            600,
+            std::sync::Arc::new(|| {}),
+            false,
+        )
+        .await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(waits_of(&sleeps), [Duration::from_secs(5); 3]);
+    }
+
+    // A 5xx's Retry-After is the retry's floor (§16.1).
+    #[tokio::test]
+    async fn a_5xx_retry_after_is_a_floor_inside_the_poll() {
+        let busy = ResponseTemplate::new(503)
+            .insert_header("Retry-After", "9")
+            .set_body_json(json!({"error": "temporarily_unavailable"}));
+        let (_server, client, _) = device_fixture(vec![busy, tokens()], 600).await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(
+            waits_of(&sleeps),
+            [Duration::from_secs(5), Duration::from_secs(9)]
+        );
+    }
+
+    // The retry never waits past the deadline: the typed `expired_token`.
+    #[tokio::test]
+    async fn a_retry_wait_is_capped_at_the_deadline_and_ends_in_expired_token() {
+        let busy = ResponseTemplate::new(503).insert_header("Retry-After", "3600");
+        let (_server, client, polls) = device_fixture(vec![busy, tokens()], 60).await;
+        let sleeps = Recorded::default();
+        let err = login_recording(&client, &sleeps)
+            .await
+            .expect_err("the deadline wins");
+        assert_eq!(err.oauth_error_code(), Some("expired_token"));
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The interval, then the retry's wait capped at the time left (§33.7
+        // rule 5 allows serving it); nothing is sent after the deadline.
+        let waits = waits_of(&sleeps);
+        assert_eq!(waits.len(), 2, "unexpected retry waits");
+        assert_eq!(waits[0], Duration::from_secs(5));
+        assert!(waits[1] < Duration::from_secs(60), "unexpected retry waits");
+        assert!(waits[1] > Duration::from_secs(50), "unexpected retry waits");
+    }
+
+    fn poll_params() -> DevicePollParams {
+        DevicePollParams {
+            device_code: crate::Sensitive::new("dc".to_string()),
+            tenant_id: None,
+            configuration: None,
+        }
+    }
+
+    // §14.2 rule 6 (C164-27): the single `device_poll` types a 5xx as the §2
+    // `NetworkError` whatever its body, so a hand-rolled loop does not end on
+    // it. Retry off: one request.
+    #[tokio::test]
+    async fn a_single_device_poll_types_a_5xx_as_a_network_error() {
+        for answer in [
+            server_error(),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "temporarily_unavailable"})),
+        ] {
+            let (_server, client, polls) =
+                device_fixture_with(vec![answer], 600, std::sync::Arc::new(|| {}), false).await;
+            let err = client
+                .device_poll(poll_params())
+                .await
+                .expect_err("a 5xx is an error");
+            assert!(
+                matches!(err, AxiamError::Network { .. }),
+                "expected a network error"
+            );
+            assert_eq!(err.oauth_error_code(), None);
+            assert!(err.is_retryable_transport());
+            assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    // With retry on, the single poll also retries inside the attempt, and a
+    // 429 is returned at once (the wait is the caller's).
+    #[tokio::test]
+    async fn a_single_device_poll_retries_a_5xx_but_not_a_429() {
+        let (_server, client, polls) =
+            device_fixture(vec![server_error(), server_error(), tokens()], 600).await;
+        let set = client.device_poll(poll_params()).await.expect("recovers");
+        assert_eq!(set.access_token.expose(), "device-access-token");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        let (_server, client, polls) = device_fixture(vec![rate_limited("1"), tokens()], 600).await;
+        let err = client.device_poll(poll_params()).await.expect_err("429");
+        assert_eq!(err.oauth_error_code(), Some("rate_limit_exceeded"));
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // §14.6 (contract 1.64 amended): a third 5xx in a row exhausts the cap of
+    // three attempts; the poll surfaces the failure, and the loop takes its
+    // next interval.
+    #[tokio::test]
+    async fn three_5xx_exhaust_the_attempt_cap() {
+        let (_server, client, polls) = device_fixture(
+            vec![server_error(), server_error(), server_error(), tokens()],
+            600,
+        )
+        .await;
+        let err = client
+            .device_poll(poll_params())
+            .await
+            .expect_err("three attempts, all 5xx");
+        assert!(
+            matches!(err, AxiamError::Network { .. }),
+            "expected a network error"
+        );
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        // The 4th request (the tokens) is the first of the loop's poll.
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(waits_of(&sleeps), [Duration::from_secs(5)]);
+    }
+
+    // §14.6 (contract 1.64 amended; C164-41): when the in-poll budget is
+    // exhausted on a 5xx that carried `Retry-After`, the loop's next poll waits
+    // at least that long (§16.1: the hint is a floor), not one interval.
+    #[tokio::test]
+    async fn an_exhausted_budget_keeps_the_last_retry_after_as_the_next_polls_floor() {
+        let busy = || {
+            ResponseTemplate::new(503)
+                .insert_header("Retry-After", "40")
+                .set_body_json(json!({"error": "temporarily_unavailable"}))
+        };
+        let (_server, client, polls) =
+            device_fixture(vec![busy(), busy(), busy(), tokens()], 600).await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(
+            waits_of(&sleeps),
+            [
+                Duration::from_secs(5),
+                Duration::from_secs(40),
+                Duration::from_secs(40),
+                Duration::from_secs(40),
+            ],
+            "the two in-poll retries, then the next poll at the floor"
+        );
+    }
+
+    /// A token endpoint on a raw socket, so a transport failure is a real one:
+    /// it reads each request and drops the first `drops` connections without
+    /// answering, then answers `200` with the tokens. Counts connections.
+    async fn raw_token_server(
+        drops: usize,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let connections = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&connections);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    // Read the request: the head, then `Content-Length` bytes.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        let Ok(read) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..read]);
+                        let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                        let wanted = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if buf.len() >= head_end + 4 + wanted {
+                            break;
+                        }
+                    }
+                    if n < drops {
+                        drop(stream);
+                        return;
+                    }
+                    let body = r#"{"access_token":"device-access-token","token_type":"Bearer","expires_in":900}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (addr, connections)
+    }
+
+    /// A client whose token endpoint is the raw socket above (discovery and the
+    /// device authorization stay on a mock).
+    async fn raw_client(raw: std::net::SocketAddr, retry: bool) -> (MockServer, AxiamClient) {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": "https://iam.example.com",
+                "authorization_endpoint": format!("{base}/oauth2/authorize"),
+                "token_endpoint": format!("http://{raw}/oauth2/token"),
+                "userinfo_endpoint": format!("{base}/oauth2/userinfo"),
+                "jwks_uri": format!("{base}/oauth2/jwks"),
+                "revocation_endpoint": format!("{base}/oauth2/revoke"),
+                "introspection_endpoint": format!("{base}/oauth2/introspect"),
+                "scopes_supported": ["openid"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                "claims_supported": ["sub"],
+                "grant_types_supported": ["urn:ietf:params:oauth:grant-type:device_code"],
+                "device_authorization_endpoint": format!("{base}/oauth2/device_authorization"),
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["EdDSA"],
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/oauth2/device_authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": "dc",
+                "user_code": "WDJB-MJHT",
+                "verification_uri": "https://iam.example.com/device",
+                "expires_in": 600,
+                "interval": 5,
+            })))
+            .mount(&server)
+            .await;
+        let client = AxiamClient::builder()
+            .base_url(&base)
+            .expect("valid base url")
+            .tenant_id(uuid::Uuid::nil())
+            .org_id(uuid::Uuid::nil())
+            .oidc_client_id("axiam-rp")
+            .retry_enabled(retry)
+            .build()
+            .expect("client builds");
+        (server, client)
+    }
+
+    // §14.6 (contract 1.64 amended, "the same holds for a transport failure"):
+    // two dropped connections then a 200 are three requests and the tokens; a
+    // third drop exhausts the cap and surfaces the network error; with retry
+    // off there is one request.
+    #[tokio::test]
+    async fn a_transport_failure_is_retried_inside_the_poll() {
+        use std::sync::atomic::Ordering;
+        let (raw, connections) = raw_token_server(2).await;
+        let (_server, client) = raw_client(raw, true).await;
+        let set = client
+            .device_poll(poll_params())
+            .await
+            .expect("two drops, then the tokens");
+        assert_eq!(set.access_token.expose(), "device-access-token");
+        assert_eq!(connections.load(Ordering::SeqCst), 3);
+
+        let (raw, connections) = raw_token_server(3).await;
+        let (_server, client) = raw_client(raw, true).await;
+        let err = client
+            .device_poll(poll_params())
+            .await
+            .expect_err("three drops exhaust the cap");
+        assert!(matches!(err, AxiamError::Network { .. }));
+        assert!(err.is_retryable_transport());
+        assert_eq!(connections.load(Ordering::SeqCst), 3);
+
+        let (raw, connections) = raw_token_server(1).await;
+        let (_server, client) = raw_client(raw, false).await;
+        client
+            .device_poll(poll_params())
+            .await
+            .expect_err("retry off: one request");
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    // The same through `device_login`: the loop completes within one interval.
+    #[tokio::test]
+    async fn device_login_completes_within_one_interval_over_a_flaky_transport() {
+        let (raw, connections) = raw_token_server(2).await;
+        let (_server, client) = raw_client(raw, true).await;
+        let sleeps = Recorded::default();
+        login_recording(&client, &sleeps).await.expect("completes");
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let waits = waits_of(&sleeps);
+        assert_eq!(waits.len(), 3, "the interval and two backoff waits");
+        assert_eq!(waits[0], Duration::from_secs(5));
+        assert!(waits[1] <= Duration::from_millis(200));
+        assert!(waits[2] <= Duration::from_millis(400));
     }
 }
 

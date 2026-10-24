@@ -762,6 +762,11 @@ async fn an_unknown_open_enum_on_an_unstated_member_is_refused_before_any_write(
         for result in [planned.map(|_| ()), applied.map(|_| ())] {
             let error = result.expect_err(member);
             assert!(matches!(error, AxiamError::Network { .. }), "{member}");
+            let validation = error
+                .validation()
+                .unwrap_or_else(|| panic!("{member}: a ValidationError source"));
+            assert_eq!(validation.operation, "manifest.plan", "{member}");
+            assert_eq!(validation.fields[0].field, member, "{member}");
             let text = error.to_string();
             assert!(text.contains(member), "{member}: names the member: {text}");
             assert!(text.contains(value), "{member}: names the value: {text}");

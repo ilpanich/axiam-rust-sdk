@@ -320,11 +320,17 @@ impl NetworkProfileSpec {
 /// cannot name in `member`, the manifest does not state it, and the profile
 /// would be replaced. State the member to resolve it.
 fn unknown_open_enum(segment: &str, member: &str, value: &str) -> AxiamError {
-    AxiamError::network(format!(
-        "network profile of segment {segment:?}: {member} is {value:?} on the server, a value \
-         this SDK does not know and never re-sends; state {member} in the manifest to replace it \
-         (CONTRACT.md §27.6.2)"
-    ))
+    // `e.validation()` is `Some` and `fields[0].field` is the member; the
+    // value is kept in the text (D-15: this SDK's `Unknown` holds it).
+    crate::management::error::local_refusal(
+        "manifest.plan",
+        member,
+        format!(
+            "network profile of segment {segment:?}: {member} is {value:?} on the server, a \
+             value this SDK does not know and never re-sends; state {member} in the manifest to \
+             replace it (CONTRACT.md §27.6.2)"
+        ),
+    )
 }
 
 /// The wire spelling of a kind, for natural-key comparison and summaries.

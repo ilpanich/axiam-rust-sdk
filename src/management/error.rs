@@ -13,6 +13,11 @@
 //! `matches!(e, AxiamError::Network { .. })` compiling and true, which is what
 //! "additive" has to mean.
 
+// Under `--no-default-features --features amqp` only `ValidationError` and
+// `local_refusal` are reached (the audit producer's local refusal); the
+// status mapping below belongs to the `rest` transport.
+#![cfg_attr(not(feature = "rest"), allow(dead_code))]
+
 use serde::Deserialize;
 
 use crate::error::AuthzKind;

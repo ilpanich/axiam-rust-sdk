@@ -11,6 +11,7 @@ pub mod dpop;
 pub mod jwks;
 pub mod manager;
 pub mod refresh_guard;
+#[cfg(feature = "rest")]
 pub mod revocation;
 
 pub use jwks::Claims;
@@ -23,7 +24,7 @@ pub use jwks::CnfClaim;
 // a `--no-default-features` consumer must be able to apply the full rule and
 // not just its certificate half.
 pub use jwks::PresentedProofs;
-#[cfg(any(feature = "rest", feature = "actix", feature = "amqp"))]
+#[cfg(any(feature = "rest", feature = "actix"))]
 pub use jwks::certificate_thumbprint_s256;
 #[cfg(any(feature = "rest", feature = "actix"))]
 pub use jwks::{CLOCK_SKEW_LEEWAY_SECS, JwksVerifier};

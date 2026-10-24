@@ -420,7 +420,10 @@ async fn server_error_mid_poll_is_retried_not_terminal() {
         &server,
         vec![
             pending(),
-            ResponseTemplate::new(500).set_body_string("upstream restarting"),
+            // The body AXIAM's token endpoint sends for an internal fault
+            // (contract 1.64 amended, §14.6): the status decides, not the body.
+            ResponseTemplate::new(500)
+                .set_body_json(json!({"error": "server_error", "error_description": "db"})),
             ResponseTemplate::new(503).set_body_string("still restarting"),
             success(),
         ],

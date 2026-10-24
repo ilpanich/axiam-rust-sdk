@@ -321,18 +321,6 @@ async fn a_jar_with_session_cookies_sends_neither_cookie_nor_csrf_to_oauth2() {
         .login("admin@example.com", &any_password())
         .await
         .expect("login");
-    client.logout().await.expect("logout");
-    let control = probe.lock().unwrap().clone();
-    assert_eq!(control.len(), 1);
-    assert!(
-        control[0].everything.contains("axiam_access=")
-            && control[0]
-                .everything
-                .to_lowercase()
-                .contains("x-csrf-token"),
-        "control: /api/v1/* does carry the session: {}",
-        control[0].everything
-    );
 
     client
         .login_client_credentials(LoginClientCredentialsParams::default())
@@ -353,6 +341,21 @@ async fn a_jar_with_session_cookies_sends_neither_cookie_nor_csrf_to_oauth2() {
             seen.everything
         );
     }
+
+    // The control comes last, so the `/oauth2/*` assertions above run while the
+    // session is live.
+    client.logout().await.expect("logout");
+    let control = probe.lock().unwrap().clone();
+    assert_eq!(control.len(), 1);
+    assert!(
+        control[0].everything.contains("axiam_access=")
+            && control[0]
+                .everything
+                .to_lowercase()
+                .contains("x-csrf-token"),
+        "control: /api/v1/* does carry the session: {}",
+        control[0].everything
+    );
 }
 
 /// The device operations, then everything the log holds (which already holds

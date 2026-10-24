@@ -18,6 +18,11 @@ type HmacSha256 = Hmac<Sha256>;
 /// message that includes a placeholder signature, making verification
 /// impossible. This matches the server's `sign_payload` doc comment
 /// (`crates/axiam-amqp/src/messages.rs:31-34`).
+///
+/// This is the raw primitive: it signs whatever bytes it is given. To sign an
+/// audit event use [`AuditEventMessage::sign`](crate::amqp::messages::AuditEventMessage::sign),
+/// which refuses a reserved action first (CONTRACT.md §8) and clears the
+/// signature field before serializing.
 pub fn sign_payload(key: &[u8], payload_json: &[u8]) -> String {
     let mut mac =
         <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");

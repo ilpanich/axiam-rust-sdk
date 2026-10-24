@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 // `--no-default-features` consumer can apply the rule to a token it obtained
 // through its own transport.
 use crate::AxiamError;
+#[cfg(any(feature = "rest", feature = "actix"))]
+use crate::client::OmitBrowserCredentials;
 
 /// The AXIAM JWKS endpoint path — organization-wide, not tenant-scoped
 /// (RESEARCH.md D-11). This is the only correct path; do not substitute a
@@ -441,7 +443,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// consumer that already has the thumbprint from its TLS stack (most do —
 /// rustls, OpenSSL and Go's `crypto/tls` all expose the peer certificate) can
 /// apply the rule without pulling either crate in.
-#[cfg(any(feature = "rest", feature = "actix", feature = "amqp"))]
+#[cfg(any(feature = "rest", feature = "actix"))]
 pub fn certificate_thumbprint_s256(der: &[u8]) -> String {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
@@ -1287,6 +1289,7 @@ impl JwksVerifier {
         let response = self
             .http_client
             .get(self.jwks_url.clone())
+            .omit_browser_credentials()
             .send()
             .await
             .map_err(|e| AxiamError::Network {

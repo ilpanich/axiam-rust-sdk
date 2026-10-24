@@ -151,28 +151,12 @@ impl AuditEventMessage {
         if !is_reserved_audit_action(&self.action) {
             return Ok(());
         }
-        let message = "action: the `tenants.` and `gdpr.` namespaces are reserved for the \
-                       server's own audit records and are refused by the audit ingestion \
-                       (CONTRACT.md §8)"
-            .to_owned();
-        #[cfg(feature = "rest")]
-        {
-            use crate::management::{FieldError, ValidationError};
-            Err(AxiamError::network_with_source(
-                message.clone(),
-                Box::new(ValidationError {
-                    status: 400,
-                    operation: "audit.publish",
-                    message: message.clone(),
-                    fields: vec![FieldError {
-                        field: "action".to_owned(),
-                        message,
-                    }],
-                }),
-            ))
-        }
-        #[cfg(not(feature = "rest"))]
-        Err(AxiamError::network(message))
+        Err(crate::management::error::local_refusal(
+            "audit.publish",
+            "action",
+            "the `tenants.` and `gdpr.` namespaces are reserved for the server's own audit \
+             records and are refused by the audit ingestion (CONTRACT.md §8)",
+        ))
     }
 
     /// Sign this message in place with the tenant's derived AMQP subkey,

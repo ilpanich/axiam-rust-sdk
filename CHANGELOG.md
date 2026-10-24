@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-23
+
+`axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
+AXIAM 1.1.2). `CONTRACT.md` is vendored byte for byte from `b3f8687`; `openapi.json` and
+`management-registry.json` from `356a6da` (platform PR #793 merge; `proto/` unchanged). The surface
+stays 202 operations in 29 namespaces. Nothing in this release is source-breaking (the gating
+below only changes feature sets that did not compile), so it is a patch.
+
+### Changed
+
+- **`/oauth2/*` and the JWKS fetch no longer follow redirects** (recorded here as C163-17 asks; this
+  has been so since 1.1.1, when those calls moved to the session-free transport, which is built
+  with redirects off): a `3xx` from the token, introspection, revocation, device-authorization,
+  PAR, CIBA, token-exchange or UMA-ticket endpoint, or from the JWKS URI, is the answer and is
+  not followed (native targets; in the browser build, redirects are the browser's). The SSF
+  receiver's JWKS and discovery fetches use that transport too (below).
+
 ### Security
 
 - **CIBA PS256 request signing no longer goes through the `rsa` crate** (RUSTSEC-2023-0071, the
@@ -39,6 +56,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the mTLS key goes to rustls) and a review date of 2026-12-23.
 - **Behaviour note:** the browser (wasm32) build refuses an ES256 request signer, since `ring` is
   not built there (as it refuses a PS256 signer, above); EdDSA is unchanged.
+
+### Fixed
+
+- **A `429 rate_limit_exceeded` on a device poll is waited out** (contract 1.64, §14.2 rule 9; item
+  b): `device_login` waits `Retry-After` as a minimum (never less than one interval, capped at the
+  `expires_in` deadline), counts it as one interval, does not raise the interval for it, and polls
+  again. Only the `400 slow_down` raises the interval. A single `device_poll` still returns the
+  `OAuthProtocolError`. Tested on a recorded sleeper, not the wall clock (§14.6).
+- **The SSF receiver's JWKS and discovery fetches send no session cookie** (C163-13): they use
+  the session-free transport, so a client that signed in by cookie no longer sends `axiam_*` to
+  `/oauth2/jwks`.
+- **The `plan` refusal for an open-enum value this SDK cannot send carries a `ValidationError`**
+  (C163-07): `e.validation()` is `Some`, `fields[0].field` is the member; the message still names
+  the value, which `Unknown(String)` keeps.
+- **`--no-default-features --features amqp` compiles again** (C163-17; 52 errors since the
+  `uma`, `management` and `token` modules were added): the modules that need the REST transport
+  are gated on `rest`; `management::error` (the `ValidationError` of
+  `AuditEventMessage::check_action`) is not. CI builds that feature set from now on.
+- **A `5xx` on the device poll is a transport failure whatever its body** (contract 1.64 amended,
+  §14.2 rule 6; C164-03): AXIAM answers an internal fault `500 {"error":"server_error"}`, which
+  ended `device_login` with an authentication error; it is now retried like a bodiless `5xx`.
+- **Any `429` on a device poll is the rate-limit wait, whatever its body** (§14.2 rule 9 amended;
+  C164-04): a `429 {"error":"slow_down"}` (an older server or an intermediary) no longer raises the
+  interval, and a bodiless `429` honours `Retry-After` as a floor. Only the `400 slow_down` raises it.
+- **The `device_login` deadline is `expires_in` on the clock** (§14.2 rule 4; C164-05): taken when
+  the grant is issued, so the time requests and the callback take counts against it, not only the
+  waits. Before, a slow server could be polled after the real deadline.
+- **The device poll is retried inside the attempt on a `5xx` or a transport failure** (§14.2 rule
+  6, §16.2; C164-25): with retry on (the default), a poll that meets one makes up to three requests,
+  honouring `Retry-After` as a floor and never waiting past `expires_in`, before `device_login`
+  takes its next interval; a `429` and every other `4xx` are not retried. `.retry_enabled(false)`
+  keeps one request per poll.
+- **A single `device_poll` types a `5xx` as `AxiamError::Network` whatever its body** (§14.2 rule 6;
+  C164-27): `500 {"error":"server_error"}` was an `Auth` error with `oauth_error_code()` set, which
+  ended a hand-rolled loop. It is now a network error with no OAuth code, as `ciba_poll` has it.
+- **Test strength and one more floor, from the second review round** (C164-38, C164-41): the
+  in-poll retry is now tested against a real transport failure (a raw socket that drops the
+  connection: two drops then the tokens are three requests; three drops surface the network error;
+  retry off is one request), through a single `device_poll` and through `device_login`. When the
+  in-poll budget is exhausted on a `5xx` that carried `Retry-After`, the loop's next poll now waits
+  at least that long (§16.1: the hint is a floor) instead of one interval.
+- On wasm32, `/oauth2/*` requests, the JWKS and SSF discovery GETs, the SSF poll and the RFC 7592
+  calls use `credentials: "omit"` (C163-17, C164-07).
+
+### Internal
+
+- CHANGELOG text (C164-48): the 1.1.2 intro paragraph and one bullet are wrapped at about 100
+  columns, as the rest of the file is.
+- The §14.6 control of the no-cookie test (a `logout`) now runs after the `/oauth2/*` calls;
+  `check_action` loses its dead non-`rest` branch; `sign_payload`'s doc points to
+  `AuditEventMessage::sign`.
+- The message of the reserved-action refusal (`AuditEventMessage::check_action` / `sign`) now reads
+  `audit.publish: action: the `tenants.` and `gdpr.` namespaces are reserved … (CONTRACT.md §8); no
+  request was sent`, as every local refusal of this SDK does (`local_refusal`). Its type, status 400,
+  `ValidationError` source, `operation` and `fields[0].field == "action"` are unchanged; it still
+  never names the action.
 
 ## [1.1.1] - 2026-10-20
 

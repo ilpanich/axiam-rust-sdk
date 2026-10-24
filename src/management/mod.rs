@@ -87,19 +87,32 @@
 //! hand-maintained table of 147 names is wrong by the next release. Everything
 //! else here is written by hand. CI regenerates and diffs.
 
+// `error` (the `ValidationError` a local refusal carries) is pure data and
+// builds under any feature set, `--no-default-features --features amqp`
+// included; everything that makes a request needs the `rest` transport.
+#[cfg(feature = "rest")]
 pub(crate) mod checks;
 pub mod error;
+#[cfg(feature = "rest")]
 pub mod manifest;
+#[cfg(feature = "rest")]
 pub mod models;
+#[cfg(feature = "rest")]
 pub mod ops;
+#[cfg(feature = "rest")]
 pub mod page;
+#[cfg(feature = "rest")]
 pub(crate) mod request;
+#[cfg(feature = "rest")]
 pub(crate) mod scope;
 
+#[cfg(feature = "rest")]
 pub use checks::SsfStreamChanges;
 pub use error::{FieldError, ValidationError};
+#[cfg(feature = "rest")]
 pub use page::{Page, PageRequest};
 
+#[cfg(feature = "rest")]
 impl models::RoleAssignment {
     /// Whether this assignment reaches the descendants of its resource —
     /// CONTRACT.md §27.13 S-10 rule 3.

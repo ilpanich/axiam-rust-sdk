@@ -29,7 +29,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::client::AxiamClient;
+use crate::client::{AxiamClient, OmitBrowserCredentials};
 use crate::error::{AxiamError, SetFailureReason};
 use crate::sensitive::Sensitive;
 use crate::token::jwks::JwksVerifier;
@@ -397,7 +397,7 @@ impl SsfReceiver {
                 // §34.2 P6: the key cache expires within ten minutes, and a
                 // failed fetch counts toward the once-a-minute limit.
                 Ok::<_, AxiamError>(
-                    JwksVerifier::for_jwks_url(self.client.http().clone(), url)
+                    JwksVerifier::for_jwks_url(self.client.http_bare().clone(), url)
                         .limiting_failed_fetches(),
                 )
             })
@@ -431,8 +431,9 @@ impl SsfReceiver {
         let url = parse_secure("discovery_url", discovery_url)?;
         let response = self
             .client
-            .http()
+            .http_bare()
             .get(url)
+            .omit_browser_credentials()
             .send()
             .await
             .map_err(|e| AxiamError::network(format!("SSF configuration fetch failed: {e}")))?;
@@ -676,6 +677,7 @@ impl SsfReceiver {
                     .post(url.clone())
                     .bearer_auth(token.expose())
                     .json(body)
+                    .omit_browser_credentials()
                     .send()
                     .await
                     .map_err(|e| {
