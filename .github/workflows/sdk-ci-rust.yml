@@ -188,9 +188,13 @@ jobs:
 
       # Ignored advisory rationale:
       #   RUSTSEC-2023-0071 — Marvin attack (rsa timing sidechannel); no upstream fix.
-      #   `rsa` is pulled in transitively by jsonwebtoken for RS* algorithm support.
-      #   The SDK only VERIFIES tokens (public-key ops) and AXIAM signs with EdDSA
-      #   (Ed25519), so the vulnerable RSA private-key path is never exercised.
+      #   `rsa` is pulled in transitively by jsonwebtoken's `rust_crypto` backend.
+      #   No RSA private-key operation goes through it: the SDK's only RSA
+      #   signing, the CIBA PS256 signed request (src/oidc/ciba.rs), is signed
+      #   by `ring`, including its construction-time probe. jsonwebtoken still
+      #   uses `rsa` to VERIFY PS256/RS256 signatures, which are public-key
+      #   operations, outside the advisory's private-key timing leak.
+      #   Review by 2026-12-23.
       #
       #   RUSTSEC-2026-0387 — crypto-bigint <0.7.6, timing variability in operations meant to
       #   be constant time. Held at 0.5.5 by elliptic-curve 0.13 (jsonwebtoken's p256/p384 and
@@ -199,7 +203,7 @@ jobs:
       #   signing of the CIBA signed request with the caller's key, used to run on that
       #   arithmetic through jsonwebtoken's rust_crypto backend; it is now made by `ring`
       #   (src/oidc/ciba.rs: `CibaRequestSigner::from_pem` ES256 arm, `es256_sign`,
-      #   `es256_jws`; pinned by the test `the_es256_signer_is_rings_not_rust_cryptos`,
+      #   `ring_jws`; pinned by the test `the_es256_signer_is_rings_not_rust_cryptos`,
       #   which relies on ring's randomised nonce against RFC 6979 determinism). What
       #   remains is public-key only: ES256/ES384 verification of ID tokens, logout tokens,
       #   SETs and DPoP proofs (src/token/jwks.rs, src/token/dpop.rs; the SDK generates no

@@ -395,13 +395,15 @@ required-features = ["rest"]
 # decision memo, §23 SRP — is portable and shared.
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# ES256 signing of the CIBA signed request (src/oidc/ciba.rs) goes through `ring`,
-# not through `jsonwebtoken`'s `rust_crypto` backend: that backend's `p256` 0.13
-# ECDSA runs its scalar arithmetic on `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387).
-# `ring` is already in the graph (tonic's `tls-ring`, rustls); this names it.
+# ES256 and PS256 signing of the CIBA signed request (src/oidc/ciba.rs) go
+# through `ring`, not through `jsonwebtoken`'s `rust_crypto` backend: that
+# backend's `p256` 0.13 ECDSA runs its scalar arithmetic on `crypto-bigint` 0.5.5
+# (RUSTSEC-2026-0387), and it signs RSA with the `rsa` crate, whose private-key
+# operations are not constant time (RUSTSEC-2023-0071, the Marvin attack).
+# `zeroize` wipes the decoded private-key DER and its base64 text once ring has
+# parsed the key. Both are already in the graph (tonic's `tls-ring`, rustls);
+# this names them.
 ring = { version = "0.17", optional = true }
-# Wipes the decoded private-key DER and its base64 text once ring has parsed the key
-# (src/oidc/ciba.rs). Already in the graph; this names it.
 zeroize = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies", "form"], optional = true }
 

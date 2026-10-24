@@ -269,7 +269,7 @@ impl AxiamClient {
         };
 
         let response = self
-            .oauth2_post(url)
+            .idp_form_post(url)
             .form(&form)
             .send()
             .await

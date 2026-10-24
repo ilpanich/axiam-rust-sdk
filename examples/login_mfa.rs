@@ -14,6 +14,9 @@
 //! `cargo build --example login_mfa --features rest`. Running it end-to-end
 //! requires a reachable AXIAM server matching the configured base URL.
 //!
+//! `AXIAM_PASSWORD` is required (there is no default); the example exits with an
+//! error when it is unset.
+//!
 //! Run: `cargo run --example login_mfa --features rest`
 
 use axiam_sdk::client::AxiamClient;
@@ -30,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a login body that carries no `org_id`/`org_slug`.
     let org_slug = std::env::var("AXIAM_ORG_SLUG").unwrap_or_else(|_| "acme".to_string());
     let email = std::env::var("AXIAM_EMAIL").unwrap_or_else(|_| "user@example.com".to_string());
-    let password = std::env::var("AXIAM_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
+    let password = std::env::var("AXIAM_PASSWORD").map_err(|_| "AXIAM_PASSWORD must be set")?;
     let totp_code = std::env::var("AXIAM_TOTP_CODE").unwrap_or_else(|_| "000000".to_string());
 
     let client = AxiamClient::builder()
