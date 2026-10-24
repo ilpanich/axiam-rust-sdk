@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Marvin attack): `CibaRequestSigner` under `CibaSigningAlg::Ps256` signed the caller's RSA key
   through `jsonwebtoken`'s `rust_crypto` backend, whose `rsa` private-key operations are not
   constant time, and so did the construction-time probe. Both are now signed by `ring`
-  (`RsaKeyPair`, `RSA_PSS_SHA256`), and the compact JWS is assembled here; EdDSA and ES256 are
-  unchanged. Both PEM forms are still accepted: PKCS#8 `PRIVATE KEY` and PKCS#1 `RSA PRIVATE KEY`.
+  (`RsaKeyPair`, `RSA_PSS_SHA256`), and the compact JWS is assembled here; EdDSA is unchanged,
+  and ES256 moves to `ring` too (below). Both PEM forms are still accepted: PKCS#8 `PRIVATE KEY`
+  and PKCS#1 `RSA PRIVATE KEY`.
   The decoded key DER and its base64 text are wiped after parsing. `ring` and `zeroize` are named
   as native-only dependencies of `rest`; both were already in the graph.
   - **Keys ring does not sign with are refused.** A PS256 key must be 2048 to 8192 bits and a
@@ -27,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `RUSTSEC-2023-0071` audit ignore stays, with a corrected rationale: `jsonwebtoken` still
     uses `rsa` only to verify PS256/RS256 signatures, which are public-key operations. Review by
     2026-12-23.
+- **ES256 request signing no longer runs on `crypto-bigint` 0.5.5** (RUSTSEC-2026-0387, timing
+  variability in operations meant to be constant time): `CibaRequestSigner::from_pem` with
+  `CibaSigningAlg::Es256` signed the CIBA signed request with the caller's P-256 key through
+  `jsonwebtoken`'s RustCrypto backend (`p256` 0.13, whose scalar arithmetic is on that crate). It
+  is now signed by `ring` (a randomised nonce; pinned by a test), the key being a PKCS#8
+  `PRIVATE KEY` PEM as before. The advisory is held at 0.5.5 by `elliptic-curve` 0.13, which has
+  no fix yet, so it is on the audit ignore list with the reachability analysis (no other
+  secret-key use of that arithmetic remains: ES256/ES384 are verify-only, OPAQUE is Ristretto255,
+  the mTLS key goes to rustls) and a review date of 2026-12-23.
+- **Behaviour note:** the browser (wasm32) build refuses an ES256 request signer, since `ring` is
+  not built there (as it refuses a PS256 signer, above); EdDSA is unchanged.
 
 ## [1.1.1] - 2026-10-20
 
