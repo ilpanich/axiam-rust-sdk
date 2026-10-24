@@ -891,18 +891,21 @@ struct SignedClaims<'a> {
 }
 
 /// The PKCS#8 DER of a `PRIVATE KEY` PEM (the only form ES256 keys take here).
+/// Both the base64 text (a copy of the key) and the decoded DER are wiped on drop.
 #[cfg(not(target_arch = "wasm32"))]
-fn pkcs8_der_from_pem(pem: &[u8]) -> Option<Vec<u8>> {
+fn pkcs8_der_from_pem(pem: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
     use base64::Engine as _;
+    use zeroize::Zeroizing;
     let text = std::str::from_utf8(pem).ok()?;
     let body = text
         .trim()
         .strip_prefix("-----BEGIN PRIVATE KEY-----")?
         .strip_suffix("-----END PRIVATE KEY-----")?;
-    let compact: String = body.split_whitespace().collect();
+    let compact: Zeroizing<String> = Zeroizing::new(body.split_whitespace().collect());
     base64::engine::general_purpose::STANDARD
-        .decode(compact)
+        .decode(compact.as_bytes())
         .ok()
+        .map(Zeroizing::new)
 }
 
 /// ES256 (`r || s`, 64 bytes) over `message`, by `ring`. Randomised nonce.

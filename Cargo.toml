@@ -75,7 +75,7 @@ default = ["rest", "grpc", "amqp", "opaque"]
 # `jsonwebtoken` -> `ed25519-dalek` — so, exactly like `sha2`/`getrandom`/
 # `base64` above, this only promotes an already-present crate to a named direct
 # dependency for the code path that needs it. No new supply-chain surface.
-rest = ["dep:reqwest", "dep:ring", "dep:sha2", "dep:getrandom", "dep:base64", "dep:hmac", "dep:hex", "dep:subtle"]
+rest = ["dep:reqwest", "dep:ring", "dep:zeroize", "dep:sha2", "dep:getrandom", "dep:base64", "dep:hmac", "dep:hex", "dep:subtle"]
 # CONTRACT.md §23 OPAQUE (RFC 9807). Its own feature, and in `default`, because
 # it is genuinely optional for a consumer: it is the only thing in this crate
 # that pulls an elliptic-curve stack and an Argon2/scrypt implementation, and a
@@ -400,6 +400,9 @@ required-features = ["rest"]
 # ECDSA runs its scalar arithmetic on `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387).
 # `ring` is already in the graph (tonic's `tls-ring`, rustls); this names it.
 ring = { version = "0.17", optional = true }
+# Wipes the decoded private-key DER and its base64 text once ring has parsed the key
+# (src/oidc/ciba.rs). Already in the graph; this names it.
+zeroize = { version = "1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "cookies", "form"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
