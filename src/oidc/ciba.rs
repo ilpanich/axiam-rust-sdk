@@ -459,7 +459,7 @@ impl AxiamClient {
             .collect();
 
         let response = self
-            .oauth2_post(url)
+            .idp_form_post(url)
             .form(&body)
             .send()
             .await
@@ -576,7 +576,7 @@ impl AxiamClient {
         let wire: TokenResponseWire = runner
             .run_until(retry_bound.as_ref(), |_| async move {
                 let response = self
-                    .oauth2_post(url.clone())
+                    .idp_form_post(url.clone())
                     .form(form)
                     .send()
                     .await
