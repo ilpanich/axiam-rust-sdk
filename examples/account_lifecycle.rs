@@ -185,9 +185,9 @@ async fn finish_a_password_reset(
     Ok(())
 }
 
-/// Stand-in for showing the enrolment URI to a human.
-fn render_qr(totp_uri: &str) {
-    println!("scan this: {}…", &totp_uri[..totp_uri.len().min(32)]);
+/// Stand-in for showing the enrolment URI to a human (as a QR code — never print it).
+fn render_qr(_totp_uri: &str) {
+    println!("scan the enrolment QR code");
 }
 
 fn env_or(key: &str, fallback: &str) -> String {
