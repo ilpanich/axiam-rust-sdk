@@ -1,5 +1,16 @@
 [advisories]
-ignore = ["RUSTSEC-2023-0071"]
+# RUSTSEC-2023-0071 — Marvin attack (`rsa` private-key timing sidechannel); no
+# upstream fix. `rsa` is pulled in transitively by jsonwebtoken's `rust_crypto`
+# backend. No RSA private-key operation goes through it: the SDK's only RSA
+# signing, the CIBA PS256 signed request (src/oidc/ciba.rs), is signed by
+# `ring`, including its construction-time probe. jsonwebtoken still uses `rsa`
+# to VERIFY PS256/RS256 signatures, which are public-key operations, outside the
+# advisory's private-key timing leak. Review by 2026-12-23.
+# RUSTSEC-2026-0387 (crypto-bigint 0.5.5 via elliptic-curve 0.13): no secret-key use of
+# that arithmetic remains in the SDK — ES256 request signing is made by `ring`
+# (src/oidc/ciba.rs), the rest is verification and Ristretto255 OPAQUE. The full
+# rationale is next to the audit step in .github/workflows/sdk-ci-rust.yml. Review: 2026-12-23.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]
 
 # only fail on vulnerabilities, not unmaintained/unsound warnings
 informational_warnings = ["unmaintained"]

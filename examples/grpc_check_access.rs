@@ -16,6 +16,9 @@
 //! from environment variables and does not require a live AXIAM server to
 //! `cargo build --example grpc_check_access --features "rest grpc"`.
 //!
+//! `AXIAM_PASSWORD` is required (there is no default); the example exits with an
+//! error when it is unset.
+//!
 //! Run: `cargo run --example grpc_check_access --features "rest grpc"`
 
 use std::sync::Arc;
@@ -54,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("AXIAM_GRPC_URL").unwrap_or_else(|_| "https://localhost:9443".to_string());
     let tenant_slug = std::env::var("AXIAM_TENANT_SLUG").unwrap_or_else(|_| "acme".to_string());
     let email = std::env::var("AXIAM_EMAIL").unwrap_or_else(|_| "user@example.com".to_string());
-    let password = std::env::var("AXIAM_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
+    let password = std::env::var("AXIAM_PASSWORD").map_err(|_| "AXIAM_PASSWORD must be set")?;
 
     let base_url_parsed = url::Url::parse(&base_url)?;
     let jar = Arc::new(reqwest::cookie::Jar::default());
