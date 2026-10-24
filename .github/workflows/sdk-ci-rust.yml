@@ -188,9 +188,13 @@ jobs:
 
       # Ignored advisory rationale:
       #   RUSTSEC-2023-0071 — Marvin attack (rsa timing sidechannel); no upstream fix.
-      #   `rsa` is pulled in transitively by jsonwebtoken for RS* algorithm support.
-      #   The SDK only VERIFIES tokens (public-key ops) and AXIAM signs with EdDSA
-      #   (Ed25519), so the vulnerable RSA private-key path is never exercised.
+      #   `rsa` is pulled in transitively by jsonwebtoken's `rust_crypto` backend.
+      #   No RSA private-key operation goes through it: the SDK's only RSA
+      #   signing, the CIBA PS256 signed request (src/oidc/ciba.rs), is signed
+      #   by `ring`, including its construction-time probe. jsonwebtoken still
+      #   uses `rsa` to VERIFY PS256/RS256 signatures, which are public-key
+      #   operations, outside the advisory's private-key timing leak.
+      #   Review by 2026-12-23.
       - name: Dependency vulnerability scan (CI-03)
         if: matrix.toolchain == 'stable'
         run: |

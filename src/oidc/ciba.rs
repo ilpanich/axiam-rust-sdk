@@ -121,8 +121,19 @@ impl CibaSigningAlg {
 #[derive(Clone)]
 pub struct CibaRequestSigner {
     alg: CibaSigningAlg,
-    key: Sensitive<EncodingKey>,
+    key: Sensitive<RequestKey>,
     kid: Option<String>,
+}
+
+/// What signs. PS256 is signed by `ring`, never by `jsonwebtoken`'s RustCrypto
+/// backend: that backend signs RSA with the `rsa` crate, whose private-key
+/// operations are not constant time (RUSTSEC-2023-0071, the Marvin attack), and
+/// a caller's private key must not meet it. EdDSA and ES256 keep `jsonwebtoken`.
+#[derive(Clone)]
+enum RequestKey {
+    Jwt(EncodingKey),
+    #[cfg(not(target_arch = "wasm32"))]
+    Ps256(Arc<ring::signature::RsaKeyPair>),
 }
 
 impl std::fmt::Debug for CibaRequestSigner {
@@ -138,6 +149,10 @@ impl std::fmt::Debug for CibaRequestSigner {
 impl CibaRequestSigner {
     /// A signer from a PEM private key (PKCS#8 for EdDSA and ES256; PKCS#1 or
     /// PKCS#8 for PS256) and the algorithm it signs under.
+    ///
+    /// PS256 is signed by `ring`, so the RSA key must be one `ring` signs with:
+    /// 2048 to 8192 bits, a multiple of 512 bits. It is not available in the
+    /// browser (wasm32) build, which refuses it.
     ///
     /// # Errors
     /// A local `ValidationError`, before any request, when the PEM is not a
@@ -155,13 +170,54 @@ impl CibaRequestSigner {
             )
         };
         let key = match alg {
-            CibaSigningAlg::EdDsa => EncodingKey::from_ed_pem(pem.expose()),
-            CibaSigningAlg::Es256 => EncodingKey::from_ec_pem(pem.expose()),
-            CibaSigningAlg::Ps256 => EncodingKey::from_rsa_pem(pem.expose()),
-        }
-        .map_err(|_| refuse())?;
+            CibaSigningAlg::EdDsa => EncodingKey::from_ed_pem(pem.expose())
+                .map(RequestKey::Jwt)
+                .map_err(|_| refuse())?,
+            CibaSigningAlg::Es256 => EncodingKey::from_ec_pem(pem.expose())
+                .map(RequestKey::Jwt)
+                .map_err(|_| refuse())?,
+            #[cfg(not(target_arch = "wasm32"))]
+            CibaSigningAlg::Ps256 => {
+                // PKCS#8 `PRIVATE KEY` or PKCS#1 `RSA PRIVATE KEY`, as
+                // `EncodingKey::from_rsa_pem` took.
+                let parsed = if let Some(der) = pkcs8_der_from_pem(pem.expose()) {
+                    ring::signature::RsaKeyPair::from_pkcs8(&der)
+                } else {
+                    let der = pkcs1_der_from_pem(pem.expose()).ok_or_else(refuse)?;
+                    ring::signature::RsaKeyPair::from_der(&der)
+                };
+                let pair = parsed.map_err(|e| match e.to_string().as_str() {
+                    "TooSmall" | "TooLarge" | "PrivateModulusLenNotMultipleOf512Bits" => {
+                        local_refusal(
+                            "ciba_initiate",
+                            "signing_key",
+                            "a PS256 key must be 2048 to 8192 bits, a multiple of 512 bits: the RSA sizes ring signs with (CONTRACT.md §33.2)",
+                        )
+                    }
+                    _ => refuse(),
+                })?;
+                RequestKey::Ps256(Arc::new(pair))
+            }
+            #[cfg(target_arch = "wasm32")]
+            CibaSigningAlg::Ps256 => {
+                return Err(local_refusal(
+                    "ciba_initiate",
+                    "signing_key",
+                    "PS256 request signing is not available in the browser build (CONTRACT.md §33.2)",
+                ));
+            }
+        };
         // A key that parses is not yet a key for this algorithm: prove it signs.
-        jsonwebtoken::crypto::sign(b"axiam-ciba-probe", &key, alg.jose()).map_err(|_| refuse())?;
+        match &key {
+            RequestKey::Jwt(k) => {
+                jsonwebtoken::crypto::sign(b"axiam-ciba-probe", k, alg.jose())
+                    .map_err(|_| refuse())?;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            RequestKey::Ps256(pair) => {
+                ps256_sign(pair, b"axiam-ciba-probe").ok_or_else(refuse)?;
+            }
+        }
         Ok(Self {
             alg,
             key: Sensitive::new(key),
@@ -172,6 +228,15 @@ impl CibaRequestSigner {
     /// The algorithm this signer uses.
     pub fn alg(&self) -> CibaSigningAlg {
         self.alg
+    }
+
+    /// The `ring` RSA key pair, when this signer holds one (PS256, native).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn ring_rsa(&self) -> Option<&ring::signature::RsaKeyPair> {
+        match self.key.expose() {
+            RequestKey::Ps256(pair) => Some(pair),
+            RequestKey::Jwt(_) => None,
+        }
     }
 }
 
@@ -846,6 +911,69 @@ struct SignedClaims<'a> {
     members: serde_json::Map<String, Value>,
 }
 
+/// The DER inside a `-----BEGIN {label}-----` PEM. Both the base64 text (a copy
+/// of the key) and the decoded DER are wiped on drop.
+#[cfg(not(target_arch = "wasm32"))]
+fn der_from_pem(pem: &[u8], label: &str) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    use base64::Engine as _;
+    use zeroize::Zeroizing;
+    let text = std::str::from_utf8(pem).ok()?;
+    let body = text
+        .trim()
+        .strip_prefix(&format!("-----BEGIN {label}-----"))?
+        .strip_suffix(&format!("-----END {label}-----"))?;
+    let compact: Zeroizing<String> = Zeroizing::new(body.split_whitespace().collect());
+    base64::engine::general_purpose::STANDARD
+        .decode(compact.as_bytes())
+        .ok()
+        .map(Zeroizing::new)
+}
+
+/// The PKCS#8 DER of a `PRIVATE KEY` PEM.
+#[cfg(not(target_arch = "wasm32"))]
+fn pkcs8_der_from_pem(pem: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    der_from_pem(pem, "PRIVATE KEY")
+}
+
+/// The PKCS#1 `RSAPrivateKey` DER of an `RSA PRIVATE KEY` PEM.
+#[cfg(not(target_arch = "wasm32"))]
+fn pkcs1_der_from_pem(pem: &[u8]) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    der_from_pem(pem, "RSA PRIVATE KEY")
+}
+
+/// PS256 (RSASSA-PSS, SHA-256, modulus-length bytes) over `message`, by
+/// `ring`. Randomised salt.
+#[cfg(not(target_arch = "wasm32"))]
+fn ps256_sign(pair: &ring::signature::RsaKeyPair, message: &[u8]) -> Option<Vec<u8>> {
+    let mut signature = vec![0; pair.public().modulus_len()];
+    pair.sign(
+        &ring::signature::RSA_PSS_SHA256,
+        &ring::rand::SystemRandom::new(),
+        message,
+        &mut signature,
+    )
+    .ok()?;
+    Some(signature)
+}
+
+/// A compact JWS (RFC 7515) signed PS256 by `ring`.
+#[cfg(not(target_arch = "wasm32"))]
+fn ps256_jws<C: Serialize>(
+    header: &Header,
+    claims: &C,
+    pair: &ring::signature::RsaKeyPair,
+) -> Option<String> {
+    use base64::Engine as _;
+    let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let input = format!(
+        "{}.{}",
+        b64.encode(serde_json::to_vec(header).ok()?),
+        b64.encode(serde_json::to_vec(claims).ok()?)
+    );
+    let signature = ps256_sign(pair, input.as_bytes())?;
+    Some(format!("{input}.{}", b64.encode(signature)))
+}
+
 /// The CIBA Core §7.1.1 signed request: every member inside the JWT, plus
 /// `iss`, `aud`, `iat`, `nbf`, `exp` and a fresh `jti`.
 fn signed_request(
@@ -879,15 +1007,18 @@ fn signed_request(
     };
     let mut header = Header::new(signer.alg.jose());
     header.kid = signer.kid.clone();
-    jsonwebtoken::encode(&header, &claims, signer.key.expose())
-        .map(Sensitive::new)
-        .map_err(|_| {
-            local_refusal(
-                "ciba_initiate",
-                "signing_key",
-                "the signed request could not be signed with the given key",
-            )
-        })
+    let signed = match signer.key.expose() {
+        RequestKey::Jwt(key) => jsonwebtoken::encode(&header, &claims, key).ok(),
+        #[cfg(not(target_arch = "wasm32"))]
+        RequestKey::Ps256(pair) => ps256_jws(&header, &claims, pair),
+    };
+    signed.map(Sensitive::new).ok_or_else(|| {
+        local_refusal(
+            "ciba_initiate",
+            "signing_key",
+            "the signed request could not be signed with the given key",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -933,5 +1064,162 @@ mod tests {
         let expired = AxiamError::oauth_protocol_error("expired_token", "late");
         assert!(denied.is_access_denied() && !denied.is_expired_token());
         assert!(expired.is_expired_token() && !expired.is_access_denied());
+    }
+
+    /// Runs the `openssl` CLI with `args`, `stdin` piped in; its stdout.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn openssl(args: &[&str], stdin: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("openssl")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the openssl CLI generates the test RSA keys");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(stdin)
+            .expect("write");
+        let out = child.wait_with_output().expect("openssl");
+        assert!(
+            out.status.success(),
+            "openssl {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// A fresh RSA key of `bits`, generated here by the `openssl` CLI (ring
+    /// cannot generate RSA keys, and rcgen can only through aws-lc-rs): no key
+    /// literal. Its PKCS#8 `PRIVATE KEY` PEM, its PKCS#1 `RSA PRIVATE KEY` PEM,
+    /// and its SPKI `PUBLIC KEY` PEM.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn rsa_pems(bits: u32) -> (String, String, String) {
+        let pkcs8 = openssl(
+            &[
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                &format!("rsa_keygen_bits:{bits}"),
+            ],
+            b"",
+        );
+        let pkcs1 = openssl(&["pkey", "-traditional"], &pkcs8);
+        let public = openssl(&["pkey", "-pubout"], &pkcs8);
+        let text = |b: Vec<u8>| String::from_utf8(b).expect("PEM is text");
+        (text(pkcs8), text(pkcs1), text(public))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ps256_signer(pem: &str) -> Result<CibaRequestSigner, AxiamError> {
+        CibaRequestSigner::from_pem(
+            CibaSigningAlg::Ps256,
+            &Sensitive::new(pem.as_bytes().to_vec()),
+            Some("k1".into()),
+        )
+    }
+
+    // A ring-signed PS256 request is a valid PS256 JWS, from either PEM form
+    // `EncodingKey::from_rsa_pem` took: it verifies under the key's public
+    // half with `jsonwebtoken`, which only verifies here (a public-key
+    // operation).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_ring_signed_request_verifies_as_ps256_from_pkcs8_and_pkcs1() {
+        let (pkcs8, pkcs1, public) = rsa_pems(2048);
+        assert!(pkcs8.starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert!(pkcs1.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        let key = jsonwebtoken::DecodingKey::from_rsa_pem(public.as_bytes()).expect("public");
+        let mut validation = jsonwebtoken::Validation::new(Algorithm::PS256);
+        validation.set_audience(&["https://issuer.example"]);
+        validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss"]);
+        let params = CibaInitiateParams::new("openid", CibaUserHint::LoginHint("alice".into()));
+        for pem in [&pkcs8, &pkcs1] {
+            let signer = ps256_signer(pem).expect("an RSA key");
+            let jws = signed_request(&params, &signer, "client-1", "https://issuer.example")
+                .expect("signs");
+            let token = jsonwebtoken::decode::<Value>(jws.expose(), &key, &validation)
+                .expect("verifies as PS256");
+            assert_eq!(token.header.alg, Algorithm::PS256);
+            assert_eq!(token.header.kid.as_deref(), Some("k1"));
+            assert_eq!(token.claims["iss"], "client-1");
+            assert_eq!(token.claims["login_hint"], "alice");
+        }
+    }
+
+    /// RUSTSEC-2023-0071: a caller's RSA key never reaches `jsonwebtoken`'s
+    /// RustCrypto backend, whose `rsa` crate's private-key operations are not
+    /// constant time. The signer is `ring`'s.
+    ///
+    /// The discriminator is the key the signer holds, read through the
+    /// `#[cfg(test)]` accessor `ring_rsa`, not the signature: PSS draws a fresh
+    /// salt in both backends, so no output property (unlike ES256's RFC 6979
+    /// nonce) tells them apart. The accessor returns the `ring` key pair only
+    /// for `RequestKey::Ps256`, and `signed_request` signs with exactly that
+    /// variant's pair, so `Some` here means the request is signed by `ring`.
+    /// The held pair is shown to be the caller's key (its signature verifies
+    /// under the caller's public key), and an EdDSA signer reads `None`, so the
+    /// accessor discriminates rather than always answering `Some`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_ps256_signer_is_rings_not_rust_cryptos() {
+        let (pkcs8, pkcs1, public) = rsa_pems(2048);
+        let key = jsonwebtoken::DecodingKey::from_rsa_pem(public.as_bytes()).expect("public");
+        for pem in [&pkcs8, &pkcs1] {
+            let signer = ps256_signer(pem).expect("an RSA key");
+            let pair = signer
+                .ring_rsa()
+                .expect("a PS256 signer must hold the ring key pair");
+            assert_eq!(
+                pair.public().modulus_len(),
+                256,
+                "the caller's 2048-bit key"
+            );
+            let message = b"signed by the held ring pair";
+            let signature = ps256_sign(pair, message).expect("sign");
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
+            assert!(
+                jsonwebtoken::crypto::verify(&b64, message, &key, Algorithm::PS256)
+                    .expect("verify"),
+                "the held ring pair is the caller's key"
+            );
+        }
+
+        let ed = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .expect("generate");
+        use base64::Engine as _;
+        let ed_pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(ed.as_ref())
+        );
+        let eddsa = CibaRequestSigner::from_pem(
+            CibaSigningAlg::EdDsa,
+            &Sensitive::new(ed_pem.into_bytes()),
+            None,
+        )
+        .expect("an Ed25519 key");
+        assert!(eddsa.ring_rsa().is_none(), "EdDSA keeps jsonwebtoken");
+    }
+
+    // ring signs RSA from 2048 bits; a 1024-bit key, which `jsonwebtoken`
+    // took, is refused locally, saying why.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_ps256_key_under_2048_bits_is_refused_saying_why() {
+        let (pkcs8, pkcs1, _) = rsa_pems(1024);
+        for pem in [&pkcs8, &pkcs1] {
+            let err = ps256_signer(pem).expect_err("too small for ring");
+            let text = err.to_string();
+            assert!(
+                text.contains("a PS256 key must be 2048 to 8192 bits"),
+                "{text}"
+            );
+        }
     }
 }

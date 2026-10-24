@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **CIBA PS256 request signing no longer goes through the `rsa` crate** (RUSTSEC-2023-0071, the
+  Marvin attack): `CibaRequestSigner` under `CibaSigningAlg::Ps256` signed the caller's RSA key
+  through `jsonwebtoken`'s `rust_crypto` backend, whose `rsa` private-key operations are not
+  constant time, and so did the construction-time probe. Both are now signed by `ring`
+  (`RsaKeyPair`, `RSA_PSS_SHA256`), and the compact JWS is assembled here; EdDSA and ES256 are
+  unchanged. Both PEM forms are still accepted: PKCS#8 `PRIVATE KEY` and PKCS#1 `RSA PRIVATE KEY`.
+  The decoded key DER and its base64 text are wiped after parsing. `ring` and `zeroize` are named
+  as native-only dependencies of `rest`; both were already in the graph.
+  - **Keys ring does not sign with are refused.** A PS256 key must be 2048 to 8192 bits and a
+    multiple of 512 bits; one outside that range (for example a 1024-bit key, which `jsonwebtoken`
+    took) is refused by `from_pem` with a local validation error that says so. `ring` also
+    rejects some keys `rsa` took for other reasons (for example a public exponent below 65537);
+    those get the existing "not a private key that signs under the given algorithm" refusal.
+  - **The browser (wasm32) build refuses a PS256 signer**, with a local validation error, since
+    `ring` is native-only here.
+  - The `RUSTSEC-2023-0071` audit ignore stays, with a corrected rationale: `jsonwebtoken` still
+    uses `rsa` only to verify PS256/RS256 signatures, which are public-key operations. Review by
+    2026-12-23.
+
 ## [1.1.1] - 2026-10-20
 
 `axiam-sdk` 1.1.1 carries **contract 1.63** (axiam `d919ba0cc`, the release branch of AXIAM 1.1.1).
