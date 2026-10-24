@@ -9,6 +9,9 @@
 //! from environment variables and does not require a live AXIAM server to
 //! `cargo build --example rest_check_access --features rest`.
 //!
+//! `AXIAM_PASSWORD` is required (there is no default); the example exits with an
+//! error when it is unset.
+//!
 //! Run: `cargo run --example rest_check_access --features rest`
 
 use axiam_sdk::client::AxiamClient;
@@ -24,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // tenant (a tenant slug is only unique within an organization).
     let org_slug = std::env::var("AXIAM_ORG_SLUG").unwrap_or_else(|_| "acme".to_string());
     let email = std::env::var("AXIAM_EMAIL").unwrap_or_else(|_| "user@example.com".to_string());
-    let password = std::env::var("AXIAM_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
+    let password = std::env::var("AXIAM_PASSWORD").map_err(|_| "AXIAM_PASSWORD must be set")?;
 
     let client = AxiamClient::builder()
         .base_url(&base_url)?
