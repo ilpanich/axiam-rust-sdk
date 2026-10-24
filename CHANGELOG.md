@@ -24,6 +24,20 @@ below only changes feature sets that did not compile), so it is a patch.
   not followed (native targets; in the browser build, redirects are the browser's). The SSF
   receiver's JWKS and discovery fetches use that transport too (below).
 
+### Security
+
+- **ES256 request signing no longer runs on `crypto-bigint` 0.5.5** (RUSTSEC-2026-0387, timing
+  variability in operations meant to be constant time): `CibaRequestSigner::from_pem` with
+  `CibaSigningAlg::Es256` signed the CIBA signed request with the caller's P-256 key through
+  `jsonwebtoken`'s RustCrypto backend (`p256` 0.13, whose scalar arithmetic is on that crate). It
+  is now signed by `ring` (a randomised nonce; pinned by a test), the key being a PKCS#8
+  `PRIVATE KEY` PEM as before. The advisory is held at 0.5.5 by `elliptic-curve` 0.13, which has
+  no fix yet, so it is on the audit ignore list with the reachability analysis (no other
+  secret-key use of that arithmetic remains: ES256/ES384 are verify-only, OPAQUE is Ristretto255,
+  the mTLS key goes to rustls) and a review date of 2026-12-23.
+- **Behaviour note:** the browser (wasm32) build refuses an ES256 request signer, since `ring` is
+  not built there; EdDSA and PS256 are unchanged.
+
 ### Fixed
 
 - **A `429 rate_limit_exceeded` on a device poll is waited out** (contract 1.64, §14.2 rule 9; item
