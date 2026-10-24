@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 `axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
 AXIAM 1.1.2). `CONTRACT.md` is vendored byte for byte from `b3f8687`; `openapi.json` and
-`management-registry.json` from `fb92ec4` (unchanged since; `proto/` is unchanged). The surface
+`management-registry.json` from `356a6da` (platform PR #793 merge; `proto/` unchanged). The surface
 stays 202 operations in 29 namespaces. Nothing in this release is source-breaking (the gating
 below only changes feature sets that did not compile), so it is a patch.
 
