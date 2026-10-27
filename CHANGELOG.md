@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependency floors raised to the versions this release is built and tested against.** Every
+  direct requirement in `axiam-sdk`, `axiam-sdk-macros` and `axiam-sdk-wasm` now names the version
+  a fresh resolution picks today (for example `tokio` `1` -> `1.54`, `reqwest` `0.13` -> `0.13.5`,
+  `tonic`/`tonic-prost`/`tonic-prost-build` `0.14` -> `0.14.7`, `jsonwebtoken` `11` -> `11.1`,
+  `uuid` `1` -> `1.29`, `actix-web` `4` -> `4.18`, `lapin` `4` -> `4.12`, `ring` `0.17` -> `0.17.14`,
+  `wasm-bindgen` `0.2` -> `0.2.129`), instead of a bare major that also admitted releases nothing
+  here was ever compiled with. No major version changed: every direct dependency was already on
+  its newest major. A consumer whose `Cargo.lock` pins an older patch or minor of one of these gets
+  it moved forward by `cargo update -p <crate>`. All of the new floors declare a `rust-version` of
+  1.89 or lower, so the **MSRV stays Rust 1.89**.
+
 ## [1.1.2] - 2026-10-23
 
 `axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
