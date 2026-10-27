@@ -34,19 +34,19 @@ axiam-sdk = { path = "..", default-features = false, features = ["rest", "opaque
 # a real exchange inside the published artifact so that a miscompiled build is
 # caught by the smoke test rather than by a user who cannot log in.
 axiam-opaque = { path = "../vendor/axiam-opaque" }
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde-wasm-bindgen = "0.6"
-js-sys = "0.3"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+serde = { version = "1.0.229", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+js-sys = "0.3.106"
 # Resource ids are UUIDs; parsed at the boundary so a typo is a clear error.
-uuid = { version = "1", features = ["js"] }
+uuid = { version = "1.29", features = ["js"] }
 # Panics in wasm are otherwise a bare "unreachable executed" with no location.
 # This costs a few KB and turns every one of them into a readable console trace.
-console_error_panic_hook = "0.1"
+console_error_panic_hook = "0.1.7"
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3"
+wasm-bindgen-test = "0.3.79"
 
 [profile.release]
 # `s` rather than `3`: this artifact is downloaded over the network on page

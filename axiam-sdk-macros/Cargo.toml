@@ -46,9 +46,9 @@ proc-macro = true
 # 4.5-5.6 s without), so the default set is kept rather than pinned for its own
 # sake. `extra-traits` (`Debug`/`Eq`/`Hash` for every AST node), by far the most
 # expensive `syn` feature, was never enabled and stays off.
-syn = { version = "3", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"
+syn = { version = "3.0", features = ["full"] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
 
 [package.metadata.docs.rs]
 all-features = true
