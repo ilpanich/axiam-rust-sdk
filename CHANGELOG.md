@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-29
+
+### Changed
+
+- Bump rust-lang/crates-io-auth-action from 1.0.5 to 1.0.6
+
+- Bump taiki-e/install-action from 2.87.29 to 2.87.31
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump Swatinem/rust-cache from 2.9.2 to 2.9.3
+
 ## [1.1.2] - 2026-10-23
 
 `axiam-sdk` 1.1.2 carries **contract 1.64** as amended (axiam `b3f8687`, the release branch of
