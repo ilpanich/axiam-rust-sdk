@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`CONTRACT.md` 1.65 (axiam `76d35d9`, the platform's 1.2.0), `openapi.json` 1.2.0 and
+`management-registry.json` are vendored byte for byte; `proto/` is unchanged. The surface stays 202
+operations in 29 namespaces.
+
+### Added
+
+- **Native sign-in with a provider ID token (contract 1.65, §37).**
+  `AxiamClient::login_with_provider_id_token(provider, id_token, nonce, ProviderIdTokenOptions)`
+  (one `POST /oauth2/token`, never retried, no `openid` added, nothing logged or kept) and
+  `native_nonce()` / `ProviderNonce { raw: Sensitive<String>, hashed: String }`, with
+  `PROVIDER_ID_TOKEN_GRANT_TYPE`. The returned tokens are not adopted, as for
+  `login_client_credentials` and `device_login`.
+- **`idp_hint` (contract 1.65, §12.1, §26.2 rule 8).** `OidcBeginParams::idp_hint` /
+  `with_idp_hint`, emitted once as `axiam_idp_hint`; `oidc_par` carries it in the pushed body only.
+  An empty or over-256-byte hint is a local `ValidationError`.
+- Regenerated §27 members: `default_idp` on the OAuth2 client types, `refresh_reuse_response`
+  (`OAuth2Policy`, `SetOrgSettings`, `TenantSettingsOverride`), `native_login` on the federation
+  config types (`NativeLoginTrustRequest`, `NativeLoginTrustResponse`).
+- Tests: contract 1.65 §37.9 (1-13), the five `idp_hint` tests and the §9 `invalid_grant` burst
+  confirmation (`tests/contract_165_test.rs`).
+
+### Changed
+
+- **A replayed refresh token now ends the session on the server by default**
+  (`oauth2.refresh_reuse_response = revoke_session`, §9). No code change: `oidc_refresh`'s
+  single-flight guard already makes one wire call per burst and never retries `invalid_grant`.
+  Never refresh one token from two places.
+- The handoff redirect carries the spent start `state` (§12.1 note 12); documented on
+  `HANDOFF_QUERY_PARAM`. This SDK parses no callback URL.
+
+### Source-breaking changes
+
+- **`OidcBeginParams` gains a public field, `idp_hint`.** A struct literal that names every field
+  needs `idp_hint: None`; `OidcBeginParams::new` and `..Default::default()` are unaffected.
+  The generated request types named above also gained members (construct them with
+  `..Default::default()` where they derive `Default`, or add the new member).
+
 ## [1.1.3] - 2026-10-29
 
 ### Changed

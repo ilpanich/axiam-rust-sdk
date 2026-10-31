@@ -16,7 +16,8 @@ use crate::AxiamError;
 use crate::Sensitive;
 use crate::client::AxiamClient;
 use crate::oidc::authorize::{
-    AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, compute_code_challenge, normalize_scope,
+    AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, IDP_HINT_PARAM, compute_code_challenge,
+    normalize_scope, validate_idp_hint,
 };
 use crate::oidc::discovery::OidcConfiguration;
 use crate::oidc::exchange::oauth2_error_or_fallback;
@@ -125,6 +126,11 @@ struct ParForm<'a> {
     /// RFC 9449 §10 — absent, not empty, when the caller pins no key.
     #[serde(skip_serializing_if = "Option::is_none")]
     dpop_jkt: Option<&'a str>,
+    /// Contract 1.65 (§26.2 rule 8): the provider hint rides the pushed body,
+    /// exactly once, and never the redirect. Absent when `oidc_begin` was
+    /// given none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    axiam_idp_hint: Option<&'a str>,
 }
 
 impl std::fmt::Debug for ParForm<'_> {
@@ -145,6 +151,7 @@ impl std::fmt::Debug for ParForm<'_> {
             // A public-key thumbprint, not a secret: it is published in the
             // token's `cnf.jkt` and in every proof's header.
             .field("dpop_jkt", &self.dpop_jkt)
+            .field("axiam_idp_hint", &self.axiam_idp_hint)
             .finish()
     }
 }
@@ -153,6 +160,15 @@ impl std::fmt::Debug for ParForm<'_> {
 struct PushedAuthorizationWire {
     request_uri: String,
     expires_in: i64,
+}
+
+/// The first `axiam_idp_hint` of an `oidc_begin` URL, if any.
+fn idp_hint_of(authorization_url: &str) -> Option<String> {
+    url::Url::parse(authorization_url).ok().and_then(|u| {
+        u.query_pairs()
+            .find(|(k, _)| k == IDP_HINT_PARAM)
+            .map(|(_, v)| v.into_owned())
+    })
 }
 
 impl AxiamClient {
@@ -205,6 +221,15 @@ impl AxiamClient {
         let code_challenge = compute_code_challenge(params.request.code_verifier.expose());
         let client_secret = self.oidc_client_secret().map(|s| s.expose().clone());
 
+        // §26.2 rule 8: `oidc_begin` computed the request, so the hint it put
+        // in the URL is carried over like `state` and the PKCE pair; there is
+        // no second source for it. The redirect built below still carries
+        // none.
+        let idp_hint = idp_hint_of(&params.request.url);
+        if let Some(hint) = &idp_hint {
+            validate_idp_hint("oidc_par", hint)?;
+        }
+
         let form = ParForm {
             client_id: &client_id,
             response_type: "code",
@@ -216,6 +241,7 @@ impl AxiamClient {
             code_challenge_method: CODE_CHALLENGE_METHOD_S256,
             client_secret: client_secret.as_deref(),
             dpop_jkt: params.dpop_jkt.as_deref(),
+            axiam_idp_hint: idp_hint.as_deref(),
         };
 
         let response = self
@@ -336,6 +362,7 @@ mod tests {
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256,
                 client_secret: Some("super-secret-value"),
                 dpop_jkt: None,
+                axiam_idp_hint: None,
             }
         );
         assert!(!rendered.contains("super-secret-value"), "{rendered}");
@@ -374,6 +401,7 @@ mod tests {
                 code_challenge_method: CODE_CHALLENGE_METHOD_S256,
                 client_secret: None,
                 dpop_jkt: Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"),
+                axiam_idp_hint: None,
             }
         );
         assert!(rendered.contains("None"), "{rendered}");

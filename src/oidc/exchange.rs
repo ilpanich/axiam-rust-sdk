@@ -611,10 +611,10 @@ impl AxiamClient {
         Ok(url)
     }
 
-    async fn post_token(
+    pub(crate) async fn post_token<F: Serialize + ?Sized>(
         &self,
         configuration: &OidcConfiguration,
-        form: &TokenRequestForm<'_>,
+        form: &F,
         tenant_id: Uuid,
     ) -> Result<TokenResponseWire, AxiamError> {
         let endpoint = self.mtls_preferred(

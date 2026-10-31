@@ -52,6 +52,38 @@ const RESERVED_AUTHORIZE_PARAMS: &[&str] = &[
     "code_challenge_method",
 ];
 
+/// The query parameter AXIAM's provider hint travels in (CONTRACT.md §12.1,
+/// "`idp_hint` — choosing the provider", contract 1.65). There is no
+/// `kc_idp_hint` alias and this SDK never emits one.
+pub const IDP_HINT_PARAM: &str = "axiam_idp_hint";
+
+/// The longest `idp_hint`, in UTF-8 bytes (CONTRACT.md §12.1 `idp_hint`
+/// rule 2).
+pub const MAX_IDP_HINT_BYTES: usize = 256;
+
+/// §12.1 `idp_hint` rule 2: refuse an empty value or one over 256 bytes, and
+/// nothing else. Never trimmed, case-folded, parsed as a UUID or looked up.
+pub(crate) fn validate_idp_hint(operation: &'static str, hint: &str) -> Result<(), AxiamError> {
+    if hint.is_empty() {
+        return Err(crate::management::error::local_refusal(
+            operation,
+            "idp_hint",
+            "idp_hint must not be empty: leave it unset for no hint (CONTRACT.md §12.1)",
+        ));
+    }
+    if hint.len() > MAX_IDP_HINT_BYTES {
+        return Err(crate::management::error::local_refusal(
+            operation,
+            "idp_hint",
+            format!(
+                "idp_hint is {} bytes; the limit is {MAX_IDP_HINT_BYTES} (CONTRACT.md §12.1)",
+                hint.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Generate a URL-safe random token: `bytes` CSPRNG bytes, base64url-encoded
 /// **without** padding (RFC 4648 §5).
 ///
@@ -132,6 +164,17 @@ pub struct OidcBeginParams {
     /// forbids the SDK from adding any of its own beyond the mandated eight,
     /// so attempting to override one of those eight is a client-side error.
     pub extra_params: Vec<(String, String)>,
+    /// Contract 1.65 `idp_hint`: a provider UUID, `provider_slug` or branded
+    /// kind name (`google`, `apple`, ...) that sends the browser straight to
+    /// that provider instead of the chooser. Emitted as the single query
+    /// parameter `axiam_idp_hint`, and carried by `oidc_par` in the pushed
+    /// body. Unset by default.
+    ///
+    /// Validated for emptiness and length (256 UTF-8 bytes) only, with
+    /// `oidc_begin` returning a local `ValidationError` and building no URL;
+    /// never trimmed, case-folded or looked up. When set it is the single
+    /// source: an `extra_params` entry of the same name is dropped.
+    pub idp_hint: Option<String>,
 }
 
 impl OidcBeginParams {
@@ -141,7 +184,15 @@ impl OidcBeginParams {
             redirect_uri: redirect_uri.into(),
             scope: None,
             extra_params: Vec::new(),
+            idp_hint: None,
         }
+    }
+
+    /// Choose the provider the sign-in page starts with (`axiam_idp_hint`,
+    /// CONTRACT.md §12.1). See [`Self::idp_hint`].
+    pub fn with_idp_hint(mut self, hint: impl Into<String>) -> Self {
+        self.idp_hint = Some(hint.into());
+        self
     }
 
     /// Set the requested scope (space-separated). `openid` is added
@@ -217,7 +268,13 @@ impl AxiamClient {
     /// multi-valued `scope` is joined with `%20`, never the
     /// `application/x-www-form-urlencoded` `+` (§12.1 rule 5).
     ///
+    /// `params.idp_hint` (contract 1.65) adds the ninth parameter
+    /// `axiam_idp_hint`, exactly once; see [`OidcBeginParams::idp_hint`].
+    ///
     /// # Errors
+    /// A local `ValidationError` (see [`AxiamError::validation`]), with no URL
+    /// built, when `idp_hint` is empty or longer than 256 bytes.
+    ///
     /// Returns [`AxiamError::Network`] when the discovery document's
     /// `authorization_endpoint` does not parse as a URL, or when the CSPRNG
     /// fails.
@@ -254,6 +311,10 @@ impl AxiamClient {
             );
         }
 
+        if let Some(hint) = &params.idp_hint {
+            validate_idp_hint("oidc_begin", hint)?;
+        }
+
         let state = random_url_safe_token(CSPRNG_BYTES)?;
         let nonce = random_url_safe_token(CSPRNG_BYTES)?;
         let code_verifier = generate_code_verifier()?;
@@ -269,7 +330,17 @@ impl AxiamClient {
 
         {
             let mut query = url.query_pairs_mut();
+            // `axiam_idp_hint` is emitted exactly once (§12.1 `idp_hint` rule
+            // 3): the option wins and drops a caller extra of that name; with
+            // no option, the first such extra passes through, still once.
+            let mut hint_extra_seen = params.idp_hint.is_some();
             for (key, value) in &params.extra_params {
+                if key == IDP_HINT_PARAM {
+                    if hint_extra_seen {
+                        continue;
+                    }
+                    hint_extra_seen = true;
+                }
                 query.append_pair(key, value);
             }
             query.append_pair("response_type", "code");
@@ -280,6 +351,9 @@ impl AxiamClient {
             query.append_pair("nonce", &nonce);
             query.append_pair("code_challenge", &code_challenge);
             query.append_pair("code_challenge_method", CODE_CHALLENGE_METHOD_S256);
+            if let Some(hint) = &params.idp_hint {
+                query.append_pair(IDP_HINT_PARAM, hint);
+            }
         }
         // §12.1 rule 5: RFC 3986 percent-encoding, so `scope` reads
         // `openid%20profile`, matching every sibling SDK byte for byte.
