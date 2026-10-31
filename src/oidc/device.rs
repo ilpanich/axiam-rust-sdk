@@ -354,6 +354,7 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             }
         })?;
         let url = self.oidc_endpoint_url(endpoint, tenant_id)?;

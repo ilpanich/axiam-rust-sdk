@@ -445,6 +445,7 @@ pub(crate) async fn absorb_session_cookies(client: &AxiamClient) -> Result<Claim
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })?;
     // H8 fix (SDK bench harness validation): `axiam_refresh` is
     // `Path=/api/v1/auth/refresh`-scoped (crates/axiam-api-rest/src/
@@ -602,6 +603,7 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             })?;
 
         let body = MfaVerifyRequestBody {
@@ -667,6 +669,7 @@ impl AxiamClient {
                     oauth: None,
                     reason: None,
                     set_reason: None,
+                    retry_after: None,
                 })?;
         let observed_value = observed.expose().clone();
 
@@ -679,12 +682,14 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             })?;
         let org_id = self.resolved_org_id().ok_or_else(|| AxiamError::Auth {
             message: "org_id could not be resolved; login() must succeed before refresh()".into(),
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })?;
 
         let client = self.clone();
@@ -726,6 +731,7 @@ impl AxiamClient {
                                     oauth: None,
                                     reason: None,
                                     set_reason: None,
+                                    retry_after: None,
                                 })?;
                             // Same REFRESH_PATH-scoped lookup as
                             // absorb_session_cookies above, and just as
@@ -794,6 +800,7 @@ impl AxiamClient {
                             oauth: None,
                             reason: None,
                             set_reason: None,
+                            retry_after: None,
                         })?
                 }
                 None => {
@@ -802,6 +809,7 @@ impl AxiamClient {
                         oauth: None,
                         reason: None,
                         set_reason: None,
+                        retry_after: None,
                     });
                 }
             }

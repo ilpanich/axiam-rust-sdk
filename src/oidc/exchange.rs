@@ -346,6 +346,11 @@ pub struct SsoCompleteResult {
 /// [`AxiamError::from_http_status`] mapping.
 pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> AxiamError {
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::retry::parse_retry_after);
     let text = response
         .text()
         .await
@@ -353,7 +358,16 @@ pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> Axi
     if let Ok(body) = serde_json::from_str::<OAuth2ErrorResponseWire>(&text)
         && !body.error.is_empty()
     {
-        return AxiamError::oauth_protocol_error(body.error, body.error_description);
+        let mut err = AxiamError::oauth_protocol_error(body.error, body.error_description);
+        // §37.3: surfaced on the 429 only (a stray header elsewhere is noise).
+        if status == 429
+            && let AxiamError::Auth {
+                retry_after: slot, ..
+            } = &mut err
+        {
+            *slot = retry_after;
+        }
+        return err;
     }
     AxiamError::from_http_status(status, text)
 }
@@ -426,6 +440,7 @@ impl AxiamClient {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })
     }
 
@@ -442,6 +457,7 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             })
     }
 
@@ -463,6 +479,7 @@ impl AxiamClient {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })
     }
 
@@ -988,6 +1005,7 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             });
         }
 

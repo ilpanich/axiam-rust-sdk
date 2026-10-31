@@ -22,6 +22,9 @@ operations in 29 namespaces.
 - **`idp_hint` (contract 1.65, §12.1, §26.2 rule 8).** `OidcBeginParams::idp_hint` /
   `with_idp_hint`, emitted once as `axiam_idp_hint`; `oidc_par` carries it in the pushed body only.
   An empty or over-256-byte hint is a local `ValidationError`.
+- `AxiamError::retry_after()` and the `retry_after` field of `AxiamError::Auth`: the server's
+  `Retry-After` on a rate-limited (`429`) `/oauth2/*` response. Additive: `Auth` is
+  `#[non_exhaustive]`, so match it with `..`.
 - Regenerated §27 members: `default_idp` on the OAuth2 client types, `refresh_reuse_response`
   (`OAuth2Policy`, `SetOrgSettings`, `TenantSettingsOverride`), `native_login` on the federation
   config types (`NativeLoginTrustRequest`, `NativeLoginTrustResponse`).
@@ -29,6 +32,21 @@ operations in 29 namespaces.
   confirmation (`tests/contract_165_test.rs`).
 
 ### Changed
+
+- **Server floor:** federation-config admin calls (`federation.create_config`, `get_config`,
+  `list_configs`, `update_config`) of this 1.2-line SDK need an AXIAM server **1.2.0 or later**:
+  `FederationConfigResponse.native_login` is required from 1.2.0, and a response from an older
+  server fails to decode (a `NetworkError`).
+- `CONTRACT.md` re-vendored with the 1.65 amendments (sha256 `95ee87ba…`): `idp_hint` carried
+  from the begin URL into PAR (§26.2 rule 8), no redirect followed on an `/oauth2/*` POST
+  (§12.1 rule 3, §37.2 rule 12).
+- `login_with_provider_id_token` with `scopes: Some(vec![])` now sends no `scope` (an empty list
+  is none, §37.2 rule 7); it used to send an empty `scope=`.
+- `oidc_begin` refuses an empty `axiam_idp_hint` passed as an `extra_params` entry (a local
+  `ValidationError`), as it already did for the `idp_hint` option, so begin and `oidc_par` agree.
+  An `extra_params` entry is dropped, unvalidated, when the option is set.
+- The `/oauth2/*` form POSTs already ran on the redirect-free transport; a `3xx` is a
+  `NetworkError` and the form reaches no redirect target. Now covered by a test.
 
 - **A replayed refresh token now ends the session on the server by default**
   (`oauth2.refresh_reuse_response = revoke_session`, §9). No code change: `oidc_refresh`'s

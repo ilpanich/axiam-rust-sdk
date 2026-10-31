@@ -102,7 +102,10 @@ Contract 1.65 (§34.9, the platform's 1.2.0) adds **native sign-in with a provid
 `refresh_reuse_response`, `native_login`; still 202 operations). A replayed refresh token now
 ends the session server-side by default (§9): this SDK's single-flight `oidc_refresh` is what
 keeps one process from causing it, and the same refresh token must never be refreshed from two
-places.
+places. **Server floor:** federation-config admin calls (`federation.create_config`, `get_config`,
+`list_configs`, `update_config`) of this 1.2-line SDK need an AXIAM server **1.2.0 or later**:
+`FederationConfigResponse.native_login` is required from 1.2.0, and a response from an older
+server fails to decode.
 
 Contract 1.64 (§34.8, released as 1.1.2) adds no operation. This SDK ports its one rule: the
 `device_login` loop waits out a `429 rate_limit_exceeded` on a poll (§14.2 rule 9) — `Retry-After`

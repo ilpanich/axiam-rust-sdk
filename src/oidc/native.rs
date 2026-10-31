@@ -196,7 +196,11 @@ impl AxiamClient {
             None => self.oidc_discover().await?,
         };
         let client_secret = self.oidc_client_secret().map(|s| s.expose().clone());
-        let scope = options.scopes.as_ref().map(|s| s.join(" "));
+        let scope = options
+            .scopes
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.join(" "));
 
         let form = ProviderIdTokenForm {
             grant_type: PROVIDER_ID_TOKEN_GRANT_TYPE,

@@ -313,6 +313,14 @@ impl AxiamClient {
 
         if let Some(hint) = &params.idp_hint {
             validate_idp_hint("oidc_begin", hint)?;
+        } else if let Some((_, hint)) = params
+            .extra_params
+            .iter()
+            .find(|(k, _)| k == IDP_HINT_PARAM)
+        {
+            // The extra that will pass through is held to the same rule, so
+            // begin and PAR agree (an empty one would be refused at PAR).
+            validate_idp_hint("oidc_begin", hint)?;
         }
 
         let state = random_url_safe_token(CSPRNG_BYTES)?;

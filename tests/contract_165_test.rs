@@ -475,9 +475,9 @@ async fn rate_limit_with_retry_after_mapped() {
     let err = login(&client, "p", &server.uri())
         .await
         .expect_err("limited");
-    // This SDK does not expose Retry-After on its errors; the assertion is the
-    // error code and a single request.
     assert_eq!(err.oauth_error_code(), Some("rate_limit_exceeded"));
+    // C165-17: the server's delay is reachable on the error (additively).
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
     assert_eq!(rec.lock().unwrap().len(), 1);
 }
 
@@ -1030,6 +1030,113 @@ async fn par_idp_hint_in_pushed_body() {
         assert_eq!(keys, expected);
     }
 }
+
+// §37.2 rule 7 / C165-20 ----------------------------------------------------
+
+#[tokio::test]
+async fn empty_scopes_send_no_scope() {
+    let server = MockServer::start().await;
+    let rec = mount_token(&server, error_body(400, "invalid_grant")).await;
+    let client = build_client(&server.uri(), false);
+    let mut opts = options(&server.uri());
+    opts.scopes = Some(vec![]);
+    let _ = client
+        .login_with_provider_id_token("p", s(PROVIDER_TOKEN), s(RAW_NONCE), opts)
+        .await;
+    let seen = rec.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert!(!seen[0].form_keys.contains("scope"), "{}", seen[0].body);
+    assert!(!seen[0].body.contains("scope="), "{}", seen[0].body);
+}
+
+#[test]
+fn empty_idp_hint_extra_refused_at_begin() {
+    let client = build_client("https://iam.example.com", false);
+    let err = begin(
+        &client,
+        "https://iam.example.com",
+        OidcBeginParams::new("https://app/cb").with_extra_param("axiam_idp_hint", ""),
+    )
+    .expect_err("an empty hint extra is refused, as at PAR");
+    assert!(err.validation().is_some(), "{err:?}");
+    // The option wins and drops the extra, so an empty extra is moot then.
+    let ok = begin(
+        &client,
+        "https://iam.example.com",
+        OidcBeginParams::new("https://app/cb")
+            .with_extra_param("axiam_idp_hint", "")
+            .with_idp_hint("mine"),
+    )
+    .unwrap();
+    assert_eq!(count(&query_pairs(&ok.url), "axiam_idp_hint"), 1);
+}
+
+// §12.1 rule 3 / §37.2 rule 12 / C165-14 ------------------------------------
+
+#[tokio::test]
+async fn token_post_does_not_follow_redirect() {
+    let other = MockServer::start().await;
+    let server = MockServer::start().await;
+    let target = format!("{}/oauth2/token", other.uri());
+    let _rec = mount_token(
+        &server,
+        ResponseTemplate::new(307).insert_header("Location", target.as_str()),
+    )
+    .await;
+    let client = build_client(&server.uri(), false);
+    let err = login(&client, "p", &server.uri())
+        .await
+        .expect_err("a 3xx is not followed");
+    assert!(matches!(err, AxiamError::Network { .. }), "{err:?}");
+    assert_eq!(total(&server).await, 1);
+    assert_eq!(total(&other).await, 0, "the form must not reach the target");
+}
+
+// §26.6 ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn par_idp_hint_from_begin_url_pushed() {
+    let server = MockServer::start().await;
+    let rec: Recorder = Arc::default();
+    let r = Arc::clone(&rec);
+    Mock::given(method("POST"))
+        .and(path("/oauth2/par"))
+        .respond_with(move |req: &Request| {
+            record(req, &r);
+            ResponseTemplate::new(201).set_body_json(
+                json!({"request_uri":"urn:ietf:params:oauth:request_uri:abc","expires_in":90}),
+            )
+        })
+        .mount(&server)
+        .await;
+    let client = build_client(&server.uri(), true);
+    let cfg = configuration(&server.uri());
+    // The hint reaches the URL as a caller extra, not the option.
+    let request = client
+        .oidc_begin(
+            &cfg,
+            OidcBeginParams::new("https://app/cb").with_extra_param("axiam_idp_hint", "from-url"),
+        )
+        .unwrap();
+    let pushed = client
+        .oidc_par(OidcParParams {
+            request,
+            redirect_uri: "https://app/cb".into(),
+            scope: None,
+            tenant_id: None,
+            configuration: Some(cfg),
+            dpop_jkt: None,
+        })
+        .await
+        .unwrap();
+    let seen = rec.lock().unwrap().clone();
+    assert_eq!(seen[0].form["axiam_idp_hint"], "from-url");
+    assert_eq!(seen[0].body.matches("axiam_idp_hint=").count(), 1);
+    assert_eq!(count(&query_pairs(&pushed.url), "axiam_idp_hint"), 0);
+}
+
+// `par_idp_hint_argument_wins` is not implemented: `OidcParParams` has no
+// `idp_hint` argument, and adding one would be a new public field.
 
 // §9 confirmation -----------------------------------------------------------
 
