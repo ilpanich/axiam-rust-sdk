@@ -176,6 +176,7 @@ fn federation_body(extra: Value) -> Value {
         "token_exchange": {"enabled": false, "accepted_audiences": [],
                            "max_token_age_secs": 300, "scope_map": {},
                            "subject_mapping": "by_email"},
+        "native_login": {"enabled": false, "client_ids": [], "max_token_age_secs": 300},
         "created_at": "2026-10-10T00:00:00Z", "updated_at": "2026-10-10T00:00:00Z",
     });
     for (k, v) in extra.as_object().unwrap() {
@@ -208,6 +209,7 @@ fn saml_config() -> models::CreateFederationConfigRequest {
         idp_metadata_signing_cert_pem: None,
         idp_signing_cert_pem: None,
         metadata_url: Some("https://idp.example.test/metadata".into()),
+        native_login: None,
         protocol: "Saml".into(),
         provider: "Corporate IdP".into(),
         provider_kind: None,
