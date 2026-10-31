@@ -793,8 +793,15 @@ async fn no_secret_in_logs_or_errors() {
     haystack.push_str(&collector.0.lock().unwrap().join("\n"));
     #[cfg(any(feature = "amqp", feature = "observability"))]
     haystack.push_str(&capture::LOG.lock().unwrap().join("\n"));
-    for secret in [secret_token, secret_nonce] {
-        assert!(!haystack.contains(secret), "{secret} leaked");
+    // The failure message names which input leaked, never its value.
+    for (name, secret) in [
+        ("the provider ID token", secret_token),
+        ("the raw nonce", secret_nonce),
+    ] {
+        assert!(
+            !haystack.contains(secret),
+            "{name} leaked into a log, error or rendering"
+        );
     }
 }
 
