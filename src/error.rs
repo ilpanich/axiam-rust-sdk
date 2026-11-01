@@ -105,6 +105,13 @@ pub enum AxiamError {
         /// ([`crate::ssf::SsfReceiver::verify_set`]); `None` for every other
         /// `Auth` failure. See [`SetFailureReason`].
         set_reason: Option<SetFailureReason>,
+        /// The server's `Retry-After` delay, in whole seconds, on a
+        /// rate-limited (`429`) `/oauth2/*` response (CONTRACT.md §37.3);
+        /// `None` when the response carried none or was not rate limited. A
+        /// floor, not a ceiling: wait at least this long before retrying.
+        /// Added in the 1.2 line; additive because the variant is
+        /// `#[non_exhaustive]`. See [`AxiamError::retry_after`].
+        retry_after: Option<std::time::Duration>,
     },
 
     /// Authorization failure: the caller is authenticated but lacks
@@ -167,6 +174,7 @@ impl AxiamError {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         }
     }
 
@@ -252,6 +260,7 @@ impl AxiamError {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             },
             403 | 409 => {
                 let (action, resource_id, reason_code) = parse_authz_body_fields(&message);
@@ -304,6 +313,7 @@ impl AxiamError {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             },
             // gRPC `PERMISSION_DENIED` carries no structured error body (no
             // JSON payload analogous to the REST 403's
@@ -350,6 +360,17 @@ impl AxiamError {
         }
     }
 
+    /// The server's `Retry-After` delay on a rate-limited `/oauth2/*`
+    /// response (CONTRACT.md §37.3), when it sent one.
+    ///
+    /// `None` for every other error. A floor: do not retry sooner.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            AxiamError::Auth { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
     /// Whether this is a transport-level failure that a bounded retry may
     /// resolve — a connection reset, timeout, TLS or DNS failure, or a 5xx.
     ///
@@ -388,6 +409,7 @@ impl AxiamError {
             }),
             reason: None,
             set_reason: None,
+            retry_after: None,
         }
     }
 
@@ -402,6 +424,7 @@ impl AxiamError {
             oauth: None,
             reason: Some(reason),
             set_reason: None,
+            retry_after: None,
         }
     }
 
@@ -454,11 +477,13 @@ impl AxiamError {
                 oauth,
                 reason,
                 set_reason,
+                retry_after,
             } => AxiamError::Auth {
                 message: message.clone(),
                 oauth: oauth.clone(),
                 reason: *reason,
                 set_reason: *set_reason,
+                retry_after: *retry_after,
             },
             AxiamError::Authz {
                 kind,
@@ -769,6 +794,7 @@ impl AxiamError {
             oauth: None,
             reason: None,
             set_reason: Some(reason),
+            retry_after: None,
         }
     }
 

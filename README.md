@@ -69,8 +69,8 @@ A **removal** — of a method, a field, a variant or a type — waits for 2.0.0.
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.64**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
-§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33 and §36, with §32.7 and
+This SDK conforms to **contract 1.65**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+§21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33, §36 and §37, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
 signature verification). §12 is implemented in full at its 1.38 shape: all **thirteen** operations,
@@ -89,12 +89,23 @@ the four namespaces contract 1.54–1.57 added, by the contract's design; `netwo
 §27.6.2 item 6 and §27.9's "with pruning on" assertion have nothing to bind here.
 
 §12.7, §14, §15, §17, §19, §20, §22, §24, §25, §26, §27, §28.12, §29, §30, §31, §32, §32.7,
-§33 and §36 are named rather than folded into the range because they landed after this SDK already
+§33, §36 and §37 are named rather than folded into the range because they landed after this SDK already
 claimed §1–§13: widening the range silently would turn a statement that was true when written
 into a different claim without anyone editing it. The §21.3.1 amendment of contract 1.58 (the
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.65 (§34.9, the platform's 1.2.0) adds **native sign-in with a provider ID token** (§37:
+`login_with_provider_id_token` and `native_nonce`, see below) and the **`idp_hint`** input of
+`oidc_begin` and `oidc_par` (§12.1, §26.2 rule 8); it regenerates the §27 layer (`default_idp`,
+`refresh_reuse_response`, `native_login`; still 202 operations). A replayed refresh token now
+ends the session server-side by default (§9): this SDK's single-flight `oidc_refresh` is what
+keeps one process from causing it, and the same refresh token must never be refreshed from two
+places. **Server floor:** federation-config admin calls (`federation.create_config`, `get_config`,
+`list_configs`, `update_config`) of this 1.2-line SDK need an AXIAM server **1.2.0 or later**:
+`FederationConfigResponse.native_login` is required from 1.2.0, and a response from an older
+server fails to decode.
 
 Contract 1.64 (§34.8, released as 1.1.2) adds no operation. This SDK ports its one rule: the
 `device_login` loop waits out a `429 rate_limit_exceeded` on a poll (§14.2 rule 9) — `Retry-After`
@@ -1767,6 +1778,45 @@ Three things that are easy to get wrong:
    retried on a `5xx` or a transport failure — it is a POST that creates state.
 
 Worked example: [`examples/par_login.rs`](examples/par_login.rs).
+
+### Choosing the provider: `idp_hint` (contract 1.65)
+
+`OidcBeginParams::with_idp_hint("google")` adds the single query parameter `axiam_idp_hint`
+(a provider UUID, slug or branded kind name) so the browser goes straight to that provider.
+It is checked for emptiness and 256 bytes only (a local `ValidationError`, no URL built),
+never trimmed, case-folded or looked up. Under `oidc_par` the hint travels in the pushed body
+and never in the redirect, which stays `client_id` and `request_uri`.
+
+## Native sign-in with a provider ID token (§37)
+
+A mobile or desktop app that used Google, Apple or Facebook's native SDK presents the provider's ID
+token to AXIAM and gets the client's ordinary token set back. This is not token exchange.
+
+```rust
+use axiam_sdk::oidc::{ProviderIdTokenOptions, native_nonce};
+
+// 1. A fresh pair per attempt. Give the provider's SDK `pair.hashed` as ITS nonce.
+let pair = native_nonce()?;
+let provider_id_token: String = /* the provider SDK's result */ todo!();
+
+// 2. Present the token with the RAW nonce. `provider` is a UUID or the operator's slug,
+//    not a kind name. Pass "openid" yourself if you want an ID token back.
+let tokens = client
+    .login_with_provider_id_token(
+        "corp-google",
+        Sensitive::new(provider_id_token),
+        pair.raw,
+        ProviderIdTokenOptions { scopes: Some(vec!["openid".into()]), ..Default::default() },
+    )
+    .await?;
+```
+
+It is **never retried** (the provider token is single-use deployment-wide, and `invalid_grant` is
+one generic answer to every refusal): after any failure obtain a fresh provider token and a fresh
+nonce. Neither the provider token nor the raw nonce is logged or kept, so hold the raw nonce only
+for the attempt. A public client (`client_id` only) is the normal caller. The returned tokens are
+returned, not adopted as the client's credential. Local refusals (empty `provider`, `id_token` or
+`nonce`) are `ValidationError`s with no request sent.
 
 ## OPAQUE (§23)
 

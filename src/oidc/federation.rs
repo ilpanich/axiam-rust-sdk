@@ -71,6 +71,12 @@ pub const SSO_HANDOFF_PATH: &str = "/api/v1/auth/federation/handoff";
 
 /// The query parameter the server delivers a handoff code in, on the SPA's
 /// own callback URL (CONTRACT.md §12.1 note 12).
+///
+/// From contract 1.65 the same redirect also carries `state=<the start's
+/// state>` (and `error=<code>&state=…` on the failure exit). That `state` is
+/// already spent and authorises nothing: glue that parses the callback URL
+/// must tolerate it, MAY compare it with the `state` its start operation
+/// returned, and MUST NOT redeem it, forward it or pass it to `sso_complete`.
 pub const HANDOFF_QUERY_PARAM: &str = "axiam_handoff";
 
 /// How long a handoff code is valid, in seconds (CONTRACT.md §12.1 note 12).

@@ -73,6 +73,7 @@ impl TokenManager {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             })?
             .expose()
             .clone();

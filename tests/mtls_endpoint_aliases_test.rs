@@ -260,6 +260,7 @@ async fn introspect_revoke_device_and_par_all_go_to_their_aliases() {
                 redirect_uri: REDIRECT_URI.into(),
                 scope: Some("openid".into()),
                 extra_params: Vec::new(),
+                idp_hint: None,
             },
         )
         .expect("oidc_begin succeeds");
@@ -428,6 +429,7 @@ async fn the_front_channel_and_jwks_endpoints_are_never_aliased() {
                 redirect_uri: REDIRECT_URI.into(),
                 scope: Some("openid".into()),
                 extra_params: Vec::new(),
+                idp_hint: None,
             },
         )
         .expect("oidc_begin succeeds");
@@ -954,6 +956,7 @@ async fn vector_a_with_a_certificate_every_aliased_call_uses_its_alias() {
                 redirect_uri: REDIRECT_URI.into(),
                 scope: Some("openid".into()),
                 extra_params: Vec::new(),
+                idp_hint: None,
             },
         )
         .expect("oidc_begin");

@@ -77,6 +77,7 @@ fn auth(message: impl Into<String>) -> AxiamError {
         oauth: None,
         reason: None,
         set_reason: None,
+        retry_after: None,
     }
 }
 

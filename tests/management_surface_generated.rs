@@ -1591,6 +1591,7 @@ async fn oauth2_clients_surface() {
             backchannel_token_delivery_mode: None,
             backchannel_user_code_parameter: None,
             browser_sso: None,
+            default_idp: None,
             dpop_bound_access_tokens: None,
             dpop_require_nonce: None,
             grant_types: Vec::new(),
@@ -1670,7 +1671,7 @@ async fn federation_surface() {
     let client = logged_in_client(&server).await;
 
     // federation.list_configs
-    mount(&server, "GET", "/api/v1/federation-configs", 200, r#"{"items": [{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
+    mount(&server, "GET", "/api/v1/federation-configs", 200, r#"{"items": [{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "native_login": {"client_ids": [], "enabled": true, "max_token_age_secs": 1}, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}], "total": 1, "offset": 0, "limit": 50}"#).await;
     client
         .federation()
         .list_configs(PageRequest::first(50))
@@ -1683,7 +1684,7 @@ async fn federation_surface() {
         .expect("federation.list_configs auto-paging");
 
     // federation.create_config
-    mount(&server, "POST", "/api/v1/federation-configs", 201, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "POST", "/api/v1/federation-configs", 201, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "native_login": {"client_ids": [], "enabled": true, "max_token_age_secs": 1}, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .create_config(&models::CreateFederationConfigRequest {
@@ -1701,6 +1702,7 @@ async fn federation_surface() {
             idp_metadata_signing_cert_pem: None,
             idp_signing_cert_pem: None,
             metadata_url: None,
+            native_login: None,
             protocol: "example".to_string(),
             provider: "example".to_string(),
             provider_kind: None,
@@ -1715,7 +1717,7 @@ async fn federation_surface() {
         .expect("federation.create_config");
 
     // federation.get_config
-    mount(&server, "GET", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "GET", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "native_login": {"client_ids": [], "enabled": true, "max_token_age_secs": 1}, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .get_config(example_id())
@@ -1723,7 +1725,7 @@ async fn federation_surface() {
         .expect("federation.get_config");
 
     // federation.update_config
-    mount(&server, "PUT", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
+    mount(&server, "PUT", &format!("/api/v1/federation-configs/{EXAMPLE_ID}"), 200, r#"{"allow_sha1_signatures": true, "allow_tenant_inheritance": true, "allowed_algorithms": [], "allowed_issuer_tenants": [], "attribute_map": {}, "client_id": "example", "created_at": "2026-08-26T00:00:00Z", "effective_scopes": [], "enabled": true, "has_bundled_mark": true, "id": "11111111-1111-4111-8111-111111111111", "mints_client_secret": true, "native_login": {"client_ids": [], "enabled": true, "max_token_age_secs": 1}, "pkce_required": true, "protocol": "example", "provider": "example", "provider_kind": "example", "scopes": [], "tenant_id": "11111111-1111-4111-8111-111111111111", "token_exchange": {"accepted_audiences": [], "enabled": true, "max_token_age_secs": 1, "scope_map": {}, "subject_mapping": "example"}, "updated_at": "2026-08-26T00:00:00Z"}"#).await;
     client
         .federation()
         .update_config(
@@ -2626,6 +2628,7 @@ async fn settings_surface() {
             opaque_mode: None,
             opaque_suite: None,
             password_history_count: 1,
+            refresh_reuse_response: None,
             refresh_token_lifetime_secs: 1,
             require_digits: true,
             require_lowercase: true,

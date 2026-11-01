@@ -250,6 +250,7 @@ impl Claims {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         };
 
         let Some(expected) = cnf.certificate_thumbprint() else {
@@ -362,6 +363,7 @@ impl CnfClaim {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         };
 
         if cnf.names_nothing_checkable() {
@@ -973,6 +975,7 @@ impl JwksVerifier {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             });
         }
         Ok(())
@@ -1136,6 +1139,7 @@ impl JwksVerifier {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })?;
 
         // Rule 1: rejected WITHOUT consulting a key — `alg: none` and every
@@ -1146,6 +1150,7 @@ impl JwksVerifier {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             });
         }
 
@@ -1163,6 +1168,7 @@ impl JwksVerifier {
                     oauth: None,
                     reason: None,
                     set_reason: None,
+                    retry_after: None,
                 })?
             }
         };
@@ -1172,6 +1178,7 @@ impl JwksVerifier {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })
     }
 
@@ -1190,6 +1197,7 @@ impl JwksVerifier {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })?;
 
         let actual =
@@ -1198,6 +1206,7 @@ impl JwksVerifier {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             })?;
 
         if actual != expected {
@@ -1206,6 +1215,7 @@ impl JwksVerifier {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             });
         }
 
@@ -1358,6 +1368,7 @@ fn decode_claims(
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         }
     })?;
 

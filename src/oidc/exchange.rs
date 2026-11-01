@@ -346,6 +346,23 @@ pub struct SsoCompleteResult {
 /// [`AxiamError::from_http_status`] mapping.
 pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> AxiamError {
     let status = response.status().as_u16();
+    // CONTRACT.md §12.1 rule 3: a `3xx` answer to an `/oauth2/*` POST is a
+    // `NetworkError`, whatever its body says. The status is checked *before*
+    // the body so an intermediary's `{"error":…}` cannot turn a redirect into
+    // an `OAuthProtocolError`. The body is neither read nor echoed.
+    if (300..400).contains(&status) {
+        return AxiamError::Network {
+            message: format!(
+                "unexpected redirect (HTTP {status}) from an OAuth2 endpoint; not followed"
+            ),
+            source: None,
+        };
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::retry::parse_retry_after);
     let text = response
         .text()
         .await
@@ -353,7 +370,16 @@ pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> Axi
     if let Ok(body) = serde_json::from_str::<OAuth2ErrorResponseWire>(&text)
         && !body.error.is_empty()
     {
-        return AxiamError::oauth_protocol_error(body.error, body.error_description);
+        let mut err = AxiamError::oauth_protocol_error(body.error, body.error_description);
+        // §37.3: surfaced on the 429 only (a stray header elsewhere is noise).
+        if status == 429
+            && let AxiamError::Auth {
+                retry_after: slot, ..
+            } = &mut err
+        {
+            *slot = retry_after;
+        }
+        return err;
     }
     AxiamError::from_http_status(status, text)
 }
@@ -426,6 +452,7 @@ impl AxiamClient {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })
     }
 
@@ -442,6 +469,7 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             })
     }
 
@@ -463,6 +491,7 @@ impl AxiamClient {
             oauth: None,
             reason: None,
             set_reason: None,
+            retry_after: None,
         })
     }
 
@@ -611,10 +640,10 @@ impl AxiamClient {
         Ok(url)
     }
 
-    async fn post_token(
+    pub(crate) async fn post_token<F: Serialize + ?Sized>(
         &self,
         configuration: &OidcConfiguration,
-        form: &TokenRequestForm<'_>,
+        form: &F,
         tenant_id: Uuid,
     ) -> Result<TokenResponseWire, AxiamError> {
         let endpoint = self.mtls_preferred(
@@ -988,6 +1017,7 @@ impl AxiamClient {
                 oauth: None,
                 reason: None,
                 set_reason: None,
+                retry_after: None,
             });
         }
 

@@ -70,13 +70,17 @@ pub mod exchange;
 pub mod federation;
 pub mod id_token;
 pub mod logout;
+pub mod native;
 pub mod par;
 pub mod registration;
 pub(crate) mod single_flight;
 pub mod state;
 pub mod token_exchange;
 
-pub use authorize::{AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, OidcBeginParams};
+pub use authorize::{
+    AuthorizationRequest, CODE_CHALLENGE_METHOD_S256, IDP_HINT_PARAM, MAX_IDP_HINT_BYTES,
+    OidcBeginParams,
+};
 pub use ciba::{
     CIBA_GRANT_TYPE, CIBA_SLOW_DOWN_INCREMENT_SECS, CibaAwaitParams, CibaClock, CibaDelivery,
     CibaInitiateParams, CibaInitiateResponse, CibaPollParams, CibaRequestSigner, CibaSigningAlg,
@@ -101,6 +105,9 @@ pub use federation::{
 pub use id_token::{IdTokenClaims, MAX_CLOCK_SKEW_SEC};
 pub use logout::{
     BACKCHANNEL_LOGOUT_EVENT, LogoutUrlParams, MAX_LOGOUT_TOKEN_AGE_SECS, VerifiedLogoutToken,
+};
+pub use native::{
+    PROVIDER_ID_TOKEN_GRANT_TYPE, ProviderIdTokenOptions, ProviderNonce, native_nonce,
 };
 pub use par::{OidcParParams, PushedAuthorizationRequest};
 pub use registration::ClientRegistration;
