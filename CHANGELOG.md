@@ -126,6 +126,8 @@ below only changes feature sets that did not compile), so it is a patch.
 
 ### Fixed
 
+- **A `3xx` answer to an `/oauth2/*` POST is a `Network` error even when its body carries an
+  `error`** (C165-25, §12.1 rule 3): `oauth2_error_or_fallback` checks the status before the body.
 - **A `429 rate_limit_exceeded` on a device poll is waited out** (contract 1.64, §14.2 rule 9; item
   b): `device_login` waits `Retry-After` as a minimum (never less than one interval, capped at the
   `expires_in` deadline), counts it as one interval, does not raise the interval for it, and polls

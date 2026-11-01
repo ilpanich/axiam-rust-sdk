@@ -1092,6 +1092,33 @@ async fn token_post_does_not_follow_redirect() {
     assert_eq!(total(&other).await, 0, "the form must not reach the target");
 }
 
+/// C165-25: a `3xx` whose body carries an OAuth2 `error` is still a
+/// `NetworkError` (status is checked before the body), and leaks nothing.
+#[tokio::test]
+async fn token_3xx_with_error_body_is_network_error() {
+    let other = MockServer::start().await;
+    let server = MockServer::start().await;
+    let target = format!("{}/oauth2/token", other.uri());
+    let _rec = mount_token(
+        &server,
+        ResponseTemplate::new(307)
+            .insert_header("Location", target.as_str())
+            .set_body_json(json!({"error": "invalid_grant", "error_description": "d"})),
+    )
+    .await;
+    let client = build_client(&server.uri(), false);
+    let err = login(&client, "p", &server.uri())
+        .await
+        .expect_err("a 3xx is not a protocol error");
+    assert!(matches!(err, AxiamError::Network { .. }), "{err:?}");
+    let shown = format!("{err:?} {err}");
+    for secret in [PROVIDER_TOKEN, RAW_NONCE] {
+        assert!(!shown.contains(secret), "secret leaked into the error");
+    }
+    assert_eq!(total(&server).await, 1);
+    assert_eq!(total(&other).await, 0, "the form must not reach the target");
+}
+
 // §26.6 ---------------------------------------------------------------------
 
 #[tokio::test]

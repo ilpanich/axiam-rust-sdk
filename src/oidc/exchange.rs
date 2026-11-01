@@ -346,6 +346,18 @@ pub struct SsoCompleteResult {
 /// [`AxiamError::from_http_status`] mapping.
 pub(crate) async fn oauth2_error_or_fallback(response: reqwest::Response) -> AxiamError {
     let status = response.status().as_u16();
+    // CONTRACT.md §12.1 rule 3: a `3xx` answer to an `/oauth2/*` POST is a
+    // `NetworkError`, whatever its body says. The status is checked *before*
+    // the body so an intermediary's `{"error":…}` cannot turn a redirect into
+    // an `OAuthProtocolError`. The body is neither read nor echoed.
+    if (300..400).contains(&status) {
+        return AxiamError::Network {
+            message: format!(
+                "unexpected redirect (HTTP {status}) from an OAuth2 endpoint; not followed"
+            ),
+            source: None,
+        };
+    }
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
