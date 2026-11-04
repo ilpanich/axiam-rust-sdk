@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-`CONTRACT.md` 1.66 (axiam `a916544`, §34.10), `openapi.json` 1.2.0 (spec digest
+`CONTRACT.md` 1.66 (axiam `5f9d079`, §34.10), `openapi.json` 1.2.0 (spec digest
 `sha256:09419a6e…`) and `management-registry.json` are vendored byte for byte; `proto/` is
 unchanged. The surface stays 202 operations in 29 namespaces. (Previously in this cycle: contract
 1.65, axiam `76d35d9`, the platform's 1.2.0.)
