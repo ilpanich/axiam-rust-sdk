@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-04
+
 `CONTRACT.md` 1.66 (axiam `5f9d079`, §34.10), `openapi.json` 1.2.0 (spec digest
 `sha256:09419a6e…`) and `management-registry.json` are vendored byte for byte; `proto/` is
 unchanged. The surface stays 202 operations in 29 namespaces. (Previously in this cycle: contract
@@ -37,6 +39,8 @@ unchanged. The surface stays 202 operations in 29 namespaces. (Previously in thi
 - Tests: contract 1.65 §37.9 (1-13), the five `idp_hint` tests and the §9 `invalid_grant` burst
   confirmation (`tests/contract_165_test.rs`).
 
+- Native sign-in with a provider ID token and idp_hint (contract 1.65 §37)
+
 ### Changed
 
 - **Server floor:** federation-config admin calls (`federation.create_config`, `get_config`,
@@ -60,6 +64,26 @@ unchanged. The surface stays 202 operations in 29 namespaces. (Previously in thi
   Never refresh one token from two places.
 - The handoff redirect carries the spent start `state` (§12.1 note 12); documented on
   `HANDOFF_QUERY_PARAM`. This SDK parses no callback URL.
+
+- re-vendor CONTRACT.md 1.66 as amended at ilpanich/axiam 5f9d079
+
+- re-sync contract 1.66 and openapi.json; confirm the federated sign-in cookie binding (§12.1 rule 12b)
+
+- Bump taiki-e/install-action from 2.87.31 to 2.88.1
+
+- re-vendor openapi.json and the management registry (logout/reset-mfa 500, D-N44)
+
+- re-vendor openapi.json and the management registry (end_session 500, D-N42)
+
+- Name the leaked input, not its value, in no_secret_in_logs_or_errors
+
+- re-vendor contract 1.65, openapi 1.2.0 and the management registry
+
+### Fixed
+
+- Contract 1.65 review sweep 2 (C165-25)
+
+- Contract 1.65 review findings (C165-04, -14, -17, -20)
 
 ### Source-breaking changes
 
