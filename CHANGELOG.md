@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-`CONTRACT.md` 1.65 (axiam `76d35d9`, the platform's 1.2.0), `openapi.json` 1.2.0 and
-`management-registry.json` are vendored byte for byte; `proto/` is unchanged. The surface stays 202
-operations in 29 namespaces.
+`CONTRACT.md` 1.66 (axiam `5f9d079`, §34.10), `openapi.json` 1.2.0 (spec digest
+`sha256:09419a6e…`) and `management-registry.json` are vendored byte for byte; `proto/` is
+unchanged. The surface stays 202 operations in 29 namespaces. (Previously in this cycle: contract
+1.65, axiam `76d35d9`, the platform's 1.2.0.)
 
 ### Added
 
+- **Contract 1.66 re-sync (§34.10).** **No API change**: the §27 layer regenerates identically, and
+  the optional `reauthenticate` start input (§12.1 rule 12c) is not ported.
+- Test: §12.1 rule 12b (#837) — the `axiam_fed_bind` cookie an `sso_start` response sets is
+  presented on the following `sso_complete` of the same client and absent from a second client's
+  (`tests/oidc_sso_test.rs`). No §4 change was needed.
 - **Native sign-in with a provider ID token (contract 1.65, §37).**
   `AxiamClient::login_with_provider_id_token(provider, id_token, nonce, ProviderIdTokenOptions)`
   (one `POST /oauth2/token`, never retried, no `openid` added, nothing logged or kept) and
