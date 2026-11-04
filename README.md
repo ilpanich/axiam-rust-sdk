@@ -69,7 +69,7 @@ A **removal** — of a method, a field, a variant or a type — waits for 2.0.0.
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.65**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.66**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33, §36 and §37, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -95,6 +95,12 @@ into a different claim without anyone editing it. The §21.3.1 amendment of cont
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.66 (§34.10) adds no operation and changes no API here. A federated sign-in is bound
+to the client that started it (§12.1 rule 12b): send the start and the completion of one sign-in
+through the **same `AxiamClient`** — its §4 cookie jar carries the `axiam_fed_bind` cookie, and a
+completion without it is a terminal `401`. The optional `reauthenticate` start input (rule 12c) is
+not exposed.
 
 Contract 1.65 (§34.9, the platform's 1.2.0) adds **native sign-in with a provider ID token** (§37:
 `login_with_provider_id_token` and `native_nonce`, see below) and the **`idp_hint`** input of

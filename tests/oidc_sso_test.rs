@@ -322,3 +322,95 @@ async fn sso_complete_surfaces_a_401_using_the_generic_status_mapping() {
     assert!(matches!(err, AxiamError::Auth { .. }));
     assert!(err.as_oauth_protocol_error().is_none());
 }
+
+/// Contract 1.66, §12.1 rule 12b (#837): the browser-binding cookie an
+/// `sso_start` response sets is presented on the following `sso_complete` of
+/// the **same** client (its §4 jar) and absent from a second client's.
+#[tokio::test]
+async fn sso_complete_presents_the_federation_binding_cookie_of_its_own_start() {
+    const BINDING: &str = "fEdBiNdInGvAlUe0123456789abcdefghijklmnopqr";
+    assert_eq!(BINDING.len(), 43);
+
+    let mock_server = MockServer::start().await;
+    let key = mount_session_jwks(&mock_server).await;
+    let user_id = uuid::Uuid::new_v4();
+    let session_id = uuid::Uuid::new_v4();
+    let access_token = oidc_support::sign_session_access_token(
+        &key,
+        oidc_support::tenant_id(),
+        oidc_support::org_id(),
+        session_id,
+    );
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/federation/oidc/start"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "authorize_url": "https://upstream-idp.example.com/authorize?...",
+                    "state": "federation-state-value",
+                    "expires_in_secs": 600,
+                }))
+                // Plain-http mock: the server's `cookie_secure = false` form.
+                .append_header(
+                    "Set-Cookie",
+                    format!("axiam_fed_bind={BINDING}; Path=/; HttpOnly; SameSite=Strict").as_str(),
+                ),
+        )
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/federation/oidc/callback"))
+        .respond_with(callback_response(user_id, session_id, &access_token))
+        .mount(&mock_server)
+        .await;
+
+    let complete = || SsoCompleteParams {
+        state: "federation-state-value".to_string(),
+        code: "upstream-authorization-code".to_string(),
+    };
+
+    let client = oidc_support::build_client(&mock_server.uri(), true);
+    client
+        .sso_start(SsoStartParams {
+            federation_config_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            redirect_uri: "https://app.example.com/post-login".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("sso_start succeeds");
+    client
+        .sso_complete(complete())
+        .await
+        .expect("sso_complete succeeds");
+
+    // A second, separate client never ran the start: its jar is empty.
+    let other = oidc_support::build_client(&mock_server.uri(), true);
+    let _ = other.sso_complete(complete()).await;
+
+    let callbacks: Vec<Request> = mock_server
+        .received_requests()
+        .await
+        .expect("request recording is on")
+        .into_iter()
+        .filter(|r| r.url.path() == "/api/v1/auth/federation/oidc/callback")
+        .collect();
+    assert_eq!(callbacks.len(), 2);
+    let cookie_header = |r: &Request| -> String {
+        r.headers
+            .get_all("cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let expected = format!("axiam_fed_bind={BINDING}");
+    let first = cookie_header(&callbacks[0]);
+    assert!(
+        first.split("; ").any(|c| c == expected),
+        "the same client's sso_complete must present the binding cookie"
+    );
+    assert!(
+        !cookie_header(&callbacks[1]).contains("axiam_fed_bind="),
+        "a second client must not present another client's binding cookie"
+    );
+}
