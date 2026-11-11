@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-11
+
+### Changed
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump taiki-e/install-action from 2.88.1 to 2.90.2
+
 ## [1.3.0] - 2026-11-08
 
 ### Changed
