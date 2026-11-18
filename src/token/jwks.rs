@@ -1453,7 +1453,7 @@ mod tests {
         let token = jsonwebtoken::encode(
             &Header::new(Algorithm::HS256),
             &claims,
-            &EncodingKey::from_secret(b"irrelevant"),
+            &EncodingKey::from_secret(b"irrelevant").expect("non-empty HMAC secret"),
         )
         .expect("encode HS256 test token");
 
