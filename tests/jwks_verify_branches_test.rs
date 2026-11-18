@@ -89,8 +89,12 @@ async fn verify_rejects_a_non_eddsa_alg_before_any_fetch() {
         exp: 9_999_999_999,
         jti: Uuid::new_v4().to_string(),
     };
-    let token = jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(b"secret"))
-        .expect("encode HS256 token");
+    let token = jsonwebtoken::encode(
+        &header,
+        &claims,
+        &EncodingKey::from_secret(b"secret").expect("non-empty HMAC secret"),
+    )
+    .expect("encode HS256 token");
 
     let verifier = build_verifier("https://iam.example.com");
     let err = verifier

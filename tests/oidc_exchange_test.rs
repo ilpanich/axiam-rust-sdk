@@ -351,7 +351,8 @@ async fn rule1_rejects_a_non_eddsa_algorithm() {
     let hs_token = jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         &claims,
-        &jsonwebtoken::EncodingKey::from_secret(b"a-32-byte-symmetric-secret-value"),
+        &jsonwebtoken::EncodingKey::from_secret(b"a-32-byte-symmetric-secret-value")
+            .expect("non-empty HMAC secret"),
     )
     .expect("encode HS256 token");
     let err = expect_failure(hs_token, vec![], NONCE).await;

@@ -201,7 +201,7 @@ async fn a_wrong_typ_or_alg_is_refused_in_that_order() {
             h
         },
         &c,
-        &EncodingKey::from_secret(Uuid::new_v4().as_bytes()),
+        &EncodingKey::from_secret(Uuid::new_v4().as_bytes()).expect("non-empty HMAC secret"),
     )
     .unwrap();
     assert_eq!(reason(&r, &hs).await, SetFailureReason::InvalidKey);

@@ -166,7 +166,7 @@ async fn rule1_rejects_an_hs_signed_token_bearing_the_eddsa_kid() {
     let token = jsonwebtoken::encode(
         &header,
         &good_claims(),
-        &EncodingKey::from_secret(b"irrelevant-shared-secret"),
+        &EncodingKey::from_secret(b"irrelevant-shared-secret").expect("non-empty HMAC secret"),
     )
     .expect("encode HS256 token");
 
