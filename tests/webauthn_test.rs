@@ -163,6 +163,8 @@ fn access_token(tenant_id: Uuid, org_id: Uuid) -> String {
     der.extend_from_slice(&TEST_ED25519_SEED);
     let key = EncodingKey::from_ed_der(&der);
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.into());
     jsonwebtoken::encode(&header, &claims, &key).expect("encode test access token")
 }

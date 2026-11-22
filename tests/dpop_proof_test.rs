@@ -497,3 +497,25 @@ fn a_malformed_proof_is_refused_rather_than_panicking() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ride-along (SA-27): the freshness arithmetic must not overflow
+// ---------------------------------------------------------------------------
+
+/// An attacker-chosen `iat` of `i64::MIN` made `now - iat` overflow: a panic in
+/// a debug build, a wrap in release. It must be a plain refusal.
+#[test]
+fn an_extreme_iat_is_refused_without_overflowing() {
+    let key = ed25519_key(77);
+    let store = InMemoryJtiStore::new();
+    let proof = sign_proof(
+        &key.signing,
+        &json!({"typ": "dpop+jwt", "alg": "EdDSA", "jwk": key.jwk}),
+        &claims_with(json!({"iat": i64::MIN})),
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_dpop_proof(&proof, &request(), &store)
+    }));
+    let result = result.expect("verify_dpop_proof must not panic on an extreme iat");
+    assert!(result.is_err(), "extreme iat must be refused");
+}

@@ -20,7 +20,10 @@
 //!   (401 unauthenticated, 403 denied, 400 unresolvable resource, 503 authz
 //!   transport failure — fail closed).
 //! - [`macro@require_role`] — require one of a set of roles, checked locally
-//!   against the verified token's claims (403 on failure).
+//!   against the verified token's `roles` claim (403 on failure, and 403 when
+//!   the token has no `roles` claim).
+//! - [`macro@require_scope`] — require one of a set of OAuth2 scopes, checked
+//!   locally against the token's `scope` claim (403 on failure).
 //!
 //! [`axiam-sdk`]: https://docs.rs/axiam-sdk
 //! [`axiam_sdk::middleware`]: https://docs.rs/axiam-sdk/latest/axiam_sdk/middleware/
@@ -324,6 +327,70 @@ pub fn require_role(args: TokenStream, item: TokenStream) -> TokenStream {
     let extra_inputs = quote! {
         __axiam_req: ::actix_web::HttpRequest,
         __axiam_require_role_user: ::axiam_sdk::middleware::AxiamUser,
+    };
+
+    expand_wrapper(func, extra_inputs, guard)
+}
+
+/// Require one of a set of OAuth2 scopes on an Actix-Web handler (CONTRACT.md
+/// §11 `require_scope`, contract 1.68).
+///
+/// A **local** check against the verified token's `scope` claim — it performs
+/// no server round-trip, so it is cheaper but coarser than
+/// [`macro@require_access`]. Scopes are what the *client* was granted, not
+/// what the user is. Passes if the token carries **at least one** of the
+/// listed scopes, otherwise responds
+/// `403 authorization_denied`. An unauthenticated request is rejected with
+/// `401 authentication_failed` by the injected §10 extractor first.
+///
+/// ```ignore
+/// use axiam_sdk::require_scope;
+///
+/// #[require_scope("reports:read")]
+/// async fn reports() -> &'static str {
+///     "report"
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn require_scope(args: TokenStream, item: TokenStream) -> TokenStream {
+    let scopes = parse_macro_input!(args with Punctuated::<Expr, Token![,]>::parse_terminated);
+    let func = parse_macro_input!(item as ItemFn);
+
+    let mut scope_lits: Vec<String> = Vec::new();
+    for expr in &scopes {
+        match lit_string(expr) {
+            Some(s) => scope_lits.push(s),
+            None => {
+                return compile_error_spanned(
+                    expr,
+                    "require_scope arguments must be string literals",
+                );
+            }
+        }
+    }
+    if scope_lits.is_empty() {
+        return compile_error_spanned(
+            &func.sig,
+            "require_scope requires at least one scope, e.g. #[require_scope(\"reports:read\")]",
+        );
+    }
+
+    if func.sig.asyncness.is_none() {
+        return compile_error_spanned(func.sig.fn_token, "require_scope requires an `async fn`");
+    }
+
+    let guard = quote! {
+        if let ::core::result::Result::Err(err) = ::axiam_sdk::middleware::require_scope_check(
+            &__axiam_require_scope_user,
+            &[#(#scope_lits),*],
+        ) {
+            return ::actix_web::ResponseError::error_response(&err);
+        }
+    };
+
+    let extra_inputs = quote! {
+        __axiam_req: ::actix_web::HttpRequest,
+        __axiam_require_scope_user: ::axiam_sdk::middleware::AxiamUser,
     };
 
     expand_wrapper(func, extra_inputs, guard)

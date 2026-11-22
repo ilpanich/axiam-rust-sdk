@@ -18,6 +18,7 @@
 //! impossible to work around: a reactor body signs `hmac_signature` as
 //! **`null`**, where §8's own two message types omit it entirely.
 
+pub mod authz_requester;
 pub mod consumer;
 pub mod hmac;
 pub mod messages;
@@ -26,6 +27,9 @@ pub mod reactor;
 pub(crate) mod test_log;
 pub mod transport;
 
+pub use authz_requester::{
+    AUTHZ_REQUEST_QUEUE, AuthzDecision, AuthzRequester, AuthzRequesterOptions,
+};
 pub use consumer::{consume, consume_with_tls};
 pub use hmac::{sign_payload, verify_payload};
 pub use messages::{AuditEventMessage, AuthzRequest};

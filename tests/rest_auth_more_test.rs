@@ -44,6 +44,8 @@ struct TestClaims {
 
 fn issue_test_access_token(tenant_id: Uuid, org_id: Uuid) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
@@ -390,6 +392,8 @@ struct CustomClaims {
 
 fn issue_custom_token(tenant_id: &str, org_id: Option<&str>, jti: Option<&str>) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = CustomClaims {
         sub: Uuid::new_v4().to_string(),

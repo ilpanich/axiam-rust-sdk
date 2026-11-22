@@ -26,7 +26,7 @@
 //!    (fail closed, §10.1 rule 4). The §11 `require_auth`/`require_access`/
 //!    `require_role` macros inject this same extractor, so they inherit the
 //!    identical set with no separate verification path of their own.
-//! 3. Build and inject `AxiamUser { user_id, tenant_id, roles }` from the
+//! 3. Build and inject `AxiamUser { user_id, tenant_id, roles, scopes }` from the
 //!    verified claims (§10.3).
 //! 4. Map `AuthError` -> HTTP 401 and `AuthzError` -> HTTP 403 with a
 //!    standardized JSON error body (§10 closing requirement), via
@@ -149,12 +149,18 @@ pub struct AxiamUser {
     pub user_id: Uuid,
     /// Tenant the access token is scoped to.
     pub tenant_id: Uuid,
-    /// Derived from the verified access token's `scope` claim (space-separated
-    /// OAuth2 scopes) — AXIAM's `AccessTokenClaims` has no dedicated `roles`
-    /// claim (confirmed against `crates/axiam-auth/src/token.rs`), so `scope`
-    /// is the closest available authorization-relevant claim to surface here.
-    /// Empty when the token carries no `scope` claim.
+    /// The verified access token's `roles` claim: the names of the subject's
+    /// global roles in the tenant (CONTRACT.md §11.2 rule 11, contract 1.68).
+    ///
+    /// **Never derived from `scope`.** Empty when the token carries no `roles`
+    /// claim, which makes `require_role` fail closed. The server emits the
+    /// claim only when the client requested, and is allowed, the `roles`
+    /// scope: an application that uses `require_role` must request it.
     pub roles: Vec<String>,
+    /// The verified access token's `scope` claim, split on whitespace — the
+    /// OAuth2 scopes granted to the *client*, which say nothing about the
+    /// user's roles. Read by `require_scope`.
+    pub scopes: Vec<String>,
 }
 
 /// The SDK's extractor-local error type, mapping to the standardized JSON
@@ -469,7 +475,12 @@ impl actix_web::FromRequest for AxiamUser {
             let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| {
                 AxiamExtractorError::invalid_claim("tenant_id", invalid_token_challenge.clone())
             })?;
-            let roles = claims
+            // §11.2 rule 11 (contract 1.68): `roles` is read ONLY from the
+            // token's `roles` claim and is empty (so `require_role` fails
+            // closed) when the claim is absent. It is never derived from
+            // `scope`; scopes go to `scopes` and `require_scope`.
+            let roles = claims.roles.clone().unwrap_or_default();
+            let scopes = claims
                 .scope
                 .as_deref()
                 .map(|s| s.split_whitespace().map(str::to_owned).collect())
@@ -479,6 +490,7 @@ impl actix_web::FromRequest for AxiamUser {
                 user_id,
                 tenant_id,
                 roles,
+                scopes,
             })
         })
     }

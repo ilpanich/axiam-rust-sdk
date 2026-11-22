@@ -438,7 +438,7 @@ dependencies for the transports/integrations it actually uses:
 |---------|---------|---------|
 | `rest` | on | `AxiamClient` REST transport: `login`/`verify_mfa`/`refresh`/`logout`, the §6.1 mTLS device login `authenticate_device`, the §5.2 acting tenant (`with_acting_tenant` / `acting_tenant` / `clear_acting_tenant`), `check_access`/`can`/`batch_check`, cookie-jar session management, local JWKS/EdDSA verification, the CONTRACT.md §12 OIDC/SSO relying-party helpers (`oidc_discover`, `oidc_begin`, `oidc_exchange`, `oidc_refresh`, `login_client_credentials`, `introspect`, `revoke`, `sso_start`, `sso_complete`, `sso_providers`, `sso_start_oauth2`, `sso_complete_oauth2`, `sso_complete_handoff`), the §12.7 logout helpers (`logout_url`, `verify_logout_token`), the §14 device grant (`device_authorize`, `device_poll`, `device_login`) and the §15 `token_exchange` |
 | `grpc` | on | `AuthzGrpcClient` gRPC transport: `check_access`/`batch_check`; `UserInfoGrpcClient` gRPC `get_user_info` (OIDC identity read, CONTRACT §1.1); `TokenGrpcClient` gRPC `validate_token`/`introspect_token` (CONTRACT §1.1.1, reading `cnf` per §10.3) — all over a shared lazily-connected `tonic::Channel`, with the shared single-flight refresh guard driven on `UNAUTHENTICATED` |
-| `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8), and `reactor_serve(config, handler)` — the CONTRACT.md §22 reactor runtime (hook events, signed in **both** directions) |
+| `amqp` | on | `consume(amqp_url, queue, signing_key, handler)` closure-handler AMQP consumer with mandatory pre-handler HMAC-SHA256 verification (CONTRACT.md §8), `AuthzRequester` — signed AMQP authorization requests with verified, bound answers (CONTRACT.md §8), and `reactor_serve(config, handler)` — the CONTRACT.md §22 reactor runtime (hook events, signed in **both** directions) |
 | `observability` | off | Enables `tracing` instrumentation crate-wide beyond the mandatory AMQP security-event logging (which is always emitted regardless of this flag) |
 | — | — | `webhook::verify_webhook` (CONTRACT.md §13) has no feature of its own: it is compiled whenever `rest` **or** `amqp` is on, since both already vendor its `hmac`/`sha2`/`hex`/`subtle` inputs. With the default feature set it is always available |
 | `actix` | off | The `AxiamUser` Actix-Web `FromRequest` extractor (CONTRACT.md §10 route guard). Implies `rest` (shares the same `JwksVerifier`) |
@@ -676,6 +676,42 @@ consume_with_tls("amqps://broker.internal:5671", "axiam.authz.request", signing_
 See [`examples/amqp_consumer.rs`](examples/amqp_consumer.rs). Every delivery's HMAC-SHA256
 signature (CONTRACT.md §8) is verified before the handler runs; failures are nacked without
 requeue.
+
+#### Authorization requests over AMQP (`AuthzRequester`, CONTRACT.md §8)
+
+```rust,no_run
+use axiam_sdk::amqp::{AmqpTlsConfig, AuthzRequester, AuthzRequesterOptions};
+use axiam_sdk::Sensitive;
+use uuid::Uuid;
+
+# async fn run(tenant: Uuid, subkey: Sensitive<Vec<u8>>, user: Uuid, doc: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+// `subkey` is the tenant's AMQP subkey for key version 2 (CONTRACT.md §8.1).
+let requester = AuthzRequester::connect(
+    "amqps://broker.internal:5671",
+    &AmqpTlsConfig::default(),
+    tenant,
+    subkey,
+    AuthzRequesterOptions::default(),
+)
+.await?;
+let decision = requester.check(user, "documents:read", doc, None).await?;
+if decision.allowed { /* ... */ }
+# Ok(())
+# }
+```
+
+Each request goes out with a fresh random `correlation_id` and `nonce` and a `reply_to` naming a
+private, exclusive, auto-delete queue only this requester consumes. A response is accepted only
+when it verifies under your tenant's subkey over the bytes received and binds to one outstanding
+request; anything else is nacked, logged and ignored while `check` keeps waiting for the genuine
+answer (it times out after 10 s by default; see `AuthzRequesterOptions::timeout`). A response is
+never an allow because it failed to verify. Against a server older than contract 1.68, whose
+responses are unsigned, `AuthzRequesterOptions::allow_unsigned_responses()` is an explicit
+opt-out for one rolling upgrade; it is off by default and never admits a response that carries a
+signature and fails. The signature proves the answer came from a holder of the tenant subkey, not
+that no other service of the same tenant forged it: where several services of one tenant publish
+authorization requests, keep each on its own exclusive reply queue (as above) and deny SDK
+principals read access to `axiam.authz.request` at the broker.
 
 **A broker confirm is not evidence that AXIAM saw a message** (CONTRACT.md §8, minimal
 profile). A publisher confirm — including the one `reactor_serve` waits for on a reply — means
@@ -921,7 +957,7 @@ Register a `web::Data<AxiamClient>` (used to issue the check) and a
 handlers:
 
 ```rust,ignore
-use axiam_sdk::{require_access, require_auth, require_role};
+use axiam_sdk::{require_access, require_auth, require_role, require_scope};
 use axiam_sdk::middleware::AxiamUser;
 
 // Require a `read` check on the `{id}` path resource. The handler may still
@@ -938,9 +974,18 @@ async fn whoami() -> &'static str {
 }
 
 // Local, no-round-trip role check (not a substitute for require_access).
+// Reads ONLY the token's `roles` claim and fails closed when it is absent:
+// the application must request the `roles` scope for this to ever pass.
 #[require_role("admin")]
 async fn admin_panel() -> &'static str {
     "welcome, admin"
+}
+
+// Local check against the token's OAuth2 `scope` claim (what the client was
+// granted, not who the user is).
+#[require_scope("reports:read")]
+async fn reports() -> &'static str {
+    "reports"
 }
 ```
 

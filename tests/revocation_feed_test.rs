@@ -52,6 +52,8 @@ fn ed25519_key() -> EncodingKey {
 
 fn sign(claims: &Value) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     jsonwebtoken::encode(&header, claims, &ed25519_key()).expect("encode EdDSA token")
 }

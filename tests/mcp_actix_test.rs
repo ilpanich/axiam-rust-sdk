@@ -76,6 +76,8 @@ struct TestClaims {
 /// vary — mirrors the reference port's own `token({ aud, expired })` helper.
 fn issue_token(aud: Option<&str>, expired: bool) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
@@ -354,6 +356,7 @@ async fn a_no_grant_denial_on_a_scoped_route_answers_vector_3_body_unchanged() {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
 
     let err = RequireAccess::new("mcp:invoke")
@@ -394,6 +397,7 @@ async fn names_the_scope_the_route_asked_for_verbatim() {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
 
     // §28.5 rule 6: never synthesised, never derived from `action`/`resource`.
@@ -416,6 +420,7 @@ async fn carries_no_challenge_on_denied_by_rule_an_absent_reason_code_or_no_scop
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
     let verifier = mcp_only_verifier();
 
@@ -491,6 +496,7 @@ async fn touches_no_other_response_an_allow_gains_nothing() {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
 
     // A challenge on a success is a client asking the authorization server
@@ -631,6 +637,7 @@ async fn emits_no_www_authenticate_on_any_response_when_resource_metadata_url_is
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
     // No `.with_resource_metadata_url(...)` call at all: §28 stays off.
     let denied = RequireAccess::new("mcp:invoke")

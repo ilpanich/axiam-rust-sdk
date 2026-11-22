@@ -53,6 +53,8 @@ fn ed25519_key() -> EncodingKey {
 /// exercised deterministically.
 fn issue_ed25519_token(exp: i64) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
@@ -174,6 +176,8 @@ async fn verify_maps_a_wrong_signature_to_an_auth_error() {
     // specifically (distinct from `ExpiredSignature` and the unusable-JWK
     // "can't build a decoding key at all" branch covered elsewhere).
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
@@ -228,6 +232,8 @@ async fn verify_maps_a_token_missing_the_exp_claim_to_an_auth_error() {
     // REQUIRED, so this must fail with a missing-required-claim error distinct
     // from `InvalidSignature`/`ExpiredSignature`.
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims_without_exp = json!({
         "sub": Uuid::new_v4().to_string(),

@@ -68,6 +68,8 @@ fn good_claims() -> Value {
 
 fn sign_eddsa(claims: &Value) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     jsonwebtoken::encode(&header, claims, &ed25519_key()).expect("encode EdDSA token")
 }
@@ -187,6 +189,8 @@ async fn rule1_rejects_a_token_signed_by_a_foreign_key() {
     let mut wrong_der = ED25519_PKCS8_DER_PREFIX.to_vec();
     wrong_der.extend_from_slice(&wrong_seed);
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let token = jsonwebtoken::encode(
         &header,
@@ -452,6 +456,8 @@ async fn signature_only_unchecked_still_rejects_a_bad_signature() {
     let mut wrong_der = ED25519_PKCS8_DER_PREFIX.to_vec();
     wrong_der.extend_from_slice(&wrong_seed);
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let token = jsonwebtoken::encode(
         &header,
