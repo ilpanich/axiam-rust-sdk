@@ -104,6 +104,11 @@ pub struct Claims {
     /// OAuth2 scopes (space-separated string), if any.
     #[serde(default)]
     pub scope: Option<String>,
+    /// The subject's global role names in the tenant (CONTRACT.md §11.2
+    /// rule 11, contract 1.68). Present only when the client requested the
+    /// `roles` scope; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
     /// RFC 7800 / RFC 8705 §3.1 confirmation claim — present **only** on a
     /// sender-constrained token (CONTRACT.md §10.1 rule 9, contract 1.15).
     ///
@@ -932,7 +937,7 @@ impl JwksVerifier {
     /// which every public entry point then applies with the evidence it has.
     /// Private on purpose: no caller may stop here.
     async fn verify_rules_one_to_eight(&self, token: &str) -> Result<Claims, AxiamError> {
-        let claims = self.verify_claims(token).await?;
+        let claims = self.verify_claims(token, AccessTokenRules::Strict).await?;
         self.assert_tenant(&claims)?;
         self.assert_not_revoked(&claims).await?;
         Ok(claims)
@@ -1039,7 +1044,9 @@ impl JwksVerifier {
     /// the signature does not verify, or the payload is not shaped like
     /// [`Claims`]; [`AxiamError::Network`] if the JWKS is unreachable.
     pub async fn verify_signature_only_unchecked(&self, token: &str) -> Result<Claims, AxiamError> {
-        let decoding_key = self.decoding_key_for(token).await?;
+        let decoding_key = self
+            .decoding_key_for(token, AccessTokenRules::Lenient)
+            .await?;
 
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.required_spec_claims.clear();
@@ -1048,7 +1055,7 @@ impl JwksVerifier {
         validation.validate_aud = false;
         validation.leeway = 0;
 
-        decode_claims(token, &decoding_key, &validation)
+        decode_claims(token, &decoding_key, &validation, false)
     }
 
     /// The client's own freshly-issued session token, decoded to learn the
@@ -1067,13 +1074,17 @@ impl JwksVerifier {
     /// the shared [`CLOCK_SKEW_LEEWAY_SECS`] — is applied exactly as in
     /// [`Self::verify`].
     pub(crate) async fn verify_session_token(&self, token: &str) -> Result<Claims, AxiamError> {
-        self.verify_claims(token).await
+        self.verify_claims(token, AccessTokenRules::Lenient).await
     }
 
     /// Everything in §10.1 except rule 4 (the tenant assertion), shared by
     /// [`Self::verify`] and [`Self::verify_session_token`].
-    async fn verify_claims(&self, token: &str) -> Result<Claims, AxiamError> {
-        let decoding_key = self.decoding_key_for(token).await?;
+    async fn verify_claims(
+        &self,
+        token: &str,
+        rules: AccessTokenRules,
+    ) -> Result<Claims, AxiamError> {
+        let decoding_key = self.decoding_key_for(token, rules).await?;
 
         let mut validation = Validation::new(Algorithm::EdDSA);
         // Rule 7: one named, bounded, non-operator-settable leeway for both
@@ -1128,12 +1139,21 @@ impl JwksVerifier {
             }
         }
 
-        decode_claims(token, &decoding_key, &validation)
+        decode_claims(
+            token,
+            &decoding_key,
+            &validation,
+            rules == AccessTokenRules::Strict,
+        )
     }
 
     /// §10.1 rule 1's first half: pin `alg` to EdDSA from the header
     /// **before** any JWKS lookup, then resolve the `kid` to a decoding key.
-    async fn decoding_key_for(&self, token: &str) -> Result<DecodingKey, AxiamError> {
+    async fn decoding_key_for(
+        &self,
+        token: &str,
+        rules: AccessTokenRules,
+    ) -> Result<DecodingKey, AxiamError> {
         let header = decode_header(token).map_err(|e| AxiamError::Auth {
             message: format!("invalid token header: {e}"),
             oauth: None,
@@ -1154,8 +1174,35 @@ impl JwksVerifier {
             });
         }
 
+        let strict = rules == AccessTokenRules::Strict;
+        if strict {
+            // Rule 10 (contract 1.68): a header that names a `typ` must name
+            // `at+jwt`. Checked before any key lookup, like `alg`.
+            if let Some(typ) = header.typ.as_deref()
+                && !is_access_token_typ(typ)
+            {
+                return Err(auth_err(
+                    "token typ is not at+jwt; refusing a non-access token (CONTRACT.md §10.1 rule 10)",
+                ));
+            }
+            // Rule 12: `kid` is REQUIRED on the access-token path. No
+            // single-key fallback, no trying every key.
+            if header.kid.is_none() {
+                return Err(auth_err(
+                    "token header has no kid; refusing (CONTRACT.md §10.1 rule 12)",
+                ));
+            }
+        }
+        let select = |set: &JwkSet| {
+            if strict {
+                header.kid.as_deref().and_then(|k| find_jwk_by_kid(set, k))
+            } else {
+                find_jwk(set, header.kid.as_deref())
+            }
+        };
+
         let jwks = self.get_or_fetch().await?;
-        let jwk = find_jwk(&jwks, header.kid.as_deref());
+        let jwk = select(&jwks);
 
         let jwk = match jwk {
             Some(j) => j,
@@ -1163,7 +1210,7 @@ impl JwksVerifier {
                 // Unknown kid → forced refetch (rate-limited), matching the
                 // server's own kid-rotation handling (D-11).
                 let refreshed = self.force_refetch_if_allowed().await?;
-                find_jwk(&refreshed, header.kid.as_deref()).ok_or_else(|| AxiamError::Auth {
+                select(&refreshed).ok_or_else(|| AxiamError::Auth {
                     message: "unknown kid after JWKS refetch".into(),
                     oauth: None,
                     reason: None,
@@ -1344,6 +1391,7 @@ fn decode_claims(
     token: &str,
     decoding_key: &DecodingKey,
     validation: &Validation,
+    reject_purpose: bool,
 ) -> Result<Claims, AxiamError> {
     let data = decode::<Claims>(token, decoding_key, validation).map_err(|e| {
         use jsonwebtoken::errors::ErrorKind;
@@ -1372,7 +1420,60 @@ fn decode_claims(
         }
     })?;
 
+    if reject_purpose {
+        // Rule 11 (contract 1.68): a `purpose` member refuses the token
+        // whatever its value, `null` included. Read from the verified payload
+        // itself (same token, same key, same validation), not from `Claims`,
+        // which ignores unknown members.
+        let raw = decode::<serde_json::Value>(token, decoding_key, validation)
+            .map_err(|_| auth_err("token payload could not be re-read"))?;
+        if raw
+            .claims
+            .as_object()
+            .is_some_and(|o| o.contains_key("purpose"))
+        {
+            return Err(auth_err(
+                "token carries a purpose claim; refusing a non-access token (CONTRACT.md §10.1 rule 11)",
+            ));
+        }
+    }
+
     Ok(data.claims)
+}
+
+/// Which §10.1 rule set a token is verified under.
+///
+/// `Strict` is the access-token path: rules 10-12 (`typ`, `purpose`, `kid`).
+/// `Lenient` is for the client's own freshly-issued session token and the
+/// diagnostic `verify_signature_only_unchecked`, neither of which is a guard.
+#[cfg(any(feature = "rest", feature = "actix"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccessTokenRules {
+    Strict,
+    Lenient,
+}
+
+/// §10.1 rule 10: `at+jwt`, ASCII case-insensitive, with or without the
+/// `application/` prefix (RFC 7515 §4.1.9).
+#[cfg(any(feature = "rest", feature = "actix"))]
+fn is_access_token_typ(typ: &str) -> bool {
+    let t = typ;
+    let t = match t.get(..12) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("application/") => &t[12..],
+        _ => t,
+    };
+    t.eq_ignore_ascii_case("at+jwt")
+}
+
+#[cfg(any(feature = "rest", feature = "actix"))]
+fn auth_err(message: &str) -> AxiamError {
+    AxiamError::Auth {
+        message: message.into(),
+        oauth: None,
+        reason: None,
+        set_reason: None,
+        retry_after: None,
+    }
 }
 
 /// Find a JWK by `kid` in a JWK set. If `kid` is `None` and the set has
@@ -1448,6 +1549,7 @@ mod tests {
             sid: None,
             aud: None,
             scope: None,
+            roles: None,
             cnf: None,
         };
         let token = jsonwebtoken::encode(

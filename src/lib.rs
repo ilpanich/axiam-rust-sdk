@@ -136,7 +136,7 @@ pub mod ssf;
 // `use axiam_sdk::require_access;` and never name the macro crate directly.
 // The macros expand to the runtime helpers in [`middleware::authz`].
 #[cfg(feature = "macros")]
-pub use axiam_sdk_macros::{require_access, require_auth, require_role};
+pub use axiam_sdk_macros::{require_access, require_auth, require_role, require_scope};
 
 // §22.14 declarative reactor handler binding: `#[reactor_handler("...")]`, from
 // the same companion crate. Gated on its own feature rather than on `macros`

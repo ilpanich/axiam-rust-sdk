@@ -22,8 +22,8 @@ pub mod mcp;
 
 pub use actix::{AxiamUser, PeerCertificate};
 pub use authz::{
-    AuthzGuardError, RequireAccess, UmaChallenger, require_role_check, resource_from_path,
-    resource_from_static,
+    AuthzGuardError, RequireAccess, UmaChallenger, require_role_check, require_scope_check,
+    resource_from_path, resource_from_static,
 };
 pub use mcp::{
     BearerChallengeError, BearerChallengeOptions, PROTECTED_RESOURCE_METADATA_PREFIX,

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-22
+
+### Security
+
+- **N14 (CONTRACT §10.1 rules 10-12).** `JwksVerifier::verify` and
+  `verify_with_proofs` (and so the Actix `AxiamUser` extractor and the
+  `#[require_*]` macros) now refuse a token whose JOSE `typ` is present and not
+  `at+jwt` (`application/` prefix and case ignored), a token whose claim set
+  has a `purpose` member (whatever its value), and a token with no `kid`. The
+  single-key JWKS fallback is gone on this path. Before, a `kid`-less MFA
+  challenge or WebAuthn state token verified as an access token with only
+  `expect_tenant_id` configured.
+- **N15 (CONTRACT §11.2 rule 11).** `AxiamUser::roles` is read only from a
+  `roles` claim and is empty when the claim is absent, so `require_role` fails
+  closed; it is no longer derived from `scope`.
+- DPoP freshness arithmetic is checked: an extreme `iat` is refused instead of
+  overflowing.
+
+### Added
+
+- `#[require_scope(...)]`, `middleware::require_scope_check` and
+  `AxiamUser::scopes` (the token's `scope` claim, split on whitespace).
+- `Claims::roles` (the `roles` claim).
+- **AMQP authorization requester (N2, CONTRACT §8 "Signed authorization
+  responses").** `amqp::AuthzRequester` (`new` over a channel, or `connect` over
+  `amqps://`), `AuthzRequesterOptions` and `AuthzDecision`. It publishes a
+  signed `AuthzRequest` to `axiam.authz.request` with a fresh random
+  `correlation_id` and `nonce` and a `reply_to` naming a private, exclusive,
+  auto-delete, broker-named queue (a name that is empty or starts with `axiam.`
+  is refused). An answer is accepted only if it parses strictly (boolean
+  `allowed`; `tenant_id`, `nonce`, trailing `hmac_signature` present; no
+  duplicate or case-variant keys), verifies under the requester's own tenant
+  subkey over the received bytes with the signature member cut out (never
+  re-serialized; the decision is decoded from those same bytes), and binds to
+  the requester's tenant and to one outstanding `correlation_id` plus `nonce`,
+  which is then retired. Anything else is nacked without requeue, logged
+  without a signature value, never an allow, and `check` keeps waiting for the
+  genuine answer. Unsigned responses are refused unless
+  `AuthzRequesterOptions::allow_unsigned_responses()` is set, and that opt-out
+  never admits a response that carries a signature member and fails.
+
+### Changed (behaviour change; migration)
+
+- `AxiamUser` gained a public field `scopes`; code that builds an `AxiamUser`
+  with a struct literal must add it.
+- Access tokens must carry `typ: at+jwt` (or no `typ`), a `kid`, and no
+  `purpose`. An access token a pre-1.67 server minted (`typ: JWT`) is refused
+  by guards; its holder refreshes (at most one access-token lifetime).
+- `require_role` now needs the server's `roles` claim: the application must
+  request the `roles` scope (server 1.68, SA-18). Code that relied on a scope
+  named like a role must switch to `require_scope`.
+- Vendored `CONTRACT.md` (1.68), `openapi.json` and `management-registry.json`
+  re-synced; the generated management models regenerated.
+
 ## [1.3.1] - 2026-11-11
 
 ### Changed

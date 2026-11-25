@@ -57,9 +57,11 @@ async fn get_document(user: AxiamUser) -> String {
     format!("user {} is authorized to read this document", user.user_id)
 }
 
-/// §11 `require_role`: a local check against the verified token's roles claim
-/// (no server round-trip). Not a substitute for a resource-level
-/// `require_access` check.
+/// §11 `require_role`: a local check against the verified token's `roles`
+/// claim (no server round-trip), which the server emits only when the client
+/// requested the `roles` scope; it fails closed without it. Never derived from
+/// `scope` (use `require_scope` for that). Not a substitute for a
+/// resource-level `require_access` check.
 #[require_role("admin")]
 async fn admin_panel() -> &'static str {
     "welcome to the admin panel"

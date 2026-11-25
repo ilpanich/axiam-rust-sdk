@@ -263,6 +263,27 @@ pub fn require_role_check(user: &AxiamUser, required: &[&str]) -> Result<(), Aut
     }
 }
 
+/// Local scope check (§11 `require_scope`, contract 1.68): succeeds if the
+/// verified token's `scope` claim holds at least one of `required`, otherwise
+/// [`AuthzGuardError::Denied`] (403). Also denies when the token has no
+/// `scope` claim.
+///
+/// Scopes are what the *client* was granted, not what the user is: use
+/// [`require_role_check`] for roles.
+pub fn require_scope_check(user: &AxiamUser, required: &[&str]) -> Result<(), AuthzGuardError> {
+    let granted = user
+        .scopes
+        .iter()
+        .any(|held| required.iter().any(|want| held == want));
+    if granted {
+        Ok(())
+    } else {
+        Err(AuthzGuardError::denied(
+            "token does not carry any of the required scopes".to_string(),
+        ))
+    }
+}
+
 /// A configured `WWW-Authenticate: UMA` challenge emitter (§20.3, emit half).
 ///
 /// Attach one to a [`RequireAccess`] with
@@ -535,6 +556,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: roles.iter().map(|s| s.to_string()).collect(),
+            scopes: Vec::new(),
         }
     }
 

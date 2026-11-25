@@ -414,7 +414,14 @@ pub fn verify_dpop_proof(
         .ok_or_else(|| auth("DPoP proof iat must be a number"))?;
     let now = i64::try_from(request.now_unix.unwrap_or_else(now_unix)).unwrap_or(i64::MAX);
     let leeway = i64::try_from(request.leeway_secs).unwrap_or(i64::MAX);
-    if (now - iat).abs() > leeway {
+    // Checked: an attacker-chosen `iat` near `i64::MIN` must not overflow the
+    // subtraction (a panic in debug builds, a wrap past the window in
+    // release); `None` fails closed as outside the window.
+    let outside_window = now
+        .checked_sub(iat)
+        .and_then(i64::checked_abs)
+        .is_none_or(|skew| skew > leeway);
+    if outside_window {
         return Err(auth(format!(
             "DPoP proof iat is outside the {}s freshness window",
             request.leeway_secs

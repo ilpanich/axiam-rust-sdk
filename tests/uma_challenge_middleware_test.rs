@@ -40,6 +40,7 @@ fn user() -> AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     }
 }
 

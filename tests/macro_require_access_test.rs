@@ -13,7 +13,7 @@ use actix_web::{App, HttpResponse, test, web};
 use axiam_sdk::client::AxiamClient;
 use axiam_sdk::middleware::{AxiamUser, RequireAccess};
 use axiam_sdk::token::JwksVerifier;
-use axiam_sdk::{require_access, require_auth, require_role};
+use axiam_sdk::{require_access, require_auth, require_role, require_scope};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::json;
@@ -51,10 +51,18 @@ struct TestClaims {
     exp: i64,
     jti: String,
     scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    roles: Option<Vec<String>>,
 }
 
 fn issue_token(user_id: Uuid, scope: Option<&str>) -> String {
+    issue_token_with_roles(user_id, scope, None)
+}
+
+fn issue_token_with_roles(user_id: Uuid, scope: Option<&str>, roles: Option<&[&str]>) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: user_id.to_string(),
@@ -65,6 +73,7 @@ fn issue_token(user_id: Uuid, scope: Option<&str>) -> String {
         exp: 9_999_999_999,
         jti: Uuid::new_v4().to_string(),
         scope: scope.map(str::to_owned),
+        roles: roles.map(|r| r.iter().map(|s| s.to_string()).collect()),
     };
     let mut der = ED25519_PKCS8_DER_PREFIX.to_vec();
     der.extend_from_slice(&TEST_ED25519_SEED);
@@ -123,6 +132,11 @@ async fn read_doc_scoped() -> HttpResponse {
 #[require_auth]
 async fn auth_only() -> HttpResponse {
     HttpResponse::Ok().body("auth ok")
+}
+
+#[require_scope("admin")]
+async fn scope_admin_only() -> HttpResponse {
+    HttpResponse::Ok().body("scope admin ok")
 }
 
 #[require_role("admin")]
@@ -366,6 +380,7 @@ async fn require_access_check_maps_a_403_authz_response_to_denied() {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
 
     let err = RequireAccess::new("read")
@@ -396,6 +411,7 @@ async fn require_access_check_maps_a_401_authz_response_to_unauthenticated() {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec![],
+        scopes: vec![],
     };
 
     let err = RequireAccess::new("read")
@@ -448,9 +464,9 @@ async fn require_auth_rejects_anonymous() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
-/// `#[require_role]`: the verified token's `scope` claim surfaces as `roles`;
-/// a token carrying `admin` passes the local check (no server round-trip — the
-/// authz endpoint is not mounted).
+/// `#[require_role]` reads ONLY the `roles` claim (N15, CONTRACT.md §11.2
+/// rule 11): a token carrying `roles: ["admin"]` passes the local check (no
+/// server round-trip -- the authz endpoint is not mounted).
 #[tokio::test]
 async fn require_role_allows_when_role_present() {
     let server = MockServer::start().await;
@@ -469,12 +485,66 @@ async fn require_role_allows_when_role_present() {
             "Authorization",
             format!(
                 "Bearer {}",
-                issue_token(Uuid::new_v4(), Some("admin editor"))
+                issue_token_with_roles(Uuid::new_v4(), Some("openid"), Some(&["admin", "editor"]))
             ),
         ))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200);
+}
+
+/// N15: scope `openid admin` and NO `roles` claim is refused by
+/// `require_role("admin")` -- a client-requested scope is not a role -- and is
+/// admitted by `require_scope("admin")`.
+#[tokio::test]
+async fn n15_scope_named_like_a_role_is_not_a_role() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(verifier_for(&server)))
+            .route("/admin", web::get().to(admin_only))
+            .route("/scoped", web::get().to(scope_admin_only)),
+    )
+    .await;
+    let token = issue_token(Uuid::new_v4(), Some("openid admin"));
+
+    let req = test::TestRequest::get()
+        .uri("/admin")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403, "scope must not grant a role");
+
+    let req = test::TestRequest::get()
+        .uri("/scoped")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+/// N15: a real role holder whose token lacks the scope is refused by
+/// `require_scope`, and `roles` does not feed `require_scope`.
+#[tokio::test]
+async fn n15_require_scope_reads_only_scope() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(verifier_for(&server)))
+            .route("/scoped", web::get().to(scope_admin_only)),
+    )
+    .await;
+    let token = issue_token_with_roles(Uuid::new_v4(), Some("openid"), Some(&["admin"]));
+    let req = test::TestRequest::get()
+        .uri("/scoped")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 403);
 }
 
 /// `#[require_role]`: a token without the required role → 403.

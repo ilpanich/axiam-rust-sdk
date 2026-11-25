@@ -66,6 +66,8 @@ fn issue_test_access_token(
     scope: Option<&str>,
 ) -> String {
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: user_id.to_string(),
@@ -150,8 +152,10 @@ async fn cookie_path_extracts_axiam_user() {
 
     assert_eq!(user.user_id, user_id);
     assert_eq!(user.tenant_id, tenant_id);
+    // N15 (contract 1.68): `scope` is never a source of roles.
+    assert!(user.roles.is_empty(), "scope must not populate roles");
     assert_eq!(
-        user.roles,
+        user.scopes,
         vec!["users:read".to_string(), "users:write".to_string()]
     );
 }
@@ -181,8 +185,9 @@ async fn bearer_header_path_extracts_axiam_user_when_no_cookie() {
     assert_eq!(user.tenant_id, tenant_id);
     assert!(
         user.roles.is_empty(),
-        "no scope claim must yield an empty roles vec"
+        "no roles claim must yield an empty roles vec"
     );
+    assert!(user.scopes.is_empty());
 }
 
 #[tokio::test]
@@ -211,6 +216,8 @@ async fn invalid_signature_token_yields_401_with_json_body_not_panic() {
     // Signed with a *different* Ed25519 key than the one served by the JWKS
     // mock, so signature verification must fail (not panic).
     let mut header = Header::new(Algorithm::EdDSA);
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     let claims = TestClaims {
         sub: Uuid::new_v4().to_string(),
@@ -555,6 +562,10 @@ async fn non_uuid_sub_claim_yields_401() {
     let verifier = build_verifier(&mock_server.uri());
 
     let mut header = Header::new(Algorithm::EdDSA);
+
+    // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
+
+    header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     #[derive(Debug, Serialize)]
     struct BadSubClaims {
@@ -843,7 +854,8 @@ async fn rule8_the_extractor_consults_only_the_credential_on_the_request() {
         user.user_id, app_principal,
         "SECURITY: the extractor injected the application's own principal"
     );
-    assert_eq!(user.roles, vec!["documents:read".to_string()]);
+    assert!(user.roles.is_empty(), "scope must not populate roles");
+    assert_eq!(user.scopes, vec!["documents:read".to_string()]);
 }
 
 #[tokio::test]
