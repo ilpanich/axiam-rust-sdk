@@ -212,11 +212,18 @@ jobs:
       #   to rustls (ring/aws-lc-rs), not RustCrypto. Same analysis as the platform's
       #   (ilpanich/axiam deny.toml, commit bff4b22). DROP when elliptic-curve 0.13 leaves
       #   the graph. Review: 2026-12-23.
+      #
+      #   RUSTSEC-2026-0594 — cookie <0.18.3, private-cookie AES-GCM nonces can repeat
+      #   across fork(). cookie 0.16.2 is held by actix-web 4.20.0 (the actix middleware;
+      #   newest release, pins cookie 0.16). Not reachable: only cookie's `percent-encode`
+      #   feature is enabled, so `PrivateJar`, the sole affected API, is not compiled, and
+      #   the SDK never forks. Same analysis as the platform's (ilpanich/axiam deny.toml).
+      #   DROP when actix-web moves to cookie >=0.18.3. Review: 2027-02-25.
       - name: Dependency vulnerability scan (CI-03)
         if: matrix.toolchain == 'stable'
         run: |
           cargo install cargo-audit --locked
-          cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387
+          cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0594
 
       - name: Build examples (all features)
         run: cargo build --examples --all-features
