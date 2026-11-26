@@ -896,10 +896,25 @@ mod tests {
 
     /// The contract's derivation: HKDF-SHA256(salt, ikm = master, info =
     /// "axiam-amqp-v1" || key_version || tenant_id raw 16 bytes, L = 32).
+    ///
+    /// The salt and domain tag come from the vendored contract fixture, as
+    /// consumer.rs's parity test reads them, rather than as byte literals: a
+    /// literal passed as an HMAC key reads as a hard-coded key to CodeQL, and
+    /// the fixture is the source of truth for both values anyway.
     fn subkey_for(tenant: &str, key_version: u8) -> Vec<u8> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../testdata/v2_reference_vectors.json"))
+                .expect("fixture must parse as JSON");
+        let field = |name: &str| {
+            fixture["hkdf"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("hkdf.{name} present"))
+                .as_bytes()
+                .to_vec()
+        };
         let master = hex::decode(VEC_MASTER_KEY_HEX).unwrap();
-        let prk = hmac(b"axiam-amqp-hkdf-salt-v1", &master);
-        let mut info = b"axiam-amqp-v1".to_vec();
+        let prk = hmac(&field("app_salt_utf8"), &master);
+        let mut info = field("domain_tag_utf8");
         info.push(key_version);
         info.extend_from_slice(Uuid::parse_str(tenant).unwrap().as_bytes());
         info.push(1);
