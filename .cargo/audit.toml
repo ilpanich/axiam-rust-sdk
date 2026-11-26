@@ -10,7 +10,10 @@
 # that arithmetic remains in the SDK — ES256 request signing is made by `ring`
 # (src/oidc/ciba.rs), the rest is verification and Ristretto255 OPAQUE. The full
 # rationale is next to the audit step in .github/workflows/sdk-ci-rust.yml. Review: 2026-12-23.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]
+# RUSTSEC-2026-0594 (cookie 0.16.2 via actix-web 4.20.0): only `percent-encode` is
+# enabled, so PrivateJar, the sole affected API, is not compiled; the SDK never forks.
+# Full note in .github/workflows/sdk-ci-rust.yml. Review by 2027-02-25.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387", "RUSTSEC-2026-0594"]
 
 # only fail on vulnerabilities, not unmaintained/unsound warnings
 informational_warnings = ["unmaintained"]
