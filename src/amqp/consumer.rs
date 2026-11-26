@@ -245,8 +245,13 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
 {
     // Step: parse the body as JSON. A body that fails to deserialize is
     // nacked without requeue and never reaches the handler.
-    let mut body: serde_json::Value = match serde_json::from_slice(delivery.data()) {
-        Ok(v) => v,
+    //
+    // The parse is the requester's strict one: a duplicate key at any depth
+    // (or keys differing only by case) is refused rather than resolved to the
+    // last value, so the value verified below and handed to the handler is the
+    // only reading of the bytes that arrived (#882, C2).
+    let mut body = match crate::amqp::authz_requester::parse_strict_object(delivery.data()) {
+        Ok(members) => serde_json::Value::Object(members),
         Err(_) => {
             tracing::warn!(
                 target: "axiam_sdk::security",
@@ -863,6 +868,121 @@ mod tests {
              hmac_signature sits, so the message still verifies"
         );
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    // --- #882 pins: verify over what arrived, dispatch what was verified -----
+
+    /// Run `data` through the consumer; return the handler's calls and the
+    /// delivery.
+    async fn dispatch(key: &[u8], data: Vec<u8>) -> (Vec<serde_json::Value>, RecordingDelivery) {
+        let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::with_default_skew();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let handler = move |value: serde_json::Value| {
+            let sink = Arc::clone(&sink);
+            async move { sink.lock().unwrap().push(value) }
+        };
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        let calls = seen.lock().unwrap().clone();
+        (calls, delivery)
+    }
+
+    #[tokio::test]
+    async fn genuine_message_with_characters_encoders_disagree_on_verifies() {
+        // `<`, `>`, `&`, a non-ASCII character raw (as serde_json writes them)
+        // and a control character as its `\u` escape, which serde_json also
+        // writes: a verifier that re-encoded differently would reject this.
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "12121212-1212-1212-1212-121212121212", Utc::now())
+            .replace("\"read\"", "\"a&b</c>/\u{e9}\u{20ac}\\u0001\"");
+        assert!(canonical.contains("a&b</c>/\u{e9}\u{20ac}\\u0001"));
+        let sig = sign_payload(key, canonical.as_bytes());
+        let (calls, delivery) = dispatch(key, wire_bytes_with_signature(&canonical, &sig)).await;
+        assert_eq!(calls.len(), 1, "a genuine message must verify");
+        assert_eq!(calls[0]["action"], "a&b</c>/\u{e9}\u{20ac}\u{1}");
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn genuine_message_with_floats_big_integers_and_integer_like_keys_verifies() {
+        // A float `1.0`, an integer above 2^53 and keys that sort differently
+        // as numbers and as strings: a verifier that re-encoded numbers or
+        // re-ordered keys would reject this genuine message.
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "14141414-1414-1414-1414-141414141414", Utc::now())
+            .replacen(
+                '{',
+                "{\"10\":1,\"9\":2,\"ratio\":1.0,\"big\":9007199254740993,",
+                1,
+            );
+        let sig = sign_payload(key, canonical.as_bytes());
+        let (calls, delivery) = dispatch(key, wire_bytes_with_signature(&canonical, &sig)).await;
+        assert_eq!(calls.len(), 1, "a genuine message must verify");
+        assert_eq!(calls[0]["big"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_key_or_trailing_content_is_nacked_and_the_handler_never_runs() {
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "13131313-1313-1313-1313-131313131313", Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        let genuine = wire_bytes_with_signature(&canonical, &sig);
+
+        // A duplicate key, signed over what a re-serializing verifier would
+        // have produced (the last value, in the first one's position).
+        let dup_canonical = canonical.replace("\"read\"", "\"write\"");
+        let dup_sig = sign_payload(key, dup_canonical.as_bytes());
+        let dup = wire_bytes_with_signature(
+            &dup_canonical.replace(
+                "\"action\":\"write\"",
+                "\"action\":\"read\",\"action\":\"write\"",
+            ),
+            &dup_sig,
+        );
+        // The same duplicate, signed over the received bytes.
+        let dup_received = wire_bytes_with_signature(
+            &canonical.replace(
+                "\"action\":\"read\"",
+                "\"action\":\"read\",\"action\":\"write\"",
+            ),
+            &sign_payload(
+                key,
+                canonical
+                    .replace(
+                        "\"action\":\"read\"",
+                        "\"action\":\"read\",\"action\":\"write\"",
+                    )
+                    .as_bytes(),
+            ),
+        );
+        let mut trailing_garbage = genuine.clone();
+        trailing_garbage.extend_from_slice(b"x");
+        let mut trailing_object = genuine.clone();
+        trailing_object.extend_from_slice(b"{}");
+
+        for (name, data) in [
+            ("duplicate key, signed over the deduplicated form", dup),
+            (
+                "duplicate key, signed over the received bytes",
+                dup_received,
+            ),
+            ("trailing garbage", trailing_garbage),
+            ("trailing object", trailing_object),
+        ] {
+            let (calls, delivery) = dispatch(key, data).await;
+            assert!(calls.is_empty(), "{name}: the handler must not run");
+            assert_eq!(
+                delivery.nacked_requeue_false.load(Ordering::SeqCst),
+                1,
+                "{name}: nacked without requeue"
+            );
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 0, "{name}");
+        }
+        // The undamaged message still verifies.
+        let (calls, _) = dispatch(key, genuine).await;
+        assert_eq!(calls.len(), 1);
     }
 
     // --- NEW-4: v2 replay-protection gate tests -----------------------------

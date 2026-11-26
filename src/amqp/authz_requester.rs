@@ -21,12 +21,25 @@
 //! - `correlation_id` and `nonce` are fresh random UUIDs per request
 //!   (independent of each other).
 //! - A response that fails the strict parse, the signature or the binding is
-//!   nacked without requeue, logged as a security event (never with a
-//!   signature value), is **never** an allow, and does **not** complete the
+//!   nacked without requeue, logged as one security event (§8 consumer
+//!   obligation 4: timestamp, exchange, routing key, the requester's own
+//!   tenant and a reason code; never a signature, a nonce or anything read
+//!   from the body), is **never** an allow, and does **not** complete the
 //!   request: [`AuthzRequester::check`] keeps waiting for the genuine answer.
-//! - Responses that carry no signature are refused unless
-//!   [`AuthzRequesterOptions::allow_unsigned_responses`] is set; that opt-out
-//!   never admits a response that carries a signature member and fails.
+//!
+//! # Server version
+//!
+//! The AMQP authorization requester requires an AXIAM server of 1.68 or later
+//! (contract 1.68). Such a server signs every authorization response with the
+//! tenant's AMQP subkey and answers on the requester's private `reply_to`
+//! queue. A server older than 1.68 ignores `reply_to` and answers, unsigned,
+//! only on the shared `axiam.authz.response` queue, which this requester never
+//! reads: against it every check times out. There is no option to accept
+//! unsigned responses (CONTRACT 1.69 §8): no AXIAM server sends one to a reply
+//! queue, so an unsigned response can only have been published by someone
+//! else, and it is discarded and logged. During a rolling upgrade from a
+//! pre-1.68 server, use REST or gRPC authorization until every replica runs
+//! 1.68 or later.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -35,11 +48,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use chrono::{SubsecRound, Utc};
+use chrono::{SecondsFormat, SubsecRound, Utc};
 use futures_util::{Stream, StreamExt};
 use lapin::options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
-use lapin::{BasicProperties, Channel, Connection};
+use lapin::{BasicProperties, Channel, Confirmation, Connection};
 use serde::Deserialize;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
@@ -74,8 +87,7 @@ const SIG_HEX_LEN: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthzDecision {
     /// The decision. `true` only for a response that verified under the
-    /// tenant subkey (or, with the unsigned opt-out, one that carried no
-    /// signature at all; see [`Self::unsigned`]).
+    /// tenant subkey.
     pub allowed: bool,
     /// The server's human-readable reason, when present.
     pub reason: Option<String>,
@@ -83,32 +95,18 @@ pub struct AuthzDecision {
     /// `tenant_suspended`, ...), when present. A code this SDK does not know
     /// is surfaced verbatim.
     pub reason_code: Option<String>,
-    /// `true` when the response carried no `hmac_signature` and was accepted
-    /// only because the unsigned opt-out is set.
-    pub unsigned: bool,
 }
 
 /// Options for an [`AuthzRequester`].
+///
+/// There is deliberately no option to accept unsigned responses; see the
+/// [module documentation](self#server-version).
 #[derive(Debug, Clone, Default)]
 pub struct AuthzRequesterOptions {
-    allow_unsigned: bool,
     timeout: Option<Duration>,
 }
 
 impl AuthzRequesterOptions {
-    /// The explicit, integrator-set opt-out for ONE rolling upgrade against a
-    /// server older than contract 1.68, whose responses are unsigned. Off by
-    /// default. With it set, a response that carries **no** `hmac_signature`
-    /// member at all is accepted on its `correlation_id` alone (and logged as
-    /// a security warning). A response that carries a signature is verified in
-    /// full whatever this says, and the opt-out never admits one that fails.
-    /// Remove it once the server is upgraded.
-    #[must_use]
-    pub fn allow_unsigned_responses(mut self) -> Self {
-        self.allow_unsigned = true;
-        self
-    }
-
     /// Bound each [`AuthzRequester::check`] (default 10 s). A zero duration
     /// is ignored.
     #[must_use]
@@ -162,11 +160,20 @@ impl ReplyPublisher for LapinPublisher {
                 .await
                 .map_err(|e| AxiamError::network(format!("failed to publish authz request: {e}")))?
                 .await
-                .map_err(|e| {
-                    AxiamError::network(format!("authz request was not confirmed: {e}"))
-                })?;
-            Ok(())
+                .map_err(|e| AxiamError::network(format!("authz request was not confirmed: {e}")))
+                .and_then(check_confirmation)
         })
+    }
+}
+
+/// A broker `Nack` means the request was not accepted: fail the check at once
+/// rather than let it wait out the timeout for an answer that cannot come.
+fn check_confirmation(confirmation: Confirmation) -> Result<(), AxiamError> {
+    match confirmation {
+        Confirmation::Nack(_) => Err(AxiamError::network(
+            "the broker refused (nacked) the authz request",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -213,7 +220,6 @@ struct Inner {
     tenant_id: Uuid,
     tenant: String,
     key: Sensitive<Vec<u8>>,
-    allow_unsigned: bool,
     timeout: Duration,
     reply_to: String,
     publisher: Box<dyn ReplyPublisher>,
@@ -225,8 +231,31 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn security_warn(msg: &str) {
-    tracing::warn!(target: "axiam_sdk::security", "{msg}");
+/// Why a response was discarded: the §8 consumer-obligation-4 `reason` codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discard {
+    /// Not a well-formed signed response (rule 1, apart from `Unsigned`).
+    Malformed,
+    /// No `hmac_signature` member at all (rule 1; there is no opt-out).
+    Unsigned,
+    /// The HMAC does not verify under this tenant's subkey (rule 2).
+    Signature,
+    /// `tenant_id` is not the requester's (rule 3).
+    Tenant,
+    /// No outstanding request has this `correlation_id` and `nonce` (rule 3).
+    UnknownRequest,
+}
+
+impl Discard {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Unsigned => "unsigned",
+            Self::Signature => "signature",
+            Self::Tenant => "tenant",
+            Self::UnknownRequest => "unknown_request",
+        }
+    }
 }
 
 /// Publishes `AuthzRequest` messages and verifies their answers. Cheap to
@@ -348,7 +377,6 @@ impl AuthzRequester {
             tenant_id,
             tenant: tenant_id.hyphenated().to_string(),
             key: signing_key,
-            allow_unsigned: options.allow_unsigned,
             timeout: options.timeout.unwrap_or(DEFAULT_TIMEOUT),
             reply_to: reply_queue,
             publisher: Box::new(publisher),
@@ -497,105 +525,102 @@ where
 struct Verified {
     decision: AuthzDecision,
     correlation_id: String,
-    /// `None` only for an unsigned response admitted by the opt-out.
-    nonce: Option<String>,
+    nonce: String,
 }
 
 impl Inner {
     /// Verify one delivery and complete the matching request, or discard it
-    /// (nack without requeue plus a security event).
+    /// (nack without requeue plus one security event).
     async fn handle<D: AckableDelivery>(&self, delivery: &D) {
-        let verified = match self.verify_response(delivery.data()) {
-            Ok(v) => v,
-            Err(why) => {
-                // The fact of failure only, never a signature value (§8
-                // protocol rule 4).
-                security_warn(&format!("AMQP authz response discarded: {why}"));
-                delivery.nack(false).await;
-                return;
-            }
+        let discard = match self.verify_response(delivery.data()) {
+            Ok(verified) => match self.take_pending(&verified) {
+                Some(tx) => {
+                    let _ = tx.send(verified.decision);
+                    delivery.ack().await;
+                    return;
+                }
+                None => Discard::UnknownRequest,
+            },
+            Err(discard) => discard,
         };
+        self.log_discard(discard);
+        delivery.nack(false).await;
+    }
 
-        // Rule 3 (binding) and retirement under one lock, so two deliveries
-        // cannot both complete the same request.
-        let tx = {
-            let mut pending = lock(&self.pending);
-            match pending.get(&verified.correlation_id) {
-                Some(p) if verified.nonce.as_deref().is_none_or(|n| n == p.nonce) => {
-                    pending.remove(&verified.correlation_id).map(|p| p.tx)
-                }
-                _ => None,
+    /// Rule 3 (binding) and retirement under one lock, so two deliveries
+    /// cannot both complete the same request.
+    fn take_pending(&self, verified: &Verified) -> Option<oneshot::Sender<AuthzDecision>> {
+        let mut pending = lock(&self.pending);
+        match pending.get(&verified.correlation_id) {
+            Some(p) if p.nonce == verified.nonce => {
+                pending.remove(&verified.correlation_id).map(|p| p.tx)
             }
-        };
-        match tx {
-            Some(tx) => {
-                if verified.decision.unsigned {
-                    security_warn(
-                        "AMQP authz response accepted UNSIGNED because \
-                         allow_unsigned_responses is set",
-                    );
-                }
-                let _ = tx.send(verified.decision);
-                delivery.ack().await;
-            }
-            None => {
-                security_warn(
-                    "AMQP authz response discarded: correlation_id and nonce \
-                     match no outstanding request",
-                );
-                delivery.nack(false).await;
-            }
+            _ => None,
         }
+    }
+
+    /// The §8 consumer-obligation-4 event. The routing key and tenant are the
+    /// requester's own (this reply queue and configured tenant), which are the
+    /// same for every delivery it can receive; the default exchange is `""`.
+    /// Nothing read from the unauthenticated body goes in: no signature, no
+    /// `nonce`, no `correlation_id`, no claimed `tenant_id`.
+    fn log_discard(&self, reason: Discard) {
+        tracing::warn!(
+            target: "axiam_sdk::security",
+            timestamp = %Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            exchange = "",
+            routing_key = %self.reply_to,
+            tenant_id = %self.tenant,
+            reason = reason.as_str(),
+            "AMQP authz response discarded"
+        );
     }
 
     /// Apply §8 consumer obligations 1 and 2, plus the tenant half of 3, to
     /// `body`. It never re-serializes: the signature is checked over `body`
     /// minus its trailing signature member, and the decision is decoded from
     /// those same canonical bytes.
-    fn verify_response(&self, body: &[u8]) -> Result<Verified, &'static str> {
-        let members = parse_strict_object(body)?;
-        // Any spelling of the signature member counts as a signature member:
-        // the opt-out must never admit a response that carries one.
-        let has_sig = members
+    fn verify_response(&self, body: &[u8]) -> Result<Verified, Discard> {
+        let malformed = |_| Discard::Malformed;
+        let members = parse_strict_object(body).map_err(malformed)?;
+        // Any spelling of the signature member counts as a signature member.
+        if !members
             .keys()
-            .any(|k| k.eq_ignore_ascii_case("hmac_signature"));
+            .any(|k| k.eq_ignore_ascii_case("hmac_signature"))
+        {
+            return Err(Discard::Unsigned);
+        }
 
         // Rule 1 for the member every response carries.
         if !matches!(members.get("allowed"), Some(Value::Bool(_))) {
-            return Err("allowed is missing or not a boolean");
-        }
-
-        if !has_sig {
-            return self.accept_unsigned(&members);
+            return Err(Discard::Malformed);
         }
 
         // The canonical bytes: body with the final
         // `,"hmac_signature":"<64 hex>"` taken out of the closing brace. A
         // body that does not end in that member is discarded, never repaired
         // by re-serializing.
-        let (canonical, sig_hex) =
-            cut_trailing_signature(body).ok_or("body does not end in the hmac_signature member")?;
+        let (canonical, sig_hex) = cut_trailing_signature(body).ok_or(Discard::Malformed)?;
         if members.get("hmac_signature") != Some(&Value::String(sig_hex.to_string())) {
-            return Err("hmac_signature is not the trailing member");
+            return Err(Discard::Malformed);
         }
 
         // Rule 2: HMAC-SHA256 under the requester's own tenant subkey,
         // constant-time, before anything else is read from the body.
         if !verify_payload(self.key.expose(), &canonical, sig_hex) {
-            return Err("signature does not verify");
+            return Err(Discard::Signature);
         }
 
         // Everything below reads the verified canonical bytes, not `body` (C2).
-        let verified =
-            parse_strict_object(&canonical).map_err(|_| "verified bytes do not decode")?;
+        let verified = parse_strict_object(&canonical).map_err(malformed)?;
         if verified
             .keys()
             .any(|k| k.eq_ignore_ascii_case("hmac_signature"))
         {
-            return Err("canonical bytes still carry a signature member");
+            return Err(Discard::Malformed);
         }
         let Some(Value::Bool(allowed)) = verified.get("allowed") else {
-            return Err("allowed is missing or not a boolean");
+            return Err(Discard::Malformed);
         };
         let text = |name: &str| match verified.get(name) {
             Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
@@ -604,43 +629,22 @@ impl Inner {
         let (Some(tenant_id), Some(nonce), Some(correlation_id)) =
             (text("tenant_id"), text("nonce"), text("correlation_id"))
         else {
-            return Err("tenant_id, nonce or correlation_id is missing");
+            return Err(Discard::Malformed);
         };
 
         // Rule 3, tenant half: the requester's own tenant only.
         if tenant_id != self.tenant {
-            return Err("tenant_id is not the requester's");
+            return Err(Discard::Tenant);
         }
         Ok(Verified {
-            decision: decision_from(&verified, *allowed, false),
+            decision: decision_from(&verified, *allowed),
             correlation_id,
-            nonce: Some(nonce),
-        })
-    }
-
-    /// A response with no signature member: refused unless the opt-out is set,
-    /// in which case it is accepted on its `correlation_id` alone (a pre-1.68
-    /// server answers with no `tenant_id` or `nonce`).
-    fn accept_unsigned(&self, members: &Map<String, Value>) -> Result<Verified, &'static str> {
-        if !self.allow_unsigned {
-            return Err("response is unsigned");
-        }
-        let Some(Value::Bool(allowed)) = members.get("allowed") else {
-            return Err("allowed is missing or not a boolean");
-        };
-        let correlation_id = match members.get("correlation_id") {
-            Some(Value::String(s)) if !s.is_empty() => s.clone(),
-            _ => return Err("unsigned response has no correlation_id"),
-        };
-        Ok(Verified {
-            decision: decision_from(members, *allowed, true),
-            correlation_id,
-            nonce: None,
+            nonce,
         })
     }
 }
 
-fn decision_from(members: &Map<String, Value>, allowed: bool, unsigned: bool) -> AuthzDecision {
+fn decision_from(members: &Map<String, Value>, allowed: bool) -> AuthzDecision {
     let string = |name: &str| match members.get(name) {
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
@@ -649,7 +653,6 @@ fn decision_from(members: &Map<String, Value>, allowed: bool, unsigned: bool) ->
         allowed,
         reason: string("reason"),
         reason_code: string("reason_code"),
-        unsigned,
     }
 }
 
@@ -681,7 +684,7 @@ fn cut_trailing_signature(body: &[u8]) -> Option<(Vec<u8>, &str)> {
 /// depth, and no two top-level keys that differ only by case (a decoder that
 /// matches fields case-insensitively would read two keys as one). Anything
 /// else, including trailing garbage, is refused.
-fn parse_strict_object(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
+pub(crate) fn parse_strict_object(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
     let StrictValue(value) = serde_json::from_slice(body)
         .map_err(|_| "body is not a JSON object with unambiguous keys")?;
     let Value::Object(members) = value else {
@@ -1031,10 +1034,8 @@ mod tests {
 
     /// A requester with one outstanding request: the vectors' correlation_id
     /// and nonce.
-    fn vector_requester(
-        options: AuthzRequesterOptions,
-    ) -> (AuthzRequester, oneshot::Receiver<AuthzDecision>) {
-        let (r, _p, _feed) = requester(options);
+    fn vector_requester() -> (AuthzRequester, oneshot::Receiver<AuthzDecision>) {
+        let (r, _p, _feed) = requester(AuthzRequesterOptions::default());
         let (tx, rx) = oneshot::channel();
         lock(&r.inner.pending).insert(
             VEC_CORRELATION.into(),
@@ -1065,13 +1066,12 @@ mod tests {
     #[tokio::test]
     async fn all_four_contract_vectors_verify() {
         for v in &VECTORS {
-            let (r, mut rx) = vector_requester(AuthzRequesterOptions::default());
+            let (r, mut rx) = vector_requester();
             let (decision, d) = offer(&r, &mut rx, v.wire()).await;
             let decision = decision.unwrap_or_else(|| panic!("vector {} must verify", v.name));
             assert_eq!(decision.allowed, v.allowed, "{}", v.name);
             assert_eq!(decision.reason.as_deref(), v.reason, "{}", v.name);
             assert_eq!(decision.reason_code.as_deref(), Some(v.code), "{}", v.name);
-            assert!(!decision.unsigned);
             assert_eq!(d.counts(), (1, 0, 0), "accepted must be acked");
 
             // Retired on acceptance: the same response again is dropped.
@@ -1227,7 +1227,7 @@ mod tests {
         ];
 
         for (name, body) in cases {
-            let (r, mut rx) = vector_requester(AuthzRequesterOptions::default());
+            let (r, mut rx) = vector_requester();
             let (decision, d) = offer(&r, &mut rx, body).await;
             assert!(
                 decision.is_none(),
@@ -1247,74 +1247,112 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn discarding_is_logged_without_the_signature_value() {
+    /// Offer `body`, then assert the one discard event (CONTRACT §8 consumer
+    /// obligation 4): the requester's own queue and tenant, the reason code,
+    /// and nothing read from the body.
+    async fn assert_discard_event(name: &str, body: Vec<u8>, reason: &str, secrets: &[&str]) {
         init_recording_subscriber();
-        let (r, mut rx) = vector_requester(AuthzRequesterOptions::default());
-        let tampered = String::from_utf8(VECTORS[1].wire())
-            .unwrap()
-            .replacen(r#""allowed":false"#, r#""allowed":true"#, 1)
-            .into_bytes();
-        let _ = offer(&r, &mut rx, tampered).await;
+        let (r, mut rx) = vector_requester();
+        let (decision, d) = offer(&r, &mut rx, body).await;
+        assert!(decision.is_none(), "{name}: must not complete the request");
+        assert_eq!(d.counts(), (0, 0, 1), "{name}: nacked without requeue");
         let log = captured_log();
-        assert!(
-            log.contains("discarded"),
-            "a security event must be logged: {log}"
+        assert_eq!(
+            log.lines().count(),
+            1,
+            "{name}: exactly one event per discard: {log}"
         );
-        assert!(
-            !log.contains(VECTORS[1].sig),
-            "never the signature value: {log}"
-        );
+        for expected in [
+            "AMQP authz response discarded".to_string(),
+            "timestamp=".to_string(),
+            "exchange=\"\"".to_string(),
+            "routing_key=amq.gen-Xk3p".to_string(),
+            format!("tenant_id={VEC_TENANT}"),
+            format!("reason=\"{reason}\""),
+        ] {
+            assert!(log.contains(&expected), "{name}: missing {expected}: {log}");
+        }
+        for secret in secrets {
+            assert!(!log.contains(secret), "{name}: leaked {secret}: {log}");
+        }
     }
 
     #[tokio::test]
-    async fn unsigned_responses() {
-        let unsigned = format!(
-            r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":true,"reason_code":"allowed"}}"#
-        )
-        .into_bytes();
-
-        // Refused by default.
-        let (r, mut rx) = vector_requester(AuthzRequesterOptions::default());
-        let (decision, d) = offer(&r, &mut rx, unsigned.clone()).await;
-        assert!(decision.is_none(), "unsigned must be refused by default");
-        assert_eq!(d.counts(), (0, 0, 1));
-
-        // Accepted with the opt-out, flagged and logged.
-        init_recording_subscriber();
-        let (r, mut rx) =
-            vector_requester(AuthzRequesterOptions::default().allow_unsigned_responses());
-        let (decision, _) = offer(&r, &mut rx, unsigned.clone()).await;
-        let decision = decision.expect("opt-out admits an unsigned response");
-        assert!(decision.allowed && decision.unsigned);
-        assert_eq!(decision.reason_code.as_deref(), Some("allowed"));
-        assert!(
-            captured_log().contains("UNSIGNED"),
-            "must be logged as a warning"
-        );
-
-        // The opt-out needs an outstanding correlation_id and a boolean allowed.
-        let (r, mut rx) =
-            vector_requester(AuthzRequesterOptions::default().allow_unsigned_responses());
-        for body in [
-            r#"{"correlation_id":"77777777-7777-7777-7777-777777777777","allowed":true}"#
-                .to_string(),
-            format!(r#"{{"correlation_id":"{VEC_CORRELATION}"}}"#),
-            format!(r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":"yes"}}"#),
-        ] {
-            let (decision, _) = offer(&r, &mut rx, body.clone().into_bytes()).await;
-            assert!(decision.is_none(), "must be refused: {body}");
-        }
-
-        // The opt-out never admits a response that carries a signature member
-        // and fails.
+    async fn every_discard_path_logs_the_a2_event_without_secrets() {
+        let v1 = &VECTORS[0];
+        let good = vec_key();
         let tampered = String::from_utf8(VECTORS[1].wire())
             .unwrap()
             .replacen(r#""allowed":false"#, r#""allowed":true"#, 1)
             .into_bytes();
-        let (decision, _) = offer(&r, &mut rx, tampered).await;
-        assert!(decision.is_none(), "tampered signed response, opt-out on");
-        for sig_member in [
+        let other_tenant = v1.canonical.replacen(VEC_TENANT, VEC_OTHER_TENANT, 1);
+        let other_corr =
+            v1.canonical
+                .replacen(VEC_CORRELATION, "77777777-7777-7777-7777-777777777777", 1);
+        let unsigned = format!(
+            r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":true,"reason_code":"allowed"}}"#
+        );
+
+        assert_discard_event(
+            "signature",
+            tampered,
+            "signature",
+            &[VECTORS[1].sig, VEC_NONCE, VEC_CORRELATION],
+        )
+        .await;
+        assert_discard_event(
+            "tenant",
+            sign_with(&good, &other_tenant),
+            "tenant",
+            &[v1.sig, VEC_NONCE, VEC_OTHER_TENANT, VEC_CORRELATION],
+        )
+        .await;
+        assert_discard_event(
+            "unknown_request",
+            sign_with(&good, &other_corr),
+            "unknown_request",
+            &[
+                v1.sig,
+                VEC_NONCE,
+                "77777777-7777-7777-7777-777777777777",
+                &sign_payload(&good, other_corr.as_bytes()),
+            ],
+        )
+        .await;
+        assert_discard_event(
+            "unsigned",
+            unsigned.into_bytes(),
+            "unsigned",
+            &[VEC_NONCE, VEC_CORRELATION],
+        )
+        .await;
+        assert_discard_event("malformed", b"not json".to_vec(), "malformed", &[]).await;
+        assert_discard_event(
+            "malformed: signature member not 64 hex",
+            flip_sig(v1, &"z".repeat(64)),
+            "malformed",
+            &[VEC_NONCE],
+        )
+        .await;
+    }
+
+    fn flip_sig(v: &Vector, to: &str) -> Vec<u8> {
+        String::from_utf8(v.wire())
+            .unwrap()
+            .replacen(v.sig, to, 1)
+            .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_response_is_discarded_and_the_check_keeps_waiting() {
+        // CONTRACT 1.69 §8: there is no opt-out; a well-formed unsigned
+        // response for an outstanding correlation_id never completes it.
+        let (r, mut rx) = vector_requester();
+        let unsigned = format!(
+            r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":true,"reason_code":"allowed"}}"#
+        );
+        for body in [
+            unsigned,
             format!(
                 r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":true,"hmac_signature":null}}"#
             ),
@@ -1322,17 +1360,20 @@ mod tests {
                 r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":true,"HMAC_SIGNATURE":"{}"}}"#,
                 "0".repeat(64)
             ),
-            format!(
-                r#"{{"correlation_id":"{VEC_CORRELATION}","allowed":true,"hmac_signature":"{}"}}"#,
-                "0".repeat(64)
-            ),
         ] {
-            let (decision, _) = offer(&r, &mut rx, sig_member.clone().into_bytes()).await;
-            assert!(
-                decision.is_none(),
-                "a signature member of any spelling is verified, not treated as absent: {sig_member}"
-            );
+            let (decision, d) = offer(&r, &mut rx, body.clone().into_bytes()).await;
+            assert!(decision.is_none(), "must be refused: {body}");
+            assert_eq!(d.counts(), (0, 0, 1));
         }
+        let (genuine, _) = offer(&r, &mut rx, VECTORS[0].wire()).await;
+        assert!(genuine.is_some_and(|g| g.allowed), "still waiting");
+    }
+
+    #[test]
+    fn a_broker_nack_fails_the_publish_at_once() {
+        assert!(check_confirmation(Confirmation::Nack(None)).is_err());
+        assert!(check_confirmation(Confirmation::Ack(None)).is_ok());
+        assert!(check_confirmation(Confirmation::NotRequested).is_ok());
     }
 
     #[test]

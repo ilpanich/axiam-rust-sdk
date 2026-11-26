@@ -153,7 +153,7 @@ async fn cookie_path_extracts_axiam_user() {
     assert_eq!(user.user_id, user_id);
     assert_eq!(user.tenant_id, tenant_id);
     // N15 (contract 1.68): `scope` is never a source of roles.
-    assert!(user.roles.is_empty(), "scope must not populate roles");
+    assert_eq!(user.roles, None, "scope must not populate roles");
     assert_eq!(
         user.scopes,
         vec!["users:read".to_string(), "users:write".to_string()]
@@ -183,10 +183,7 @@ async fn bearer_header_path_extracts_axiam_user_when_no_cookie() {
 
     assert_eq!(user.user_id, user_id);
     assert_eq!(user.tenant_id, tenant_id);
-    assert!(
-        user.roles.is_empty(),
-        "no roles claim must yield an empty roles vec"
-    );
+    assert_eq!(user.roles, None, "no roles claim must read as absent");
     assert!(user.scopes.is_empty());
 }
 
@@ -562,9 +559,7 @@ async fn non_uuid_sub_claim_yields_401() {
     let verifier = build_verifier(&mock_server.uri());
 
     let mut header = Header::new(Algorithm::EdDSA);
-
     // Access tokens carry `typ: at+jwt` (CONTRACT.md §10.1 rule 10).
-
     header.typ = Some("at+jwt".to_string());
     header.kid = Some(TEST_KID.to_string());
     #[derive(Debug, Serialize)]
@@ -854,7 +849,7 @@ async fn rule8_the_extractor_consults_only_the_credential_on_the_request() {
         user.user_id, app_principal,
         "SECURITY: the extractor injected the application's own principal"
     );
-    assert!(user.roles.is_empty(), "scope must not populate roles");
+    assert_eq!(user.roles, None, "scope must not populate roles");
     assert_eq!(user.scopes, vec!["documents:read".to_string()]);
 }
 

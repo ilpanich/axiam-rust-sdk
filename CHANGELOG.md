@@ -20,16 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   challenge or WebAuthn state token verified as an access token with only
   `expect_tenant_id` configured.
 - **N15 (CONTRACT §11.2 rule 11).** `AxiamUser::roles` is read only from a
-  `roles` claim and is empty when the claim is absent, so `require_role` fails
-  closed; it is no longer derived from `scope`.
+  `roles` claim and is `None` when the claim is absent, so `require_role` fails
+  closed; it is no longer derived from `scope`. A `roles` claim that is not an
+  array of strings no longer fails token verification with 401 (RUS-R1-2): the
+  token stays valid and `require_role` answers 403.
 - DPoP freshness arithmetic is checked: an extreme `iat` is refused instead of
   overflowing.
 
 ### Added
 
 - `#[require_scope(...)]`, `middleware::require_scope_check` and
-  `AxiamUser::scopes` (the token's `scope` claim, split on whitespace).
-- `Claims::roles` (the `roles` claim).
+  `AxiamUser::scopes` (the token's `scope` claim, split on single spaces,
+  CONTRACT §11.2 rule 11d). `#[require_scope]` stacks: every stacked attribute
+  must pass.
+- `Claims::roles` (the `roles` claim; `None` when absent or malformed).
 - **AMQP authorization requester (N2, CONTRACT §8 "Signed authorization
   responses").** `amqp::AuthzRequester` (`new` over a channel, or `connect` over
   `amqps://`), `AuthzRequesterOptions` and `AuthzDecision`. It publishes a
@@ -42,16 +46,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subkey over the received bytes with the signature member cut out (never
   re-serialized; the decision is decoded from those same bytes), and binds to
   the requester's tenant and to one outstanding `correlation_id` plus `nonce`,
-  which is then retired. Anything else is nacked without requeue, logged
-  without a signature value, never an allow, and `check` keeps waiting for the
-  genuine answer. Unsigned responses are refused unless
-  `AuthzRequesterOptions::allow_unsigned_responses()` is set, and that opt-out
-  never admits a response that carries a signature member and fails.
+  which is then retired. Anything else is nacked without requeue, never an
+  allow, and `check` keeps waiting for the genuine answer. Each discard logs
+  one warning on `axiam_sdk::security` with `timestamp`, `exchange`,
+  `routing_key` (the reply queue), `tenant_id` (the requester's own) and a
+  `reason` (`malformed`, `unsigned`, `signature`, `tenant`, `unknown_request`),
+  and never a signature, a nonce or a member of the body (CONTRACT 1.69 §8,
+  server #883). A broker `Nack` of the request fails `check` at once. The
+  requester requires an AXIAM server of 1.68 or later.
+
+### Removed
+
+- The AMQP authz requester no longer offers an opt-out for unsigned responses
+  (`AuthzRequesterOptions::allow_unsigned_responses`, with
+  `AuthzDecision::unsigned`; added earlier in 1.4.0 and never released): no
+  AXIAM server sends one to a reply queue, so the option could admit only a
+  forged response (CONTRACT 1.69 §8, server #881). The requester requires a
+  1.68 server; during a rolling upgrade from an older one, use REST or gRPC
+  authorization.
+
+### Fixed
+
+- The AMQP event consumer (`amqp::consume`) parses the delivery strictly: a
+  duplicate key at any depth, or keys that differ only by case, is nacked
+  instead of resolving to the last value, so what is verified and handed to
+  the handler is the only reading of the bytes received (server #882).
+  Genuine messages containing `<`, `>`, `&`, non-ASCII or control characters
+  already verified; a test pins it.
+- `verify_logout_token` already selected the key by `kid` and refused a
+  kid-less token; tests now pin it with a server-shaped token against a
+  two-key JWKS, and pin that §10.1 rules 10 and 11 stay off the logout and
+  ID-token paths (CONTRACT 1.69 §12.7.6, server #880).
 
 ### Changed (behaviour change; migration)
 
-- `AxiamUser` gained a public field `scopes`; code that builds an `AxiamUser`
-  with a struct literal must add it.
+- `AxiamUser` gained a public field `scopes`, and its `roles` is now
+  `Option<Vec<String>>` (`None` for no `roles` claim, kept distinct from
+  `Some(vec![])`); code that builds an `AxiamUser` with a struct literal must
+  add the one and wrap the other. `token::Claims` gained a public field
+  `roles: Option<Vec<String>>`, which breaks a `Claims` struct literal
+  likewise.
 - Access tokens must carry `typ: at+jwt` (or no `typ`), a `kid`, and no
   `purpose`. An access token a pre-1.67 server minted (`typ: JWT`) is refused
   by guards; its holder refreshes (at most one access-token lifetime).

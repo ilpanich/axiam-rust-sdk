@@ -69,7 +69,7 @@ A **removal** — of a method, a field, a variant or a type — waits for 2.0.0.
 
 ## Contract conformance
 
-This SDK conforms to **contract 1.66**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
+This SDK conforms to **contract 1.69**: CONTRACT.md §1–§13 and §12.7, §14, §15, §17, §19, §20,
 §21, §22, §23, §24, §25, §26, §27, §28, §28.12, §29, §30, §31, §32, §33, §36 and §37, with §32.7 and
 §33.2 signed (including §6.1 mTLS, the §10.1 minimum
 local-verification set — **including rule 9, sender-constrained tokens** — and §13 webhook
@@ -95,6 +95,14 @@ into a different claim without anyone editing it. The §21.3.1 amendment of cont
 seventh `mtls_endpoint_aliases` member, `backchannel_authentication_endpoint`) is decoded and
 honoured on an mTLS CIBA call, and vector A is pinned as the vendored `CONTRACT.md` prints it.
 "§33.2 signed" means all three algorithms — PS256, ES256 and EdDSA (contract 1.59, §34.2 P12.7).
+
+Contract 1.69 (§34.13) adds no operation. `verify_logout_token` selects the key by the token's
+`kid` and refuses a token without one as `unknown_kid` (the server signs the logout token with its
+`kid` from 1.69), and the AMQP authorization requester has no opt-out for unsigned responses: it
+needs a server of 1.68 or later and logs every discarded response with the routing key and its own
+tenant (see "AMQP authorization requester" below). Contract 1.68 (§34.12) is carried as well:
+§10.1 rules 10-12, `roles` and `scope` read only from their own claims (§11.2 rule 11) and the
+signed authorization response.
 
 Contract 1.66 (§34.10) adds no operation and changes no API here. A federated sign-in is bound
 to the client that started it (§12.1 rule 12b): send the start and the completion of one sign-in
@@ -351,8 +359,20 @@ rule on every inbound token: EdDSA `alg` pinned before the JWKS is consulted, a 
 numeric `exp`, `nbf` honoured when present, `tenant_id` asserted against the configured
 tenant, `iss`/`aud` checked when configured, all under a named 60-second
 `CLOCK_SKEW_LEEWAY_SECS`. The §10 `AxiamUser` extractor and the §11 `require_auth` /
-`require_access` / `require_role` macros (which inject that extractor) all route through
-it — there is no second verification path.
+`require_access` / `require_role` / `require_scope` macros (which inject that extractor) all
+route through it — there is no second verification path.
+
+Rules 10-12 (contract 1.68) refuse what is not an access token: a `typ` that is present and not
+`at+jwt` (`application/` prefix and case ignored; so an access token a pre-1.67 server minted,
+`typ: JWT`, is refused and its holder refreshes), any token with a `purpose` claim, and a token
+with no `kid` (key selection is by `kid` only, with no single-key fallback). They apply to access
+tokens only: the ID token (§12.4), the back-channel logout token (§12.7.3) and the SSF event token
+are verified by their own paths, which do not run rules 10 and 11.
+
+`AxiamUser::roles` is `Option<Vec<String>>`: `None` when the token has no `roles` claim (or one
+that is not an array of strings, which does not invalidate the token; every `require_role` then
+answers 403) and `Some(vec![])` for `roles: []`. `#[require_scope("a")]` stacks:
+`#[require_scope("a")] #[require_scope("b")]` requires both.
 
 Because the `/oauth2/jwks` trust anchor is **organization-wide**, a verifier used as a
 route guard MUST be told which tenant it is guarding:
@@ -705,10 +725,21 @@ private, exclusive, auto-delete queue only this requester consumes. A response i
 when it verifies under your tenant's subkey over the bytes received and binds to one outstanding
 request; anything else is nacked, logged and ignored while `check` keeps waiting for the genuine
 answer (it times out after 10 s by default; see `AuthzRequesterOptions::timeout`). A response is
-never an allow because it failed to verify. Against a server older than contract 1.68, whose
-responses are unsigned, `AuthzRequesterOptions::allow_unsigned_responses()` is an explicit
-opt-out for one rolling upgrade; it is off by default and never admits a response that carries a
-signature and fails. The signature proves the answer came from a holder of the tenant subkey, not
+never an allow because it failed to verify. Each discarded response is logged once, at warning
+level on target `axiam_sdk::security`, with `timestamp`, `exchange`, `routing_key` (the reply
+queue), `tenant_id` (your own) and a `reason` of `malformed`, `unsigned`, `signature`, `tenant` or
+`unknown_request`; never a signature, a nonce or anything read from the body.
+
+The AMQP authorization requester requires an AXIAM server of 1.68 or later (contract 1.68). Such a
+server signs every authorization response with the tenant's AMQP subkey and answers on the
+requester's private `reply_to` queue. A server older than 1.68 ignores `reply_to` and answers,
+unsigned, only on the shared `axiam.authz.response` queue, which this requester never reads:
+against it every check times out. There is no option to accept unsigned responses (CONTRACT 1.69
+§8): no AXIAM server sends one to a reply queue, so an unsigned response can only have been
+published by someone else, and it is discarded and logged. During a rolling upgrade from a
+pre-1.68 server, use REST or gRPC authorization until every replica runs 1.68 or later.
+
+The signature proves the answer came from a holder of the tenant subkey, not
 that no other service of the same tenant forged it: where several services of one tenant publish
 authorization requests, keep each on its own exclusive reply queue (as above) and deny SDK
 principals read access to `axiam.authz.request` at the broker.

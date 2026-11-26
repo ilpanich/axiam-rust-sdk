@@ -11,8 +11,10 @@
 mod oidc_support;
 
 use axiam_sdk::AxiamError;
+use axiam_sdk::IdTokenFailureReason;
 use axiam_sdk::Sensitive;
 use axiam_sdk::oidc::{LogoutUrlParams, OidcConfiguration};
+use axiam_sdk::token::JwksVerifier;
 use std::collections::HashMap;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -465,4 +467,126 @@ async fn a_verification_failure_never_echoes_the_token() {
         !rendered.contains(&token),
         "§12.7.5: the error must not echo the token"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Contract 1.69 (#880): the logout token carries its JWKS `kid`
+// ---------------------------------------------------------------------------
+
+/// Mount discovery and a JWKS publishing `keys` in order.
+async fn jwks_fixture(
+    server: &MockServer,
+    keys: &[&oidc_support::SigningKeyFixture],
+) -> OidcConfiguration {
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body(keys)))
+        .mount(server)
+        .await;
+    configuration(server).await
+}
+
+/// The decoded JOSE header of `token`.
+fn header_of(token: &str) -> serde_json::Value {
+    use base64::Engine;
+    let b64 = token.split('.').next().expect("header segment");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64)
+        .expect("base64url header");
+    serde_json::from_slice(&raw).expect("header json")
+}
+
+#[tokio::test]
+async fn a_server_shaped_logout_token_verifies_against_a_two_key_jwks() {
+    let server = MockServer::start().await;
+    // A rotation: the signing key is NOT first, so a verifier that takes the
+    // first (or the only) key fails here.
+    let other = generate_signing_key("rotated-out-key");
+    let signer = generate_signing_key("current-key");
+    let configuration = jwks_fixture(&server, &[&other, &signer]).await;
+    let token = sign_logout_token(&signer, LogoutTokenOptions::default());
+
+    // The fixture adds nothing the server does not send.
+    assert_eq!(
+        header_of(&token),
+        serde_json::json!({"alg": "EdDSA", "typ": "logout+jwt", "kid": "current-key"})
+    );
+
+    let verified = build_client(&server.uri(), false)
+        .verify_logout_token(&token, &configuration)
+        .await
+        .expect("a server-shaped logout token verifies");
+    assert_eq!(verified.sid.as_deref(), Some(LOGOUT_SID));
+    assert_eq!(verified.jti, LOGOUT_JTI);
+}
+
+#[tokio::test]
+async fn a_kidless_or_unknown_kid_logout_token_is_refused_as_unknown_kid() {
+    let server = MockServer::start().await;
+    let signer = generate_signing_key("only-key");
+    let configuration = jwks_fixture(&server, &[&signer]).await;
+    let client = build_client(&server.uri(), false);
+
+    // The one-key JWKS holds the key that signed it: the fallback the rule
+    // forbids would accept this.
+    let kidless = sign_logout_token(
+        &signer,
+        LogoutTokenOptions {
+            omit_kid: true,
+            ..Default::default()
+        },
+    );
+    assert!(header_of(&kidless).get("kid").is_none());
+    let unknown = {
+        let rogue = generate_signing_key("not-published");
+        sign_logout_token(&rogue, LogoutTokenOptions::default())
+    };
+    for (name, token) in [("no kid", kidless), ("unknown kid", unknown)] {
+        let err = client
+            .verify_logout_token(&token, &configuration)
+            .await
+            .expect_err(name);
+        assert_eq!(
+            err.id_token_failure_reason(),
+            Some(IdTokenFailureReason::UnknownKid),
+            "{name}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rules_10_and_11_stay_off_the_logout_path_and_stay_on_the_guard() {
+    // §10.1 rules 10 (`typ`) and 11 (`purpose`) belong to the access-token
+    // guard only. The server-shaped logout token (`typ: logout+jwt`), even
+    // with a `purpose` claim, verifies as a logout token, and the guard that
+    // shares the JWKS verifier refuses the same bytes.
+    let server = MockServer::start().await;
+    let signer = generate_signing_key("current-key");
+    let configuration = jwks_fixture(&server, &[&signer]).await;
+    let token = sign_logout_token(
+        &signer,
+        LogoutTokenOptions {
+            extra_claims: vec![("purpose".into(), serde_json::json!("mfa_challenge"))],
+            ..Default::default()
+        },
+    );
+    build_client(&server.uri(), false)
+        .verify_logout_token(&token, &configuration)
+        .await
+        .expect("rules 10 and 11 do not apply to a logout token");
+
+    let guard = JwksVerifier::new(
+        reqwest::Client::new(),
+        &url::Url::parse(&server.uri()).unwrap(),
+    )
+    .unwrap();
+    guard
+        .verify(&token)
+        .await
+        .expect_err("the access-token guard refuses a logout token");
+    let id_token = sign_id_token(&signer, IdTokenOptions::default());
+    guard
+        .verify(&id_token)
+        .await
+        .expect_err("the access-token guard refuses an ID token (typ JWT)");
 }

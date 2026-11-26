@@ -107,7 +107,15 @@ pub struct Claims {
     /// The subject's global role names in the tenant (CONTRACT.md §11.2
     /// rule 11, contract 1.68). Present only when the client requested the
     /// `roles` scope; absent otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// `None` also when the claim is present but is not a JSON array of
+    /// strings (rule 11b): that must not invalidate the token, it only makes
+    /// every role check fail.
+    #[serde(
+        default,
+        deserialize_with = "lenient_roles",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub roles: Option<Vec<String>>,
     /// RFC 7800 / RFC 8705 §3.1 confirmation claim — present **only** on a
     /// sender-constrained token (CONTRACT.md §10.1 rule 9, contract 1.15).
@@ -126,6 +134,13 @@ pub struct Claims {
     /// transport gives you.
     #[serde(default)]
     pub cnf: Option<CnfClaim>,
+}
+
+/// Read the `roles` claim without letting a malformed one fail the token:
+/// anything that is not an array of strings reads as no roles.
+fn lenient_roles<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// RFC 7800 confirmation claim.
@@ -755,13 +770,16 @@ impl JwksVerifier {
     /// [`AxiamError::id_token_invalid`], rather than [`Self::verify`]'s plain
     /// message.
     ///
-    /// **Divergence from [`Self::verify`], required by §12.4 rule 2:** a
-    /// missing `kid` is rejected outright, with no single-key fallback. The
-    /// access-token path's [`find_jwk`] intentionally falls back to a lone
-    /// published key when `kid` is absent (D-11, AXIAM's own tokens may omit
-    /// it); an ID token from a third-party-shaped flow gets no such
-    /// convenience — CONTRACT.md §12.4 rule 2 says plainly "a token with no
-    /// `kid` … MUST be rejected".
+    /// **Divergence from the lenient session path, required by §12.4 rule 2:**
+    /// a missing `kid` is rejected outright, with no single-key fallback —
+    /// "a token with no `kid` … MUST be rejected". [`Self::verify`] has no
+    /// fallback either since contract 1.68 (§10.1 rule 12); [`find_jwk`]'s
+    /// survives only on the lenient session / signature-only paths.
+    ///
+    /// Serves the ID token (§12.4) and the back-channel logout token
+    /// (§12.7.3, contract 1.69: its `kid` is required). §10.1 rules 10 (`typ`)
+    /// and 11 (`purpose`) are applied by [`Self::verify`] only and never run
+    /// here.
     pub(crate) async fn verify_id_token_signature<T>(&self, token: &str) -> Result<T, AxiamError>
     where
         T: serde::de::DeserializeOwned,
@@ -877,6 +895,9 @@ impl JwksVerifier {
     /// | 5 | `iss` | checked only when [`Self::expect_issuer`] was called. |
     /// | 6 | `aud` | checked only when [`Self::expect_audience`] was called. |
     /// | 7 | clock skew | [`CLOCK_SKEW_LEEWAY_SECS`] — a named, bounded, non-configurable 60 s. |
+    /// | 10 | `typ` | a present `typ` must be `at+jwt` (case and an `application/` prefix ignored); absent is fine. Checked before any key lookup. |
+    /// | 11 | `purpose` | any `purpose` claim, whatever its value, refuses the token (MFA challenge, WebAuthn state). |
+    /// | 12 | `kid` | REQUIRED; the key is selected by `kid` only, with no single-key fallback, before and after the forced refetch. |
     /// | 9 | `cnf` | this entry point has **no** transport evidence, so a token carrying `cnf` is **refused**, whatever it names; an unbound token is unaffected. |
     ///
     /// # Rule 9, and which entry point to call
@@ -1480,6 +1501,10 @@ fn auth_err(message: &str) -> AxiamError {
 /// exactly one key, returns that key as a best-effort match — AXIAM's
 /// `/oauth2/jwks` serves exactly one org-wide Ed25519 key (D-11).
 ///
+/// **Lenient path only** (the client's own server-issued session token and
+/// `verify_signature_only_unchecked`). The guard path, the ID-token path and
+/// the logout-token path select by `kid` alone ([`find_jwk_by_kid`]).
+///
 /// Mirrors `crates/axiam-federation/src/oidc.rs::find_jwk` exactly.
 #[cfg(any(feature = "rest", feature = "actix"))]
 fn find_jwk(jwks: &JwkSet, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> {
@@ -1494,11 +1519,10 @@ fn find_jwk(jwks: &JwkSet, kid: Option<&str>) -> Option<jsonwebtoken::jwk::Jwk> 
     }
 }
 
-/// Find a JWK by an EXPLICIT `kid` only — no single-key fallback. Used by
-/// [`JwksVerifier::verify_id_token_signature`] (CONTRACT.md §12.4 rule 2),
-/// which requires a `kid` header to be present at all; callers with no
-/// `kid` never reach this function (see its doc comment for why the
-/// access-token path's fallback in [`find_jwk`] does not apply here).
+/// Find a JWK by an EXPLICIT `kid` only — no single-key fallback. Used by the
+/// access-token guard (§10.1 rule 12) and by
+/// [`JwksVerifier::verify_id_token_signature`] (§12.4 rule 2), both of which
+/// require a `kid` header; a token with none never reaches this function.
 #[cfg(any(feature = "rest", feature = "actix"))]
 fn find_jwk_by_kid(jwks: &JwkSet, kid: &str) -> Option<jsonwebtoken::jwk::Jwk> {
     jwks.keys

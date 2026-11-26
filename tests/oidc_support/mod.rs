@@ -358,6 +358,10 @@ pub struct LogoutTokenOptions<'a> {
     pub nonce: Option<&'a str>,
     /// Omit `sub` as well as `sid`, so the token names nothing.
     pub omit_sub: bool,
+    /// When `true`, the header carries NO `kid` (what a pre-1.69 server sent).
+    pub omit_kid: bool,
+    /// Extra claims merged in last.
+    pub extra_claims: Vec<(String, Value)>,
 }
 
 pub const LOGOUT_SID: &str = "session-abc";
@@ -365,10 +369,14 @@ pub const LOGOUT_JTI: &str = "logout-token-jti-1";
 
 /// Mint a back-channel logout token (OIDC Back-Channel Logout 1.0 §2.4),
 /// signed with the same EdDSA fixture keys as the ID-token helpers.
+///
+/// The header is exactly the server's (contract 1.69): `alg` `EdDSA`, `typ`
+/// `logout+jwt` and the JWKS `kid`, nothing else.
 pub fn sign_logout_token(key: &SigningKeyFixture, opts: LogoutTokenOptions<'_>) -> String {
     let now = now_sec();
     let mut header = Header::new(Algorithm::EdDSA);
-    header.kid = Some(key.kid.clone());
+    header.typ = Some("logout+jwt".into());
+    header.kid = (!opts.omit_kid).then(|| key.kid.clone());
 
     let mut claims = serde_json::Map::new();
     claims.insert("iss".into(), json!(opts.issuer.unwrap_or(ISSUER)));
@@ -401,6 +409,9 @@ pub fn sign_logout_token(key: &SigningKeyFixture, opts: LogoutTokenOptions<'_>) 
     }
     if let Some(n) = opts.nonce {
         claims.insert("nonce".into(), json!(n));
+    }
+    for (k, v) in opts.extra_claims {
+        claims.insert(k, v);
     }
 
     jsonwebtoken::encode(&header, &Value::Object(claims), &encoding_key(key))
