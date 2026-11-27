@@ -14,7 +14,7 @@
 //! Run: `cargo run --example amqp_consumer --features amqp`
 
 use axiam_sdk::Sensitive;
-use axiam_sdk::amqp::consume;
+use axiam_sdk::amqp::{ConsumerTarget, EventType, consume};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,6 +24,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let amqp_url =
         std::env::var("AMQP_URL").unwrap_or_else(|_| "amqps://guest:guest@localhost:5671".into());
     let queue = std::env::var("AXIAM_AMQP_QUEUE").unwrap_or_else(|_| "axiam.authz.request".into());
+
+    // The consumer's own tenant (whose subkey the signing key is) and the ONE
+    // type this queue carries: a body with the other type's layout is refused
+    // as `malformed` (CONTRACT.md §8 step 2c).
+    let tenant_id = std::env::var("AXIAM_TENANT_ID")
+        .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000000".into());
 
     // §8.1: the per-tenant AMQP signing secret MUST be obtained from the
     // AXIAM management API — never hardcoded. This example reads it from an
@@ -43,9 +49,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // security event that never contains the HMAC value (CONTRACT.md §8.4).
     // `None` below uses the default ±5 minute issued_at freshness window;
     // pass `Some(Duration::from_secs(..))` to override it.
-    consume(&amqp_url, &queue, signing_key, None, |event| async move {
-        println!("Verified AMQP event: {event}");
-    })
+    consume(
+        &amqp_url,
+        &queue,
+        signing_key,
+        ConsumerTarget {
+            tenant_id: &tenant_id,
+            event_type: EventType::AuthzRequest,
+        },
+        None,
+        |event| async move {
+            println!("Verified AMQP event: {event}");
+        },
+    )
     .await?;
 
     Ok(())

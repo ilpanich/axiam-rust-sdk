@@ -30,7 +30,7 @@ pub mod transport;
 pub use authz_requester::{
     AUTHZ_REQUEST_QUEUE, AuthzDecision, AuthzRequester, AuthzRequesterOptions,
 };
-pub use consumer::{consume, consume_with_tls};
+pub use consumer::{ConsumerTarget, EventType, consume, consume_with_tls};
 pub use hmac::{sign_payload, verify_payload};
 pub use messages::{AuditEventMessage, AuthzRequest};
 pub use reactor::{ReactorConfig, ReactorDecision, ReactorEvent, ReactorShutdown, reactor_serve};

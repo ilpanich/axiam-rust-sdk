@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Typed event consumer (contract 1.69, D-9; axiam#883).** `amqp::consume` and
+  `consume_with_tls` now take a `ConsumerTarget` (the consumer's own `tenant_id` and the one
+  `EventType`, `AuthzRequest` or `AuditEvent`, it consumes) beside the signing
+  key. A body with the other signed type's layout is refused at step 2c as
+  `malformed`, before the HMAC and before decoding, and never reaches the
+  handler; there is no "match either layout". Consume both queues with two
+  consumers. (1.4.0 is unreleased: this is an API change inside it.)
+- **Discard event (contract 1.69, D-8; axiam#883).** Every discard of the event
+  consumer logs exactly one `warn` event on target `axiam_sdk::security` with
+  `timestamp`, `exchange`, `routing_key`, `tenant_id` (the consumer's own,
+  never read from the body) and `reason` (`malformed`, `unsigned`, `signature`,
+  `key_version`, `stale`, `replay`), in the normative reason order; the verified
+  bytes are decoded into the configured type (a non-UUID `nonce` or ill-typed
+  member is `malformed`) before the `key_version`, freshness and replay gates,
+  and the nonce is recorded only after all of them pass. No signature, nonce,
+  key or body is logged.
+- **Byte-order mark (contract 1.69, D-10).** Both AMQP consumers (the event
+  consumer and the `AuthzRequester`) refuse a body whose first byte is not `{`
+  (a byte-order mark, whitespace, any prefix) as `malformed`; it is never
+  stripped and the loop goes on to the next delivery.
+- **Bounded JWKS stale-if-error (contract 1.69, D-10).** The JWKS cache TTL is
+  the response's `Cache-Control: max-age` (default 300 s, clamped to at most
+  300 s). A failed refresh (transport error, other status, a non-JWKS body, or
+  an empty key set) keeps the held keys and never moves the anchor, which is the
+  last successful fetch (a `200` with at least one key, or a `304` to the
+  conditional `If-None-Match` request); held keys verify until exactly TTL +
+  300 s after the anchor and every token is refused after that until a fetch
+  succeeds. An unknown-`kid` refresh that fails refuses that token and never
+  opens or extends the stale window. Before, an expired cache whose refresh
+  failed refused every token at once, and an empty key set replaced the held one.
+
 ## [1.4.0] - 2026-11-22
 
 ### Security

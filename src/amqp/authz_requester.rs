@@ -717,6 +717,11 @@ pub(crate) fn cut_trailing_signature(body: &[u8]) -> Option<(Vec<u8>, &str)> {
 /// matches fields case-insensitively would read two keys as one). Anything
 /// else, including trailing garbage, is refused.
 pub(crate) fn parse_strict_object(body: &[u8]) -> Result<Map<String, Value>, &'static str> {
+    // The first byte is `{`: a byte-order mark, whitespace or any other prefix
+    // is refused, never skipped (§8 step 2a, contract 1.69).
+    if body.first() != Some(&b'{') {
+        return Err("body does not begin with `{`");
+    }
     let StrictValue(value) = serde_json::from_slice(body)
         .map_err(|_| "body is not a JSON object with unambiguous keys")?;
     let Value::Object(members) = value else {
@@ -1022,6 +1027,12 @@ mod tests {
     impl AckableDelivery for Recording {
         fn data(&self) -> &[u8] {
             &self.data
+        }
+        fn exchange(&self) -> &str {
+            ""
+        }
+        fn routing_key(&self) -> &str {
+            ""
         }
         async fn ack(&self) {
             self.acked.fetch_add(1, Ordering::SeqCst);
@@ -1366,6 +1377,32 @@ mod tests {
             &[VEC_NONCE],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_byte_order_mark_or_other_prefix_is_malformed_and_the_next_response_completes() {
+        // Contract 1.69 (D-10): the first byte must be `{`; a prefix is refused,
+        // never stripped, and the requester goes on with the next delivery.
+        let v = &VECTORS[0];
+        for (what, prefix) in [
+            ("byte-order mark", &b"\xEF\xBB\xBF"[..]),
+            ("space", b" "),
+            ("newline", b"\n"),
+        ] {
+            let mut body = prefix.to_vec();
+            body.extend_from_slice(&v.wire());
+            assert_discard_event(what, body, "malformed", &[v.sig, VEC_NONCE]).await;
+        }
+        let (r, mut rx) = vector_requester();
+        let mut bom = b"\xEF\xBB\xBF".to_vec();
+        bom.extend_from_slice(&v.wire());
+        let (decision, d) = offer(&r, &mut rx, bom).await;
+        assert!(decision.is_none());
+        assert_eq!(d.counts(), (0, 0, 1));
+        // The same request is still waiting and the genuine response completes it.
+        let (decision, d) = offer(&r, &mut rx, v.wire()).await;
+        assert!(decision.is_some(), "the next delivery is processed");
+        assert_eq!(d.counts(), (1, 0, 0));
     }
 
     #[tokio::test]

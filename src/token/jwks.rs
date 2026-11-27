@@ -35,10 +35,22 @@ use crate::client::OmitBrowserCredentials;
 pub const JWKS_PATH: &str = "/oauth2/jwks";
 
 /// How long a fetched `JwkSet` is cached before a normal (non-forced)
-/// refetch is attempted. Five minutes, inside the ten §34.2 P6 allows the
-/// SSF key cache (contract 1.60).
+/// refetch is attempted, when the response advertises no `Cache-Control:
+/// max-age`; and the **upper bound** of every TTL: a larger advertised value is
+/// clamped down to it, a smaller one is honoured (CONTRACT.md §12.4 rule 2,
+/// contract 1.69). Five minutes, inside the ten §34.2 P6 allows the SSF key
+/// cache (contract 1.60).
 #[cfg(any(feature = "rest", feature = "actix"))]
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// How long past its TTL a held key set keeps verifying while no refresh has
+/// succeeded (stale-if-error, CONTRACT.md §12.4 rule 2, contract 1.69, D-10).
+/// Exactly 300 s beyond the TTL, measured from the last successful fetch:
+/// held keys are never used past `TTL + JWKS_MAX_STALE`, however many
+/// attempts failed, so a key removed upstream cannot be kept alive by whoever
+/// can block the fetch.
+#[cfg(any(feature = "rest", feature = "actix"))]
+const JWKS_MAX_STALE: Duration = Duration::from_secs(300);
 
 /// After a failed fetch, how long a verifier built with
 /// [`JwksVerifier::limiting_failed_fetches`] makes no other (§34.2 P6: a failed
@@ -492,8 +504,39 @@ pub fn certificate_thumbprint_s256(der: &[u8]) -> String {
 #[cfg(any(feature = "rest", feature = "actix"))]
 struct CachedJwks {
     jwks: JwkSet,
+    /// The anchor: when the last **successful** fetch (a `200` with at least
+    /// one key, or a `304` to a conditional request) was made. A failed
+    /// refresh never moves it.
     fetched_at: Instant,
+    /// The lifetime of this set: the response's `Cache-Control: max-age`
+    /// clamped to at most [`JWKS_CACHE_TTL`], or that default.
+    ttl: Duration,
+    /// The response's `ETag`, sent as `If-None-Match` on the next refresh.
+    etag: Option<String>,
     last_forced_refetch: Option<Instant>,
+}
+
+/// The TTL a response gives the set it carries: its `Cache-Control: max-age`,
+/// clamped to at most [`JWKS_CACHE_TTL`] (never honoured above it, silently),
+/// else the default.
+#[cfg(any(feature = "rest", feature = "actix"))]
+fn advertised_ttl(headers: &reqwest::header::HeaderMap) -> Duration {
+    headers
+        .get_all(reqwest::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|directive| {
+            let (name, value) = directive.trim().split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("max-age")
+                .then(|| value.trim().trim_matches('"').parse::<u64>().ok())
+                .flatten()
+        })
+        .next()
+        .map_or(JWKS_CACHE_TTL, |secs| {
+            Duration::from_secs(secs).min(JWKS_CACHE_TTL)
+        })
 }
 
 /// Fetches, caches, and verifies AXIAM access tokens locally against the
@@ -1323,18 +1366,36 @@ impl JwksVerifier {
         if let Some(jwks) = self.cached_if_fresh() {
             return Ok(jwks);
         }
-        self.failed_fetch_cooldown()?;
-        self.fetch_and_cache(false).await
+        // Stale-if-error (§12.4 rule 2, contract 1.69): past its TTL the held
+        // set is refreshed; if the refresh is refused by the failed-fetch
+        // cooldown or fails, the held keys keep verifying until exactly
+        // TTL + 300 s after the last successful fetch, and not after.
+        if let Err(e) = self.failed_fetch_cooldown() {
+            return self.held_within_stale_bound().ok_or(e);
+        }
+        match self.fetch_and_cache(false).await {
+            Ok(jwks) => Ok(jwks),
+            Err(e) => self.held_within_stale_bound().ok_or(e),
+        }
     }
 
     fn cached_if_fresh(&self) -> Option<JwkSet> {
         let cache = self.cache.read().ok()?;
         let entry = cache.as_ref()?;
-        if entry.fetched_at.elapsed() < JWKS_CACHE_TTL {
+        if entry.fetched_at.elapsed() < entry.ttl {
             Some(entry.jwks.clone())
         } else {
             None
         }
+    }
+
+    /// The held key set while it is no older than `TTL + 300 s`, measured from
+    /// the last successful fetch; `None` past that, or with nothing held.
+    fn held_within_stale_bound(&self) -> Option<JwkSet> {
+        let cache = self.cache.read().ok()?;
+        let entry = cache.as_ref()?;
+        let bound = entry.ttl.saturating_add(JWKS_MAX_STALE);
+        (entry.fetched_at.elapsed() < bound).then(|| entry.jwks.clone())
     }
 
     /// Force a refetch, but rate-limited to at most once per
@@ -1370,12 +1431,7 @@ impl JwksVerifier {
                 entry.last_forced_refetch = Some(Instant::now());
             }
             self.fetch_and_cache(true).await
-        } else if let Some(jwks) = self
-            .cache
-            .read()
-            .ok()
-            .and_then(|c| c.as_ref().map(|e| e.jwks.clone()))
-        {
+        } else if let Some(jwks) = self.held_within_stale_bound() {
             Ok(jwks)
         } else {
             self.fetch_and_cache(true).await
@@ -1392,9 +1448,18 @@ impl JwksVerifier {
     }
 
     async fn fetch_and_cache_once(&self, is_forced: bool) -> Result<JwkSet, AxiamError> {
-        let response = self
-            .http_client
-            .get(self.jwks_url.clone())
+        // A conditional request when a set (and its ETag) is held: a `304`
+        // re-confirms it (§12.4 rule 2, "What counts as a successful fetch").
+        let held_etag = self
+            .cache
+            .read()
+            .ok()
+            .and_then(|c| c.as_ref().and_then(|e| e.etag.clone()));
+        let mut request = self.http_client.get(self.jwks_url.clone());
+        if let Some(etag) = &held_etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        let response = request
             .omit_browser_credentials()
             .send()
             .await
@@ -1403,23 +1468,75 @@ impl JwksVerifier {
                 source: Some(Box::new(e)),
             })?;
 
-        if !response.status().is_success() {
+        let status = response.status();
+        let now = Instant::now();
+        if status == reqwest::StatusCode::NOT_MODIFIED && held_etag.is_some() {
+            let ttl = advertised_ttl(response.headers());
+            if let Ok(mut cache) = self.cache.write()
+                && let Some(entry) = cache.as_mut()
+            {
+                entry.fetched_at = now;
+                entry.ttl = ttl;
+                if is_forced {
+                    entry.last_forced_refetch = Some(now);
+                }
+                return Ok(entry.jwks.clone());
+            }
+            return Err(AxiamError::network(
+                "JWKS cache unavailable after a 304 response",
+            ));
+        }
+        if status != reqwest::StatusCode::OK {
             return Err(AxiamError::from_http_status(
-                response.status().as_u16(),
+                status.as_u16(),
                 "JWKS endpoint returned a non-success status".to_string(),
             ));
         }
 
-        let jwks: JwkSet = response.json().await.map_err(|e| AxiamError::Network {
-            message: format!("JWKS response parse failed: {e}"),
-            source: Some(Box::new(e)),
-        })?;
-
-        let now = Instant::now();
+        let ttl = advertised_ttl(response.headers());
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            // Never stored or echoed: over 256 bytes or with a control character.
+            .filter(|v| v.len() <= 256 && !v.bytes().any(|b| b.is_ascii_control()))
+            .map(str::to_owned);
+        let document: serde_json::Value =
+            response.json().await.map_err(|e| AxiamError::Network {
+                message: format!("JWKS response parse failed: {e}"),
+                source: Some(Box::new(e)),
+            })?;
+        // A JWKS document holds at least one JWK object with a string `kty`;
+        // `{"keys":[]}`, `{"keys":[{}]}`, `[0]` and `[null]` are not one.
+        let has_jwk = document
+            .get("keys")
+            .and_then(|k| k.as_array())
+            .is_some_and(|keys| {
+                keys.iter()
+                    .any(|k| k.get("kty").is_some_and(serde_json::Value::is_string))
+            });
+        if !has_jwk {
+            return Err(AxiamError::network(
+                "JWKS document holds no keys; the held set is kept",
+            ));
+        }
+        // Entries are parsed one by one: a well-formed JWK this SDK cannot use
+        // (e.g. RSA without `alg`) still counts as a key held by the document
+        // and is skipped, instead of refusing the whole set.
+        let jwks = JwkSet {
+            keys: document["keys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| serde_json::from_value(k.clone()).ok())
+                .collect(),
+        };
         if let Ok(mut cache) = self.cache.write() {
             *cache = Some(CachedJwks {
                 jwks: jwks.clone(),
                 fetched_at: now,
+                ttl,
+                etag,
                 last_forced_refetch: if is_forced { Some(now) } else { None },
             });
         }
@@ -1752,12 +1869,14 @@ mod tests {
         assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
 
-        // The cache expires and its refresh fails: counted the same way.
+        // The cache expires and its refresh fails: counted the same way. The
+        // held key keeps verifying (stale-if-error, §12.4 rule 2, contract 1.69)
+        // instead of the lookup failing as it did before.
         backdate(&verifier, "last_failed_fetch", FAILED_FETCH_MIN_INTERVAL);
         backdate(&verifier, "fetched_at", JWKS_CACHE_TTL);
-        assert!(verifier.key_for_kid("kid-1").await.is_err());
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 3);
-        assert!(verifier.key_for_kid("kid-1").await.is_err());
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 3, "no fetch inside the minute");
     }
 
@@ -1781,5 +1900,271 @@ mod tests {
         backdate(&verifier, "last_failed_fetch", FAILED_FETCH_SHORT_INTERVAL);
         assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    // --- contract 1.69 (D-10) §12.4 rule 2: bounded stale-if-error ----------
+    //
+    // The clock is injected by moving every instant the cache holds back by the
+    // time that "passes": the verifier only ever compares `elapsed()` against
+    // them, so this is the same as advancing a fake clock, and nothing sleeps.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
+
+    const OK: u8 = 0;
+    const FAIL: u8 = 1;
+    const EMPTY: u8 = 2;
+    const NOT_JWKS: u8 = 3;
+    const ETAGGED: u8 = 4;
+    const EMPTY_OBJECT_KEY: u8 = 5;
+
+    struct Jwks {
+        server: wiremock::MockServer,
+        mode: Arc<AtomicU8>,
+        hits: Arc<AtomicUsize>,
+        max_age: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl Jwks {
+        async fn start() -> Self {
+            let server = wiremock::MockServer::start().await;
+            let mode = Arc::new(AtomicU8::new(OK));
+            let hits = Arc::new(AtomicUsize::new(0));
+            let max_age = Arc::new(std::sync::Mutex::new(None::<String>));
+            let (m, h, ma) = (Arc::clone(&mode), Arc::clone(&hits), Arc::clone(&max_age));
+            let keys = serde_json::json!({ "keys": [ed25519_test_jwk(Some("kid-1"))] });
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(move |req: &wiremock::Request| {
+                    h.fetch_add(1, AtomicOrdering::SeqCst);
+                    let mut r = match m.load(AtomicOrdering::SeqCst) {
+                        FAIL => return wiremock::ResponseTemplate::new(503),
+                        EMPTY => wiremock::ResponseTemplate::new(200)
+                            .set_body_json(serde_json::json!({ "keys": [] })),
+                        EMPTY_OBJECT_KEY => wiremock::ResponseTemplate::new(200)
+                            .set_body_json(serde_json::json!({ "keys": [{}] })),
+                        NOT_JWKS => wiremock::ResponseTemplate::new(200).set_body_string("<html>"),
+                        ETAGGED => {
+                            if req.headers.get("if-none-match").is_some() {
+                                return wiremock::ResponseTemplate::new(304);
+                            }
+                            wiremock::ResponseTemplate::new(200)
+                                .insert_header("etag", "\"v1\"")
+                                .set_body_json(keys.clone())
+                        }
+                        _ => wiremock::ResponseTemplate::new(200).set_body_json(keys.clone()),
+                    };
+                    if let Some(v) = ma.lock().unwrap().as_ref() {
+                        r = r.insert_header("cache-control", v.as_str());
+                    }
+                    r
+                })
+                .mount(&server)
+                .await;
+            Self {
+                server,
+                mode,
+                hits,
+                max_age,
+            }
+        }
+
+        fn verifier(&self) -> JwksVerifier {
+            let url = url::Url::parse(&format!("{}/oauth2/jwks", self.server.uri())).unwrap();
+            JwksVerifier::for_jwks_url(reqwest::Client::new(), url)
+        }
+
+        fn set(&self, mode: u8) {
+            self.mode.store(mode, AtomicOrdering::SeqCst);
+        }
+
+        fn fetches(&self) -> usize {
+            self.hits.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    /// Let `by` pass: every instant the verifier holds moves back by it.
+    fn advance(verifier: &JwksVerifier, by: Duration) {
+        let back = |t: Instant| t.checked_sub(by).expect("a monotonic clock that far back");
+        if let Some(entry) = verifier.cache.write().unwrap().as_mut() {
+            entry.fetched_at = back(entry.fetched_at);
+            entry.last_forced_refetch = entry.last_forced_refetch.map(back);
+        }
+        let mut failed = verifier.last_failed_fetch.lock().unwrap();
+        *failed = failed.map(back);
+    }
+
+    /// A token with `kid` would be accepted: its key is found.
+    async fn accepted(verifier: &JwksVerifier, kid: &str) -> bool {
+        matches!(verifier.key_for_kid(kid).await, Ok(Some(_)))
+    }
+
+    const TTL: Duration = JWKS_CACHE_TTL;
+
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_the_held_keys_until_exactly_ttl_plus_300s() {
+        for failure in [FAIL, EMPTY, EMPTY_OBJECT_KEY, NOT_JWKS] {
+            let jwks = Jwks::start().await;
+            let v = jwks.verifier();
+            // t0: the cache is filled.
+            assert!(accepted(&v, "kid-1").await);
+            assert_eq!(jwks.fetches(), 1);
+            jwks.set(failure);
+
+            // t0 + TTL + 1: one failed refresh is attempted; the held kid is accepted.
+            advance(&v, TTL + Duration::from_secs(1));
+            assert!(
+                accepted(&v, "kid-1").await,
+                "mode {failure}: held kid at TTL+1"
+            );
+            assert_eq!(jwks.fetches(), 2, "mode {failure}: one refresh attempted");
+
+            // t0 + TTL + 250: an unknown kid is refused, the held kid still accepted.
+            advance(&v, Duration::from_secs(249));
+            assert!(
+                !accepted(&v, "kid-9").await,
+                "mode {failure}: unknown kid at TTL+250"
+            );
+            assert!(
+                accepted(&v, "kid-1").await,
+                "mode {failure}: held kid at TTL+250"
+            );
+
+            // t0 + TTL + 301: the held kid is refused too: the anchor never moved.
+            advance(&v, Duration::from_secs(51));
+            assert!(
+                !accepted(&v, "kid-1").await,
+                "mode {failure}: held kid at TTL+301"
+            );
+
+            // The endpoint recovers; past the window, one fetch accepts it again.
+            jwks.set(OK);
+            advance(&v, Duration::from_secs(61));
+            let before = jwks.fetches();
+            assert!(
+                accepted(&v, "kid-1").await,
+                "mode {failure}: after a successful fetch"
+            );
+            assert_eq!(
+                jwks.fetches(),
+                before + 1,
+                "mode {failure}: after one fetch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_key_set_never_replaces_the_held_one() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        jwks.set(EMPTY);
+        advance(&v, TTL + Duration::from_secs(1));
+        assert!(
+            accepted(&v, "kid-1").await,
+            "the held kid is still accepted"
+        );
+        assert_eq!(v.cache.read().unwrap().as_ref().unwrap().jwks.keys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_kid_refresh_that_fails_never_opens_or_extends_the_stale_window() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        jwks.set(FAIL);
+        // Within the TTL an unknown kid triggers its one refetch; it fails.
+        advance(&v, Duration::from_secs(100));
+        assert!(!accepted(&v, "kid-9").await);
+        assert_eq!(jwks.fetches(), 2);
+        // The failed attempt counts toward the cooldown: no second fetch.
+        assert!(!accepted(&v, "kid-8").await);
+        assert_eq!(jwks.fetches(), 2);
+        assert!(accepted(&v, "kid-1").await, "the held set stays in place");
+        // The bound still runs from t0, not from the failed attempt.
+        advance(&v, TTL + Duration::from_secs(201));
+        assert!(!accepted(&v, "kid-1").await, "t0 + TTL + 301: refused");
+    }
+
+    #[tokio::test]
+    async fn a_304_to_a_conditional_request_is_a_success_and_moves_the_anchor() {
+        let jwks = Jwks::start().await;
+        jwks.set(ETAGGED);
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        advance(&v, TTL + Duration::from_secs(1));
+        assert!(accepted(&v, "kid-1").await);
+        assert_eq!(
+            jwks.fetches(),
+            2,
+            "the refresh was conditional and got a 304"
+        );
+        // The anchor moved to the 304: fresh again, no fetch...
+        advance(&v, Duration::from_secs(290));
+        assert!(accepted(&v, "kid-1").await);
+        assert_eq!(jwks.fetches(), 2);
+        // ...and 611 s after t0 the keys still verify (the refresh fails), because
+        // the anchor moved to the 304: they are 310 s old, not 611 s.
+        jwks.set(FAIL);
+        advance(&v, Duration::from_secs(20));
+        assert!(accepted(&v, "kid-1").await);
+    }
+
+    #[test]
+    fn the_advertised_max_age_is_honoured_below_300s_and_clamped_above() {
+        let ttl = |value: Option<&str>| {
+            let mut h = reqwest::header::HeaderMap::new();
+            if let Some(v) = value {
+                h.insert(reqwest::header::CACHE_CONTROL, v.parse().unwrap());
+            }
+            advertised_ttl(&h)
+        };
+        assert_eq!(ttl(None), TTL);
+        assert_eq!(ttl(Some("public, max-age=300")), TTL);
+        assert_eq!(ttl(Some("public, max-age=60")), Duration::from_secs(60));
+        assert_eq!(
+            ttl(Some("max-age=3600")),
+            TTL,
+            "clamped down, never honoured"
+        );
+        assert_eq!(ttl(Some("MAX-AGE=0")), Duration::ZERO);
+        assert_eq!(ttl(Some("max-age=nonsense")), TTL);
+        assert_eq!(ttl(Some("no-store")), TTL);
+    }
+
+    #[tokio::test]
+    async fn an_advertised_one_hour_max_age_does_not_stretch_the_ttl() {
+        let jwks = Jwks::start().await;
+        *jwks.max_age.lock().unwrap() = Some("public, max-age=3600".into());
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        advance(&v, TTL);
+        assert!(accepted(&v, "kid-1").await);
+        assert_eq!(jwks.fetches(), 2, "refetched at 300 s, not at 3600 s");
+    }
+
+    #[tokio::test]
+    async fn a_failing_first_fetch_costs_one_fetch_per_window_not_one_per_token() {
+        let jwks = Jwks::start().await;
+        jwks.set(FAIL);
+        let v = jwks.verifier();
+        for _ in 0..20 {
+            assert!(!accepted(&v, "kid-1").await);
+        }
+        assert_eq!(jwks.fetches(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_a_200_is_a_success_and_a_hostile_etag_is_not_stored() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        assert!(v.cache.read().unwrap().as_ref().unwrap().etag.is_none());
+        jwks.set(ETAGGED);
+        advance(&v, TTL);
+        assert!(accepted(&v, "kid-1").await);
+        assert_eq!(
+            v.cache.read().unwrap().as_ref().unwrap().etag.as_deref(),
+            Some("\"v1\"")
+        );
     }
 }
