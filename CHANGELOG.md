@@ -149,6 +149,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resolved_principal_tenant_id` getter is gated on `opaque`, and the internal
   `Telemetry` dispatcher on `rest`/`amqp`, instead of being dead code. The
   rest-only clippy leg is now part of CI (#160).
+- `oidc_refresh` single-flight is keyed per refresh token and resolved tenant
+  (a SHA-256 digest; the raw token is never stored). A call with a different
+  token used to join another token's in-flight refresh and receive that
+  grant's token set without its own token ever being sent; it now makes its
+  own wire call, concurrently. The tenant is resolved once before the guard and
+  used for both the key and the request; `scope` is not part of the key (#161).
   There the request carries the timeout itself (reqwest aborts a browser
   `fetch` through an `AbortController`); before, only native targets were
   bounded, so a stalled endpoint held the single-flight slot until the browser

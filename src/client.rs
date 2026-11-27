@@ -1282,8 +1282,9 @@ impl AxiamClient {
     /// instance rather than the §1 cookie-session refresh guard.
     pub(crate) fn oidc_refresh_election(
         &self,
+        key: crate::oidc::single_flight::OidcRefreshKey,
     ) -> crate::oidc::single_flight::OidcRefreshElection<'_> {
-        self.inner.oidc_refresh_inflight.elect()
+        self.inner.oidc_refresh_inflight.elect(key)
     }
 
     /// Read the latest captured CSRF token, if any (§3).
