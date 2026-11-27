@@ -1502,23 +1502,24 @@ async fn fetch_bounded(
     is_forced: bool,
     timeout: Duration,
 ) -> Result<JwkSet, AxiamError> {
-    match tokio::time::timeout(timeout, fetch_once(client, url, cache, is_forced)).await {
+    match tokio::time::timeout(timeout, fetch_once(client, url, cache, is_forced, timeout)).await {
         Ok(outcome) => outcome,
         Err(_) => Err(AxiamError::network("JWKS fetch timed out")),
     }
 }
 
-/// On wasm32 there is no tokio timer; the browser's `fetch` applies its own
-/// bound, and the single-flight slot is released when the request settles.
+/// On wasm32 there is no tokio timer, and a browser sets no default `fetch`
+/// timeout; the bound is the request's own `timeout` (reqwest aborts the
+/// `fetch` through an `AbortController`), applied in `fetch_once`.
 #[cfg(all(any(feature = "rest", feature = "actix"), target_arch = "wasm32"))]
 async fn fetch_bounded(
     client: &reqwest::Client,
     url: &url::Url,
     cache: &RwLock<Option<CachedJwks>>,
     is_forced: bool,
-    _timeout: Duration,
+    timeout: Duration,
 ) -> Result<JwkSet, AxiamError> {
-    fetch_once(client, url, cache, is_forced).await
+    fetch_once(client, url, cache, is_forced, timeout).await
 }
 
 /// The failure message without the error kind's display prefix (the waiter
@@ -1555,6 +1556,7 @@ async fn fetch_once(
     jwks_url: &url::Url,
     cache: &RwLock<Option<CachedJwks>>,
     is_forced: bool,
+    timeout: Duration,
 ) -> Result<JwkSet, AxiamError> {
     // A conditional request when a set (and its ETag) is held: a `304`
     // re-confirms it (§12.4 rule 2, "What counts as a successful fetch").
@@ -1562,7 +1564,10 @@ async fn fetch_once(
         .read()
         .ok()
         .and_then(|c| c.as_ref().and_then(|e| e.etag.clone()));
-    let mut request = http_client.get(jwks_url.clone());
+    // The request carries the SDK's bound itself: it is the only bound on
+    // wasm32, where there is no tokio timer (native keeps the outer
+    // `tokio::time::timeout` in `fetch_bounded` as well).
+    let mut request = http_client.get(jwks_url.clone()).timeout(timeout);
     if let Some(etag) = &held_etag {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -2242,6 +2247,40 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         settle(&v).await;
         assert_eq!(cooldown_state(&v), (true, false), "a timeout is a failure");
+    }
+
+    /// The request itself carries the SDK's bound, so a target with no tokio
+    /// timer (wasm32, where reqwest drives an AbortController) is bounded too:
+    /// no outer `tokio::time::timeout` wraps `fetch_once` here.
+    #[tokio::test]
+    async fn fetch_once_bounds_a_stalled_endpoint_by_the_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/oauth2/jwks")).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let cache = RwLock::new(None);
+        let started = std::time::Instant::now();
+        // The outer guard only keeps a regression from hanging the suite.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_once(
+                &client,
+                &url,
+                &cache,
+                false,
+                std::time::Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("fetch_once must be bounded by its own request timeout");
+        assert!(matches!(outcome, Err(AxiamError::Network { .. })));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[tokio::test]

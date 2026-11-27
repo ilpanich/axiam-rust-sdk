@@ -143,6 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cold or expired JWKS cache with a failing endpoint is fetched at most once
   per 10 s window instead of once per verification; the lookup fails with a
   network error meanwhile (no stale-if-error).
+- The JWKS fetch is bounded by the SDK's 10 s timeout on wasm32 too (#159).
+  The request now carries the timeout itself (reqwest aborts a browser `fetch`
+  through an `AbortController`); before, only native targets were bounded, so a
+  stalled endpoint held the single-flight slot until the browser gave up.
 - A failed forced JWKS re-fetch for an unknown `kid` now opens the cooldown
   window too, so a failing JWKS endpoint is fetched at most once per window
   instead of once per unknown-`kid` token (CONTRACT §12.4 rule 2).
