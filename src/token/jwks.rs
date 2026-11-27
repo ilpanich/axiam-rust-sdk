@@ -810,6 +810,10 @@ impl JwksVerifier {
         } else {
             FAILED_FETCH_SHORT_INTERVAL
         };
+        self.failed_fetch_cooldown_for(window)
+    }
+
+    fn failed_fetch_cooldown_for(&self, window: Duration) -> Result<(), AxiamError> {
         let last = *self
             .last_failed_fetch
             .lock()
@@ -1362,9 +1366,36 @@ impl JwksVerifier {
         // Serialize concurrent fetchers on a cold/stale cache (D-08/D-09):
         // acquire the fetch guard, then double-check under it — a
         // concurrent caller may have already refreshed while we waited.
-        let _guard = self.fetch_lock.lock().await;
+        //
+        // A held set still inside its stale bound never waits for another
+        // caller's in-flight fetch: if the guard is taken, serve it.
+        let _guard = match self.fetch_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => match self.held_within_stale_bound() {
+                Some(jwks) => return Ok(jwks),
+                None => self.fetch_lock.lock().await,
+            },
+        };
         if let Some(jwks) = self.cached_if_fresh() {
             return Ok(jwks);
+        }
+        // A TTL-driven refresh of a held set, successful or not, respects the
+        // 60 s window: an advertised `max-age=0` (or a failing endpoint) never
+        // means one fetch per verification. The held set keeps serving.
+        if self.held_within_stale_bound().is_some() {
+            let recently_fetched = self
+                .cache
+                .read()
+                .ok()
+                .and_then(|c| c.as_ref().map(|e| e.fetched_at.elapsed()))
+                .is_some_and(|age| age < FAILED_FETCH_MIN_INTERVAL);
+            if recently_fetched
+                || self
+                    .failed_fetch_cooldown_for(FAILED_FETCH_MIN_INTERVAL)
+                    .is_err()
+            {
+                return Ok(self.held_within_stale_bound().expect("checked above"));
+            }
         }
         // Stale-if-error (§12.4 rule 2, contract 1.69): past its TTL the held
         // set is refreshed; if the refresh is refused by the failed-fetch
@@ -1422,15 +1453,19 @@ impl JwksVerifier {
         };
 
         if allowed {
-            // Open the cooldown window on the ATTEMPT: a failed fetch leaves
-            // the cache untouched, so without this every unknown-`kid` token
-            // would trigger another fetch for as long as the endpoint fails.
-            if let Ok(mut cache) = self.cache.write()
+            // Open the cooldown window once the attempt has FAILED: a failed
+            // fetch leaves the cache untouched, so without this every
+            // unknown-`kid` token would trigger another fetch for as long as
+            // the endpoint fails. Done after the await, so a caller that
+            // cancels mid-fetch (future dropped) never opens the window.
+            let outcome = self.fetch_and_cache(true).await;
+            if outcome.is_err()
+                && let Ok(mut cache) = self.cache.write()
                 && let Some(entry) = cache.as_mut()
             {
                 entry.last_forced_refetch = Some(Instant::now());
             }
-            self.fetch_and_cache(true).await
+            outcome
         } else if let Some(jwks) = self.held_within_stale_bound() {
             Ok(jwks)
         } else {
@@ -1923,6 +1958,7 @@ mod tests {
         mode: Arc<AtomicU8>,
         hits: Arc<AtomicUsize>,
         max_age: Arc<std::sync::Mutex<Option<String>>>,
+        delay_ms: Arc<AtomicUsize>,
     }
 
     impl Jwks {
@@ -1931,7 +1967,13 @@ mod tests {
             let mode = Arc::new(AtomicU8::new(OK));
             let hits = Arc::new(AtomicUsize::new(0));
             let max_age = Arc::new(std::sync::Mutex::new(None::<String>));
-            let (m, h, ma) = (Arc::clone(&mode), Arc::clone(&hits), Arc::clone(&max_age));
+            let delay_ms = Arc::new(AtomicUsize::new(0));
+            let (m, h, ma, dl) = (
+                Arc::clone(&mode),
+                Arc::clone(&hits),
+                Arc::clone(&max_age),
+                Arc::clone(&delay_ms),
+            );
             let keys = serde_json::json!({ "keys": [ed25519_test_jwk(Some("kid-1"))] });
             wiremock::Mock::given(wiremock::matchers::method("GET"))
                 .respond_with(move |req: &wiremock::Request| {
@@ -1956,7 +1998,8 @@ mod tests {
                     if let Some(v) = ma.lock().unwrap().as_ref() {
                         r = r.insert_header("cache-control", v.as_str());
                     }
-                    r
+                    let d = dl.load(AtomicOrdering::SeqCst) as u64;
+                    r.set_delay(std::time::Duration::from_millis(d))
                 })
                 .mount(&server)
                 .await;
@@ -1965,6 +2008,7 @@ mod tests {
                 mode,
                 hits,
                 max_age,
+                delay_ms,
             }
         }
 
@@ -1991,6 +2035,108 @@ mod tests {
         }
         let mut failed = verifier.last_failed_fetch.lock().unwrap();
         *failed = failed.map(back);
+    }
+
+    /// Whether the verifier records a failed refresh or an opened forced window.
+    fn cooldown_state(v: &JwksVerifier) -> (bool, bool) {
+        let failed = v.last_failed_fetch.lock().unwrap().is_some();
+        let forced = v
+            .cache
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|e| e.last_forced_refetch.is_some());
+        (failed, forced)
+    }
+
+    #[tokio::test]
+    async fn max_age_zero_never_means_one_fetch_per_verification() {
+        let jwks = Jwks::start().await;
+        *jwks.max_age.lock().unwrap() = Some("max-age=0".into());
+        let v = jwks.verifier();
+        for _ in 0..10 {
+            assert!(accepted(&v, "kid-1").await);
+        }
+        assert_eq!(jwks.fetches(), 1);
+        advance(&v, FAILED_FETCH_MIN_INTERVAL);
+        assert!(accepted(&v, "kid-1").await);
+        assert_eq!(jwks.fetches(), 2, "refreshed once the 60 s window passed");
+        // A failing refresh respects the same window.
+        jwks.set(FAIL);
+        advance(&v, FAILED_FETCH_MIN_INTERVAL);
+        for _ in 0..10 {
+            assert!(accepted(&v, "kid-1").await, "the held set keeps serving");
+        }
+        assert_eq!(jwks.fetches(), 3, "one failed attempt, then the window");
+    }
+
+    #[tokio::test]
+    async fn a_caller_cancelled_fetch_is_not_a_failed_refresh_and_opens_no_window() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        jwks.delay_ms.store(3000, AtomicOrdering::SeqCst);
+        // Unknown kid: the forced refetch is in flight when the caller drops.
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            v.key_for_kid("kid-9"),
+        )
+        .await;
+        assert!(dropped.is_err(), "the caller gave up mid-fetch");
+        assert_eq!(cooldown_state(&v), (false, false));
+        // A cold-cache caller cancelled mid-fetch records nothing either.
+        let cold = jwks.verifier();
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            cold.key_for_kid("kid-1"),
+        )
+        .await;
+        assert!(dropped.is_err());
+        assert_eq!(cooldown_state(&cold), (false, false));
+        // The next lookup fetches at once (no cooldown) and succeeds.
+        jwks.delay_ms.store(0, AtomicOrdering::SeqCst);
+        let before = jwks.fetches();
+        assert!(accepted(&cold, "kid-1").await);
+        assert_eq!(jwks.fetches(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn a_usable_held_set_never_waits_for_an_in_flight_fetch() {
+        let jwks = Jwks::start().await;
+        let v = Arc::new(jwks.verifier());
+        assert!(accepted(&v, "kid-1").await);
+        advance(&v, TTL + Duration::from_secs(1)); // stale, inside the bound
+        jwks.delay_ms.store(3000, AtomicOrdering::SeqCst);
+        let slow = {
+            let v = Arc::clone(&v);
+            tokio::spawn(async move { v.key_for_kid("kid-1").await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // The refresh is in flight; a second verification is served at once.
+        let served = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            v.key_for_kid("kid-1"),
+        )
+        .await
+        .expect("did not wait for the in-flight fetch");
+        assert!(matches!(served, Ok(Some(_))));
+        slow.abort();
+    }
+
+    #[tokio::test]
+    async fn a_keys_member_that_is_an_object_is_a_failed_refresh() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "keys": { "kty": "OKP" } })),
+            )
+            .mount(&server)
+            .await;
+        let url = url::Url::parse(&format!("{}/oauth2/jwks", server.uri())).unwrap();
+        let v = JwksVerifier::for_jwks_url(reqwest::Client::new(), url);
+        assert!(v.key_for_kid("kid-1").await.is_err());
+        assert!(v.cache.read().unwrap().is_none());
     }
 
     /// A token with `kid` would be accepted: its key is found.
