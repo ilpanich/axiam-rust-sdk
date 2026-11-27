@@ -1804,11 +1804,13 @@ mod tests {
             assert_eq!(event_field(&event, "routing_key"), "axiam.test.routing");
             assert_eq!(event_field(&event, "tenant_id"), CONSUMER_TENANT);
             assert!(event.contains("timestamp="), "{event}");
-            for secret in [sig, nonce, body_tenant] {
-                assert!(
-                    !event.contains(secret),
-                    "{reason}: the event leaks {secret}"
-                );
+            for (what, secret) in [
+                ("the signature", sig),
+                ("the nonce", nonce),
+                ("the body's tenant", body_tenant),
+            ] {
+                // Name what leaked, never print it: a failure message is a log too.
+                assert!(!event.contains(secret), "{reason}: the event leaks {what}");
             }
         }
     }

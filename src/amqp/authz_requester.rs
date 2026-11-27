@@ -1315,8 +1315,10 @@ mod tests {
         ] {
             assert!(log.contains(&expected), "{name}: missing {expected}: {log}");
         }
-        for secret in secrets {
-            assert!(!log.contains(secret), "{name}: leaked {secret}: {log}");
+        for (i, secret) in secrets.iter().enumerate() {
+            // Name which secret leaked by position, never print it or the log
+            // that holds it: a failure message is a log too.
+            assert!(!log.contains(secret), "{name}: leaked secret #{i}");
         }
     }
 
