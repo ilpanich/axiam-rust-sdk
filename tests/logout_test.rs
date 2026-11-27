@@ -575,18 +575,95 @@ async fn rules_10_and_11_stay_off_the_logout_path_and_stay_on_the_guard() {
         .await
         .expect("rules 10 and 11 do not apply to a logout token");
 
+    // The guard is configured for the fixtures' tenant, so rules 1-9 pass and
+    // only rules 10 and 11 can be what refuses these tokens.
+    let tenant = oidc_support::tenant_id();
+    let tenant_claim = || {
+        (
+            "tenant_id".to_string(),
+            serde_json::json!(tenant.to_string()),
+        )
+    };
     let guard = JwksVerifier::new(
         reqwest::Client::new(),
         &url::Url::parse(&server.uri()).unwrap(),
     )
-    .unwrap();
-    guard
-        .verify(&token)
+    .unwrap()
+    .expect_tenant_id(tenant);
+    let logout = sign_logout_token(
+        &signer,
+        LogoutTokenOptions {
+            extra_claims: vec![tenant_claim()],
+            ..Default::default()
+        },
+    );
+    let id_token = sign_id_token(
+        &signer,
+        IdTokenOptions {
+            extra_claims: vec![tenant_claim()],
+            ..Default::default()
+        },
+    );
+    let typeless_purpose = sign_logout_token(
+        &signer,
+        LogoutTokenOptions {
+            omit_typ: true,
+            extra_claims: vec![
+                tenant_claim(),
+                ("purpose".into(), serde_json::json!("mfa_challenge")),
+            ],
+            ..Default::default()
+        },
+    );
+    for (name, token, rule) in [
+        ("logout token", &logout, "rule 10"),
+        ("ID token (typ JWT)", &id_token, "rule 10"),
+        ("typ-less token with purpose", &typeless_purpose, "rule 11"),
+    ] {
+        let err = guard.verify(token).await.expect_err(name);
+        assert!(err.to_string().contains(rule), "{name}: {err}");
+    }
+}
+
+/// §12.4 rule 2: an unknown `kid` causes at most one JWKS re-fetch per cooldown
+/// window, and a FAILED re-fetch opens the window too: while the endpoint
+/// fails, a stream of unknown-kid tokens must not become a stream of fetches.
+#[tokio::test]
+async fn a_failing_jwks_endpoint_is_fetched_once_per_window_for_unknown_kids() {
+    let server = MockServer::start().await;
+    let signer = generate_signing_key("only-key");
+    // The first fetch succeeds; every later one fails.
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body(&[&signer])))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/jwks"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let configuration = configuration(&server).await;
+    let client = build_client(&server.uri(), false);
+
+    for i in 0..50 {
+        let rogue = generate_signing_key(&format!("unknown-{i}"));
+        let token = sign_logout_token(&rogue, LogoutTokenOptions::default());
+        client
+            .verify_logout_token(&token, &configuration)
+            .await
+            .expect_err("an unknown kid is refused");
+    }
+    let fetches = server
+        .received_requests()
         .await
-        .expect_err("the access-token guard refuses a logout token");
-    let id_token = sign_id_token(&signer, IdTokenOptions::default());
-    guard
-        .verify(&id_token)
-        .await
-        .expect_err("the access-token guard refuses an ID token (typ JWT)");
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/oauth2/jwks")
+        .count();
+    assert!(
+        fetches <= 2,
+        "one initial fetch and at most one forced re-fetch, got {fetches}"
+    );
 }

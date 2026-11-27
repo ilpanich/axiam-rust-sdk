@@ -101,8 +101,10 @@ pub struct Claims {
     /// Token audience — `"axiam:user"` or `"axiam:m2m"`.
     #[serde(default)]
     pub aud: Option<String>,
-    /// OAuth2 scopes (space-separated string), if any.
-    #[serde(default)]
+    /// OAuth2 scopes (space-separated string), if any. `None` also when the
+    /// claim is present but is not a string: that must not invalidate the
+    /// token, it only makes every `require_scope` fail (§11.2 rule 11d).
+    #[serde(default, deserialize_with = "lenient_scope")]
     pub scope: Option<String>,
     /// The subject's global role names in the tenant (CONTRACT.md §11.2
     /// rule 11, contract 1.68). Present only when the client requested the
@@ -141,6 +143,14 @@ pub struct Claims {
 fn lenient_roles<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(value).ok())
+}
+
+/// Read the `scope` claim without letting a non-string one fail the token.
+fn lenient_scope<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
 }
 
 /// RFC 7800 confirmation claim.
@@ -895,10 +905,10 @@ impl JwksVerifier {
     /// | 5 | `iss` | checked only when [`Self::expect_issuer`] was called. |
     /// | 6 | `aud` | checked only when [`Self::expect_audience`] was called. |
     /// | 7 | clock skew | [`CLOCK_SKEW_LEEWAY_SECS`] — a named, bounded, non-configurable 60 s. |
+    /// | 9 | `cnf` | this entry point has **no** transport evidence, so a token carrying `cnf` is **refused**, whatever it names; an unbound token is unaffected. |
     /// | 10 | `typ` | a present `typ` must be `at+jwt` (case and an `application/` prefix ignored); absent is fine. Checked before any key lookup. |
     /// | 11 | `purpose` | any `purpose` claim, whatever its value, refuses the token (MFA challenge, WebAuthn state). |
     /// | 12 | `kid` | REQUIRED; the key is selected by `kid` only, with no single-key fallback, before and after the forced refetch. |
-    /// | 9 | `cnf` | this entry point has **no** transport evidence, so a token carrying `cnf` is **refused**, whatever it names; an unbound token is unaffected. |
     ///
     /// # Rule 9, and which entry point to call
     ///
@@ -1339,6 +1349,14 @@ impl JwksVerifier {
         };
 
         if allowed {
+            // Open the cooldown window on the ATTEMPT: a failed fetch leaves
+            // the cache untouched, so without this every unknown-`kid` token
+            // would trigger another fetch for as long as the endpoint fails.
+            if let Ok(mut cache) = self.cache.write()
+                && let Some(entry) = cache.as_mut()
+            {
+                entry.last_forced_refetch = Some(Instant::now());
+            }
             self.fetch_and_cache(true).await
         } else if let Some(jwks) = self
             .cache

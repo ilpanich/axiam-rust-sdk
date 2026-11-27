@@ -52,8 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `routing_key` (the reply queue), `tenant_id` (the requester's own) and a
   `reason` (`malformed`, `unsigned`, `signature`, `tenant`, `unknown_request`),
   and never a signature, a nonce or a member of the body (CONTRACT 1.69 §8,
-  server #883). A broker `Nack` of the request fails `check` at once. The
-  requester requires an AXIAM server of 1.68 or later.
+  server #883). A broker `Nack` of the request fails `check` at once (`connect`
+  enables publisher confirms; `new` needs a confirm-enabled channel for it).
+  RUS-R1-8 error kinds: kept as `Network`; CONTRACT §2 allows exactly three
+  error types and this SDK has no configuration variant. The requester
+  requires an AXIAM server of 1.68 or later.
 
 ### Removed
 
@@ -67,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed forced JWKS re-fetch for an unknown `kid` now opens the cooldown
+  window too, so a failing JWKS endpoint is fetched at most once per window
+  instead of once per unknown-`kid` token (CONTRACT §12.4 rule 2).
 - The AMQP event consumer (`amqp::consume`) parses the delivery strictly: a
   duplicate key at any depth, or keys that differ only by case, is nacked
   instead of resolving to the last value, so what is verified and handed to
@@ -82,7 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `AxiamUser` gained a public field `scopes`, and its `roles` is now
   `Option<Vec<String>>` (`None` for no `roles` claim, kept distinct from
-  `Some(vec![])`); code that builds an `AxiamUser` with a struct literal must
+  `Some(vec![])`); `Claims::scope` likewise reads as `None` when the claim is
+  not a string, which makes `require_scope` answer 403 instead of failing the
+  token; code that builds an `AxiamUser` with a struct literal must
   add the one and wrap the other. `token::Claims` gained a public field
   `roles: Option<Vec<String>>`, which breaks a `Claims` struct literal
   likewise.

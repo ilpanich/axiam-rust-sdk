@@ -360,6 +360,8 @@ pub struct LogoutTokenOptions<'a> {
     pub omit_sub: bool,
     /// When `true`, the header carries NO `kid` (what a pre-1.69 server sent).
     pub omit_kid: bool,
+    /// When `true`, the header carries NO `typ`.
+    pub omit_typ: bool,
     /// Extra claims merged in last.
     pub extra_claims: Vec<(String, Value)>,
 }
@@ -375,7 +377,7 @@ pub const LOGOUT_JTI: &str = "logout-token-jti-1";
 pub fn sign_logout_token(key: &SigningKeyFixture, opts: LogoutTokenOptions<'_>) -> String {
     let now = now_sec();
     let mut header = Header::new(Algorithm::EdDSA);
-    header.typ = Some("logout+jwt".into());
+    header.typ = (!opts.omit_typ).then(|| "logout+jwt".to_string());
     header.kid = (!opts.omit_kid).then(|| key.kid.clone());
 
     let mut claims = serde_json::Map::new();

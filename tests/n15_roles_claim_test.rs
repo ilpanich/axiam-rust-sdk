@@ -27,6 +27,10 @@ const KID: &str = "n15-kid";
 const TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000a1";
 
 fn token(scope: &str, roles: Option<Value>) -> String {
+    token_with_scope(json!(scope), roles)
+}
+
+fn token_with_scope(scope: Value, roles: Option<Value>) -> String {
     let mut c = json!({
         "sub": Uuid::new_v4().to_string(),
         "tenant_id": TENANT,
@@ -135,4 +139,18 @@ async fn scopes_are_split_on_single_spaces_only() {
     let user = extract(token("openid admin\tx  y\nz", None)).await;
     assert_eq!(user.scopes, ["openid", "admin\tx", "y\nz"]);
     assert!(axiam_sdk::middleware::require_scope_check(&user, &["admin"]).is_err());
+}
+
+/// RUS-R1-4/L-4 (§11.2 rule 11d): a `scope` claim that is not a string leaves
+/// the token valid and every `require_scope` answers 403, never a 401.
+#[tokio::test]
+async fn a_non_string_scope_claim_is_a_403_from_require_scope_not_a_401() {
+    for malformed in [json!(7), json!(["a", "b"]), json!({"a": 1}), json!(null)] {
+        let user = try_extract(token_with_scope(malformed.clone(), Some(json!(["admin"]))))
+            .await
+            .unwrap_or_else(|e| panic!("scope {malformed} must not fail verification: {e}"));
+        assert!(user.scopes.is_empty(), "scope {malformed}");
+        assert!(axiam_sdk::middleware::require_scope_check(&user, &["a"]).is_err());
+        assert!(axiam_sdk::middleware::require_role_check(&user, &["admin"]).is_ok());
+    }
 }

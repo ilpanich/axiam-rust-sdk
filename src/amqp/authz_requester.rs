@@ -50,7 +50,9 @@ use std::time::Duration;
 
 use chrono::{SecondsFormat, SubsecRound, Utc};
 use futures_util::{Stream, StreamExt};
-use lapin::options::{BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions};
+use lapin::options::{
+    BasicConsumeOptions, BasicPublishOptions, ConfirmSelectOptions, QueueDeclareOptions,
+};
 use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel, Confirmation, Connection};
 use serde::Deserialize;
@@ -284,6 +286,11 @@ impl AuthzRequester {
     /// `tenant_id` is the requester's OWN tenant and the only tenant a
     /// response is accepted for. The channel should be on an `amqps://`
     /// connection (§8b); see [`AuthzRequester::connect`].
+    ///
+    /// A broker nack of a request fails [`check`](Self::check) at once only on
+    /// a channel with publisher confirms enabled (`confirm_select`), which
+    /// [`connect`](Self::connect) does; on any other channel a nacked request
+    /// simply times out.
     pub async fn new(
         channel: &Channel,
         tenant_id: Uuid,
@@ -344,6 +351,13 @@ impl AuthzRequester {
             .create_channel()
             .await
             .map_err(|e| AxiamError::network(format!("failed to create AMQP channel: {e}")))?;
+        // Publisher confirms, so a broker nack of a request fails `check`.
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .map_err(|e| {
+                AxiamError::network(format!("failed to enable publisher confirms: {e}"))
+            })?;
         let mut requester = Self::new(&channel, tenant_id, signing_key, options).await?;
         requester._connection = Some(connection);
         Ok(requester)
@@ -508,6 +522,8 @@ where
     let mut closed = inner.closed.subscribe();
     loop {
         tokio::select! {
+            // Closed wins over a ready delivery.
+            biased;
             _ = wait_closed(&mut closed) => return,
             next = deliveries.next() => match next {
                 Some(delivery) => inner.handle(&delivery).await,
@@ -532,6 +548,11 @@ impl Inner {
     /// Verify one delivery and complete the matching request, or discard it
     /// (nack without requeue plus one security event).
     async fn handle<D: AckableDelivery>(&self, delivery: &D) {
+        // After close nothing is verified or reported (A.2 "After Close").
+        if *self.closed.borrow() {
+            delivery.nack(false).await;
+            return;
+        }
         let discard = match self.verify_response(delivery.data()) {
             Ok(verified) => match self.take_pending(&verified) {
                 Some(tx) => {
@@ -1367,6 +1388,20 @@ mod tests {
         }
         let (genuine, _) = offer(&r, &mut rx, VECTORS[0].wire()).await;
         assert!(genuine.is_some_and(|g| g.allowed), "still waiting");
+    }
+
+    #[tokio::test]
+    async fn a_closed_requester_nacks_without_requeue_and_logs_nothing() {
+        // A.2 "After Close": nothing is verified or reported once closed.
+        init_recording_subscriber();
+        let (r, mut rx) = vector_requester();
+        r.close();
+        for body in [VECTORS[0].wire(), b"not json".to_vec()] {
+            let (decision, d) = offer(&r, &mut rx, body).await;
+            assert!(decision.is_none());
+            assert_eq!(d.counts(), (0, 0, 1), "nacked without requeue");
+        }
+        assert_eq!(captured_log(), "", "no discard event after close");
     }
 
     #[test]
