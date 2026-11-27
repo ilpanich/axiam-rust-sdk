@@ -292,7 +292,7 @@ fn verified_body(data: &[u8], signing_key: &[u8]) -> Result<serde_json::Value, &
     Ok(serde_json::Value::Object(members))
 }
 
-/// Verify a single delivery's HMAC signature (CONTRACT.md §8 steps a-g),
+/// Verify a single delivery's HMAC signature (CONTRACT.md §8 step 2a–2g),
 /// then apply the NEW-4 v2 replay-protection gates (`key_version`,
 /// freshness, nonce dedup via `replay`) and, only if everything passes,
 /// invoke `handler` with the parsed body before acking. On any failure the
@@ -331,8 +331,8 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
 
     // NEW-4 (CONTRACT.md §8 "v2 — Replay Protection"): a verified signature
     // is necessary but not sufficient. `nonce`/`issued_at` are already
-    // covered by the HMAC above (no canonicalization change needed — see
-    // the module doc comment), so this is purely acceptance-policy: reject
+    // covered by the HMAC verified above over the received bytes (see the
+    // module doc comment), so this is purely acceptance-policy: reject
     // key_version < 2, a stale/future issued_at, or an already-seen nonce
     // via the SAME nack-without-requeue path as an invalid signature.
     if let Err(reason) = validate_v2_replay_protection(&body, replay) {
@@ -876,6 +876,31 @@ mod tests {
         let (calls, delivery) = dispatch(key, wire_bytes_with_signature(&canonical, &sig)).await;
         assert_eq!(calls.len(), 1, "a genuine message must verify");
         assert_eq!(calls[0]["action"], "a&b</c>/\u{e9}\u{20ac}\u{1}");
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn genuine_audit_event_with_escaped_and_non_ascii_text_verifies() {
+        // `action` and a `metadata` value hold `&`, `<`, `>`, a `\u0041` escape of
+        // a printable character and a non-ASCII one; both reach the handler as
+        // exactly `a&b<c>Aé`.
+        let key = b"declaration-order-signing-key";
+        let canonical = format!(
+            concat!(
+                "{{\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
+                "\"actor_id\":\"33333333-3333-3333-3333-333333333333\",",
+                "\"actor_type\":\"User\",\"action\":\"a&b<c>\\u0041\u{e9}\",",
+                "\"outcome\":\"Success\",\"metadata\":{{\"note\":\"a&b<c>\\u0041\u{e9}\"}},",
+                "\"key_version\":2,\"nonce\":\"18181818-1818-1818-1818-181818181818\",",
+                "\"issued_at\":\"{}\"}}"
+            ),
+            Utc::now().to_rfc3339()
+        );
+        let sig = sign_payload(key, canonical.as_bytes());
+        let (calls, delivery) = dispatch(key, wire_bytes_with_signature(&canonical, &sig)).await;
+        assert_eq!(calls.len(), 1, "a genuine message must verify");
+        assert_eq!(calls[0]["action"], "a&b<c>A\u{e9}");
+        assert_eq!(calls[0]["metadata"]["note"], "a&b<c>A\u{e9}");
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
     }
 
