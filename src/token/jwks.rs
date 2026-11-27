@@ -1564,10 +1564,17 @@ async fn fetch_once(
         .read()
         .ok()
         .and_then(|c| c.as_ref().and_then(|e| e.etag.clone()));
-    // The request carries the SDK's bound itself: it is the only bound on
-    // wasm32, where there is no tokio timer (native keeps the outer
-    // `tokio::time::timeout` in `fetch_bounded` as well).
-    let mut request = http_client.get(jwks_url.clone()).timeout(timeout);
+    let mut request = http_client.get(jwks_url.clone());
+    // wasm32 has no tokio timer, so the request carries the SDK's bound itself.
+    // Native is bounded by the outer `tokio::time::timeout` in `fetch_bounded`;
+    // a request-level timeout there would override a shorter one the caller
+    // set on the client, so none is set.
+    #[cfg(target_arch = "wasm32")]
+    {
+        request = request.timeout(timeout);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = timeout;
     if let Some(etag) = &held_etag {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -2249,11 +2256,11 @@ mod tests {
         assert_eq!(cooldown_state(&v), (true, false), "a timeout is a failure");
     }
 
-    /// The request itself carries the SDK's bound, so a target with no tokio
-    /// timer (wasm32, where reqwest drives an AbortController) is bounded too:
-    /// no outer `tokio::time::timeout` wraps `fetch_once` here.
+    /// On native the SDK's bound is the outer tokio timeout; the request must
+    /// NOT carry its own, or it would override a shorter timeout the caller put
+    /// on the client. No outer timeout wraps `fetch_once` here (beyond a guard).
     #[tokio::test]
-    async fn fetch_once_bounds_a_stalled_endpoint_by_the_request_timeout() {
+    async fn a_shorter_client_timeout_still_bounds_the_jwks_fetch_on_native() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -2263,7 +2270,11 @@ mod tests {
             }
         });
         let url = url::Url::parse(&format!("http://127.0.0.1:{port}/oauth2/jwks")).unwrap();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
         let cache = RwLock::new(None);
         let started = std::time::Instant::now();
         // The outer guard only keeps a regression from hanging the suite.
@@ -2274,11 +2285,11 @@ mod tests {
                 &url,
                 &cache,
                 false,
-                std::time::Duration::from_millis(200),
+                std::time::Duration::from_secs(10),
             ),
         )
         .await
-        .expect("fetch_once must be bounded by its own request timeout");
+        .expect("the client's own shorter timeout must still apply");
         assert!(matches!(outcome, Err(AxiamError::Network { .. })));
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
