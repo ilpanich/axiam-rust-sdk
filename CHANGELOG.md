@@ -7,55 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **JWKS fetch concurrency and windows (contract 1.69; axiam#883).** The JWKS
-  fetch now runs as a detached single-flight task owned by the verifier, bounded
-  by the SDK's own 10 s timeout (request and body) even when the supplied
-  `reqwest::Client` has none, and records its real outcome itself: a caller
-  whose future is dropped (client disconnect) abandons only its wait, never
-  records a failed refresh and never opens a cooldown window. The unknown-`kid`
-  window opens when the forced fetch starts, so a burst of cancelled callers
-  costs one fetch per window. A verification whose held key set is usable
-  (within TTL + 300 s) returns it at once and never waits for a fetch; the
-  refresh runs in the background. Every failed fetch, on a cold cache as on a
-  held set, now counts for 60 s (previously 10 s for the guard and ID-token
-  paths), and every TTL-driven refresh, successful or not, respects the same
-  60 s window, so an advertised `max-age=0` never means one fetch per
-  verification. A smaller advertised `max-age` is still honoured as the TTL.
-- **Typed event consumer (contract 1.69, D-9; axiam#883).** `amqp::consume` and
-  `consume_with_tls` now take a `ConsumerTarget` (the consumer's own `tenant_id` and the one
-  `EventType`, `AuthzRequest` or `AuditEvent`, it consumes) beside the signing
-  key. A body with the other signed type's layout is refused at step 2c as
-  `malformed`, before the HMAC and before decoding, and never reaches the
-  handler; there is no "match either layout". Consume both queues with two
-  consumers. (1.4.0 is unreleased: this is an API change inside it.)
-- **Discard event (contract 1.69, D-8; axiam#883).** Every discard of the event
-  consumer logs exactly one `warn` event on target `axiam_sdk::security` with
-  `timestamp`, `exchange`, `routing_key`, `tenant_id` (the consumer's own,
-  never read from the body) and `reason` (`malformed`, `unsigned`, `signature`,
-  `key_version`, `stale`, `replay`), in the normative reason order; the verified
-  bytes are decoded into the configured type (a non-UUID `nonce` or ill-typed
-  member is `malformed`) before the `key_version`, freshness and replay gates,
-  and the nonce is recorded only after all of them pass. No signature, nonce,
-  key or body is logged.
-- **Byte-order mark (contract 1.69, D-10).** Both AMQP consumers (the event
-  consumer and the `AuthzRequester`) refuse a body whose first byte is not `{`
-  (a byte-order mark, whitespace, any prefix) as `malformed`; it is never
-  stripped and the loop goes on to the next delivery.
-- **Bounded JWKS stale-if-error (contract 1.69, D-10).** The JWKS cache TTL is
-  the response's `Cache-Control: max-age` (default 300 s, clamped to at most
-  300 s). A failed refresh (transport error, other status, a non-JWKS body, or
-  an empty key set) keeps the held keys and never moves the anchor, which is the
-  last successful fetch (a `200` with at least one key, or a `304` to the
-  conditional `If-None-Match` request); held keys verify until exactly TTL +
-  300 s after the anchor and every token is refused after that until a fetch
-  succeeds. An unknown-`kid` refresh that fails refuses that token and never
-  opens or extends the stale window. Before, an expired cache whose refresh
-  failed refused every token at once, and an empty key set replaced the held one.
-
-## [1.4.0] - 2026-11-22
-
 ### Security
 
 - **N14 (CONTRACT §10.1 rules 10-12).** `JwksVerifier::verify` and
@@ -107,11 +58,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error types and this SDK has no configuration variant. The requester
   requires an AXIAM server of 1.68 or later.
 
+### Changed
+
+- **JWKS fetch concurrency and windows (contract 1.69; axiam#883).** The JWKS
+  fetch now runs as a detached single-flight task owned by the verifier, bounded
+  by the SDK's own 10 s timeout (request and body) even when the supplied
+  `reqwest::Client` has none, and records its real outcome itself: a caller
+  whose future is dropped (client disconnect) abandons only its wait, never
+  records a failed refresh and never opens a cooldown window. The unknown-`kid`
+  window opens when the forced fetch starts, so a burst of cancelled callers
+  costs one fetch per window. A verification whose held key set is usable
+  (within TTL + 300 s) returns it at once and never waits for a fetch; the
+  refresh runs in the background. Every failed fetch, on a cold cache as on a
+  held set, now counts for 60 s (previously 10 s for the guard and ID-token
+  paths), and every TTL-driven refresh, successful or not, respects the same
+  60 s window, so an advertised `max-age=0` never means one fetch per
+  verification. A smaller advertised `max-age` is still honoured as the TTL.
+- **Typed event consumer (contract 1.69, D-9; axiam#883).** `amqp::consume` and
+  `consume_with_tls` now take a `ConsumerTarget` (the consumer's own `tenant_id` and the one
+  `EventType`, `AuthzRequest` or `AuditEvent`, it consumes) beside the signing
+  key. A body with the other signed type's layout is refused at step 2c as
+  `malformed`, before the HMAC and before decoding, and never reaches the
+  handler; there is no "match either layout". Consume both queues with two
+  consumers. (This is an API change within the unreleased changes.)
+- **Discard event (contract 1.69, D-8; axiam#883).** Every discard of the event
+  consumer logs exactly one `warn` event on target `axiam_sdk::security` with
+  `timestamp`, `exchange`, `routing_key`, `tenant_id` (the consumer's own,
+  never read from the body) and `reason` (`malformed`, `unsigned`, `signature`,
+  `key_version`, `stale`, `replay`), in the normative reason order; the verified
+  bytes are decoded into the configured type (a non-UUID `nonce` or ill-typed
+  member is `malformed`) before the `key_version`, freshness and replay gates,
+  and the nonce is recorded only after all of them pass. No signature, nonce,
+  key or body is logged.
+- **Byte-order mark (contract 1.69, D-10).** Both AMQP consumers (the event
+  consumer and the `AuthzRequester`) refuse a body whose first byte is not `{`
+  (a byte-order mark, whitespace, any prefix) as `malformed`; it is never
+  stripped and the loop goes on to the next delivery.
+- **Bounded JWKS stale-if-error (contract 1.69, D-10).** The JWKS cache TTL is
+  the response's `Cache-Control: max-age` (default 300 s, clamped to at most
+  300 s). A failed refresh (transport error, other status, a non-JWKS body, or
+  an empty key set) keeps the held keys and never moves the anchor, which is the
+  last successful fetch (a `200` with at least one key, or a `304` to the
+  conditional `If-None-Match` request); held keys verify until exactly TTL +
+  300 s after the anchor and every token is refused after that until a fetch
+  succeeds. An unknown-`kid` refresh that fails refuses that token and never
+  opens or extends the stale window. Before, an expired cache whose refresh
+  failed refused every token at once, and an empty key set replaced the held one.
+- Vendored `CONTRACT.md` re-synced to 1.69 (typed event consumer, byte-order-mark refusal, bounded JWKS
+  stale-if-error and the wire-form clarification; axiam#883).
+- Dependency: `jsonwebtoken` requirement raised from 11 to 12 (adapted to its fallible
+  `EncodingKey::from_secret`).
+
+### Changed (behaviour change; migration)
+
+- `AxiamUser` gained a public field `scopes`, and its `roles` is now
+  `Option<Vec<String>>` (`None` for no `roles` claim, kept distinct from
+  `Some(vec![])`); `Claims::scope` likewise reads as `None` when the claim is
+  not a string, which makes `require_scope` answer 403 instead of failing the
+  token; code that builds an `AxiamUser` with a struct literal must
+  add the one and wrap the other. `token::Claims` gained a public field
+  `roles: Option<Vec<String>>`, which breaks a `Claims` struct literal
+  likewise.
+- Access tokens must carry `typ: at+jwt` (or no `typ`), a `kid`, and no
+  `purpose`. An access token a pre-1.67 server minted (`typ: JWT`) is refused
+  by guards; its holder refreshes (at most one access-token lifetime).
+- `require_role` now needs the server's `roles` claim: the application must
+  request the `roles` scope (server 1.68, SA-18). Code that relied on a scope
+  named like a role must switch to `require_scope`.
+- Vendored `CONTRACT.md` (1.68), `openapi.json` and `management-registry.json`
+  re-synced; the generated management models regenerated.
+
 ### Removed
 
 - The AMQP authz requester no longer offers an opt-out for unsigned responses
   (`AuthzRequesterOptions::allow_unsigned_responses`, with
-  `AuthzDecision::unsigned`; added earlier in 1.4.0 and never released): no
+  `AuthzDecision::unsigned`; added earlier in this unreleased cycle and never released): no
   AXIAM server sends one to a reply queue, so the option could admit only a
   forged response (CONTRACT 1.69 §8, server #881). The requester requires a
   1.68 server; during a rolling upgrade from an older one, use REST or gRPC
@@ -148,25 +169,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kid-less token; tests now pin it with a server-shaped token against a
   two-key JWKS, and pin that §10.1 rules 10 and 11 stay off the logout and
   ID-token paths (CONTRACT 1.69 §12.7.6, server #880).
-
-### Changed (behaviour change; migration)
-
-- `AxiamUser` gained a public field `scopes`, and its `roles` is now
-  `Option<Vec<String>>` (`None` for no `roles` claim, kept distinct from
-  `Some(vec![])`); `Claims::scope` likewise reads as `None` when the claim is
-  not a string, which makes `require_scope` answer 403 instead of failing the
-  token; code that builds an `AxiamUser` with a struct literal must
-  add the one and wrap the other. `token::Claims` gained a public field
-  `roles: Option<Vec<String>>`, which breaks a `Claims` struct literal
-  likewise.
-- Access tokens must carry `typ: at+jwt` (or no `typ`), a `kid`, and no
-  `purpose`. An access token a pre-1.67 server minted (`typ: JWT`) is refused
-  by guards; its holder refreshes (at most one access-token lifetime).
-- `require_role` now needs the server's `roles` claim: the application must
-  request the `roles` scope (server 1.68, SA-18). Code that relied on a scope
-  named like a role must switch to `require_scope`.
-- Vendored `CONTRACT.md` (1.68), `openapi.json` and `management-registry.json`
-  re-synced; the generated management models regenerated.
 
 ## [1.3.1] - 2026-11-11
 
