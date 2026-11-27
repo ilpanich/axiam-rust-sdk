@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **JWKS fetch concurrency and windows (contract 1.69; axiam#883).** The JWKS
+  fetch now runs as a detached single-flight task owned by the verifier, bounded
+  by the SDK's own 10 s timeout (request and body) even when the supplied
+  `reqwest::Client` has none, and records its real outcome itself: a caller
+  whose future is dropped (client disconnect) abandons only its wait, never
+  records a failed refresh and never opens a cooldown window. The unknown-`kid`
+  window opens when the forced fetch starts, so a burst of cancelled callers
+  costs one fetch per window. A verification whose held key set is usable
+  (within TTL + 300 s) returns it at once and never waits for a fetch; the
+  refresh runs in the background. Every failed fetch, on a cold cache as on a
+  held set, now counts for 60 s (previously 10 s for the guard and ID-token
+  paths), and every TTL-driven refresh, successful or not, respects the same
+  60 s window, so an advertised `max-age=0` never means one fetch per
+  verification. A smaller advertised `max-age` is still honoured as the TTL.
 - **Typed event consumer (contract 1.69, D-9; axiam#883).** `amqp::consume` and
   `consume_with_tls` now take a `ConsumerTarget` (the consumer's own `tenant_id` and the one
   `EventType`, `AuthzRequest` or `AuditEvent`, it consumes) beside the signing

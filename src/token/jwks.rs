@@ -13,7 +13,7 @@
 #[cfg(any(feature = "rest", feature = "actix"))]
 use crate::time::{Duration, Instant};
 #[cfg(any(feature = "rest", feature = "actix"))]
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 #[cfg(any(feature = "rest", feature = "actix"))]
 use jsonwebtoken::jwk::JwkSet;
@@ -52,20 +52,25 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 #[cfg(any(feature = "rest", feature = "actix"))]
 const JWKS_MAX_STALE: Duration = Duration::from_secs(300);
 
-/// After a failed fetch, how long a verifier built with
-/// [`JwksVerifier::limiting_failed_fetches`] makes no other (§34.2 P6: a failed
-/// fill, a failed refresh of an expired cache and a failed unknown-`kid`
-/// refetch each count toward the once-a-minute limit, so that a JWKS outage
-/// is not one fetch per SET).
+/// After a failed fetch, how long NO verifier makes another (§34.2 P6 and
+/// contract 1.69: a failed fill, a failed refresh of an expired cache and a
+/// failed unknown-`kid` refetch each count toward the once-a-minute limit, so a
+/// JWKS outage is not one fetch per verification). It is also the floor
+/// between two TTL-driven refreshes of a held set, so an advertised
+/// `max-age=0` never means one fetch per verification.
 #[cfg(any(feature = "rest", feature = "actix"))]
 pub(crate) const FAILED_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// After a failed fetch, how long ANY verifier makes no other: a cold or
-/// expired cache and a failing JWKS endpoint must not turn every verification
-/// into a fetch. Short, so a recovered endpoint is picked up promptly; there
-/// is no stale-if-error.
+/// The SDK's own bound on one JWKS fetch (request and body), applied inside the
+/// fetch task whatever `reqwest::Client` the caller supplied: a client built
+/// with `Client::new()` has no timeout of its own.
 #[cfg(any(feature = "rest", feature = "actix"))]
-pub(crate) const FAILED_FETCH_SHORT_INTERVAL: Duration = Duration::from_secs(10);
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The shared outcome of one single-flight fetch: the key set, or the failure
+/// message (an [`AxiamError`] is not `Clone`).
+#[cfg(any(feature = "rest", feature = "actix"))]
+type FetchOutcome = Result<JwkSet, String>;
 
 /// Minimum interval between forced refetches triggered by an unknown `kid`,
 /// to avoid a hostile/rotating token stream hammering the JWKS endpoint.
@@ -569,18 +574,17 @@ fn advertised_ttl(headers: &reqwest::header::HeaderMap) -> Duration {
 pub struct JwksVerifier {
     http_client: reqwest::Client,
     jwks_url: url::Url,
-    cache: RwLock<Option<CachedJwks>>,
-    /// Serializes concurrent fetchers so a burst of cache-miss callers (e.g.
-    /// an invalid-`kid` storm) collapses to exactly one network fetch
-    /// (D-08/D-09). Guards ONLY the fetch — a coalescing wrapper, never the
-    /// cryptographic verify path.
-    fetch_lock: tokio::sync::Mutex<()>,
-    /// §34.2 P6: whether a failed fetch counts toward the once-a-minute limit.
-    /// Set for the SSF receiver only; the §10 guard and §12 ID-token paths
-    /// retry a failed fetch on their next call, as they always have.
-    limit_failed_fetches: bool,
+    cache: Arc<RwLock<Option<CachedJwks>>>,
+    /// The single-flight slot: the receiver of the fetch task in flight, if
+    /// any. The fetch runs as a detached task owned by the SDK, never inside a
+    /// caller's future, so a caller that is cancelled (client disconnect) can
+    /// neither abort it nor leave a half-recorded outcome behind. Only this
+    /// slot's std mutex is taken, never across an `.await`.
+    inflight: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<FetchOutcome>>>>,
+    /// The SDK's own bound on one fetch (see [`JWKS_FETCH_TIMEOUT`]).
+    fetch_timeout: Duration,
     /// When the last fetch failed (`None` after a success).
-    last_failed_fetch: std::sync::Mutex<Option<Instant>>,
+    last_failed_fetch: Arc<std::sync::Mutex<Option<Instant>>>,
     /// §10.1 rule 4: the tenant every verified token MUST be scoped to.
     /// `None` means "not configured", which makes [`Self::verify`] fail
     /// closed — never "no tenant constraint".
@@ -623,10 +627,10 @@ impl JwksVerifier {
         Ok(Self {
             http_client,
             jwks_url,
-            cache: RwLock::new(None),
-            fetch_lock: tokio::sync::Mutex::new(()),
-            limit_failed_fetches: false,
-            last_failed_fetch: std::sync::Mutex::new(None),
+            cache: Arc::new(RwLock::new(None)),
+            inflight: std::sync::Mutex::new(None),
+            fetch_timeout: JWKS_FETCH_TIMEOUT,
+            last_failed_fetch: Arc::new(std::sync::Mutex::new(None)),
             expected_tenant_id: None,
             expected_issuer: None,
             expected_audience: None,
@@ -775,10 +779,10 @@ impl JwksVerifier {
         Self {
             http_client,
             jwks_url,
-            cache: RwLock::new(None),
-            fetch_lock: tokio::sync::Mutex::new(()),
-            limit_failed_fetches: false,
-            last_failed_fetch: std::sync::Mutex::new(None),
+            cache: Arc::new(RwLock::new(None)),
+            inflight: std::sync::Mutex::new(None),
+            fetch_timeout: JWKS_FETCH_TIMEOUT,
+            last_failed_fetch: Arc::new(std::sync::Mutex::new(None)),
             expected_tenant_id: None,
             expected_issuer: None,
             expected_audience: None,
@@ -790,27 +794,9 @@ impl JwksVerifier {
         }
     }
 
-    /// Count a failed fetch toward the once-a-minute limit (§34.2 P6, the SSF
-    /// receiver's key cache): within a minute of a failed fetch no fetch is
-    /// made, and a lookup that needs one fails with [`AxiamError::Network`].
-    pub(crate) fn limiting_failed_fetches(mut self) -> Self {
-        self.limit_failed_fetches = true;
-        self
-    }
-
-    /// The refusal a lookup gets inside the minute after a failed fetch, when
-    /// failed fetches are limited.
-    ///
-    /// Every verifier gets the short [`FAILED_FETCH_SHORT_INTERVAL`] window, so
-    /// a failing endpoint is not fetched once per verification; the §34.2 P6
-    /// verifier keeps its minute.
+    /// The refusal a lookup gets inside the minute after a failed fetch.
     fn failed_fetch_cooldown(&self) -> Result<(), AxiamError> {
-        let window = if self.limit_failed_fetches {
-            FAILED_FETCH_MIN_INTERVAL
-        } else {
-            FAILED_FETCH_SHORT_INTERVAL
-        };
-        self.failed_fetch_cooldown_for(window)
+        self.failed_fetch_cooldown_for(FAILED_FETCH_MIN_INTERVAL)
     }
 
     fn failed_fetch_cooldown_for(&self, window: Duration) -> Result<(), AxiamError> {
@@ -1363,51 +1349,30 @@ impl JwksVerifier {
         if let Some(jwks) = self.cached_if_fresh() {
             return Ok(jwks);
         }
-        // Serialize concurrent fetchers on a cold/stale cache (D-08/D-09):
-        // acquire the fetch guard, then double-check under it — a
-        // concurrent caller may have already refreshed while we waited.
-        //
-        // A held set still inside its stale bound never waits for another
-        // caller's in-flight fetch: if the guard is taken, serve it.
-        let _guard = match self.fetch_lock.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => match self.held_within_stale_bound() {
-                Some(jwks) => return Ok(jwks),
-                None => self.fetch_lock.lock().await,
-            },
-        };
-        if let Some(jwks) = self.cached_if_fresh() {
-            return Ok(jwks);
-        }
-        // A TTL-driven refresh of a held set, successful or not, respects the
-        // 60 s window: an advertised `max-age=0` (or a failing endpoint) never
-        // means one fetch per verification. The held set keeps serving.
-        if self.held_within_stale_bound().is_some() {
-            let recently_fetched = self
-                .cache
-                .read()
-                .ok()
-                .and_then(|c| c.as_ref().map(|e| e.fetched_at.elapsed()))
-                .is_some_and(|age| age < FAILED_FETCH_MIN_INTERVAL);
-            if recently_fetched
-                || self
-                    .failed_fetch_cooldown_for(FAILED_FETCH_MIN_INTERVAL)
-                    .is_err()
-            {
-                return Ok(self.held_within_stale_bound().expect("checked above"));
-            }
-        }
         // Stale-if-error (§12.4 rule 2, contract 1.69): past its TTL the held
-        // set is refreshed; if the refresh is refused by the failed-fetch
-        // cooldown or fails, the held keys keep verifying until exactly
-        // TTL + 300 s after the last successful fetch, and not after.
-        if let Err(e) = self.failed_fetch_cooldown() {
-            return self.held_within_stale_bound().ok_or(e);
+        // set keeps verifying until exactly TTL + 300 s after the last
+        // successful fetch. A TTL-driven refresh, successful or not, respects
+        // the 60 s window (an advertised `max-age=0` never means one fetch per
+        // verification).
+        let held = self.held_within_stale_bound();
+        let age = self
+            .cache
+            .read()
+            .ok()
+            .and_then(|c| c.as_ref().map(|e| e.fetched_at.elapsed()));
+        let cooldown = self.failed_fetch_cooldown();
+        if let Some(held) = held {
+            if age.is_some_and(|a| a >= FAILED_FETCH_MIN_INTERVAL) && cooldown.is_ok() {
+                // A usable held set is returned at once; the refresh runs as
+                // the detached single-flight task and nobody waits for it.
+                let _ = self.start_fetch(false);
+            }
+            return Ok(held);
         }
-        match self.fetch_and_cache(false).await {
-            Ok(jwks) => Ok(jwks),
-            Err(e) => self.held_within_stale_bound().ok_or(e),
-        }
+        cooldown?;
+        // Nothing usable is held: wait for the shared fetch. Only this wait
+        // is cancellable; the fetch itself is not.
+        await_outcome(self.start_fetch(false)).await
     }
 
     fn cached_if_fresh(&self) -> Option<JwkSet> {
@@ -1433,151 +1398,193 @@ impl JwksVerifier {
     /// `FORCED_REFETCH_MIN_INTERVAL` to avoid a rotating/hostile `kid`
     /// stream hammering the JWKS endpoint.
     async fn force_refetch_if_allowed(&self) -> Result<JwkSet, AxiamError> {
-        // Same fetch_lock as get_or_fetch — a rotating/hostile-kid burst
-        // that reaches this forced-refetch path must ALSO serialize on the
-        // single fetch guard so concurrent callers collapse to one fetch
-        // (D-08/D-09), rather than each racing the cooldown check
-        // independently (the pre-existing TOCTOU this plan closes).
-        let _guard = self.fetch_lock.lock().await;
         self.failed_fetch_cooldown()?;
 
-        let allowed = {
-            let cache = self.cache.read().ok();
-            match cache.as_ref().and_then(|c| c.as_ref()) {
-                Some(entry) => match entry.last_forced_refetch {
-                    Some(last) => last.elapsed() >= FORCED_REFETCH_MIN_INTERVAL,
-                    None => true,
-                },
+        // Check and open the window in one synchronous critical section: the
+        // window opens when the fetch STARTS, so a caller cancelled mid-fetch
+        // cannot bypass it, and a burst collapses to one fetch.
+        let allowed = match self.cache.write() {
+            Ok(mut cache) => match cache.as_mut() {
+                Some(entry) => {
+                    let due = entry
+                        .last_forced_refetch
+                        .is_none_or(|last| last.elapsed() >= FORCED_REFETCH_MIN_INTERVAL);
+                    if due {
+                        entry.last_forced_refetch = Some(Instant::now());
+                    }
+                    due
+                }
                 None => true,
-            }
+            },
+            Err(_) => true,
         };
 
         if allowed {
-            // Open the cooldown window once the attempt has FAILED: a failed
-            // fetch leaves the cache untouched, so without this every
-            // unknown-`kid` token would trigger another fetch for as long as
-            // the endpoint fails. Done after the await, so a caller that
-            // cancels mid-fetch (future dropped) never opens the window.
-            let outcome = self.fetch_and_cache(true).await;
+            await_outcome(self.start_fetch(true)).await
+        } else if let Some(jwks) = self.held_within_stale_bound() {
+            Ok(jwks)
+        } else {
+            await_outcome(self.start_fetch(true)).await
+        }
+    }
+
+    /// Join the fetch in flight, or start one as a detached task: single-flight
+    /// per verifier, bounded by `fetch_timeout`, its REAL outcome recorded by
+    /// the task itself (failure anchor, forced window), never by a caller.
+    fn start_fetch(&self, is_forced: bool) -> tokio::sync::watch::Receiver<Option<FetchOutcome>> {
+        let mut slot = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(rx) = slot.as_ref()
+            && rx.borrow().is_none()
+            && rx.has_changed().is_ok()
+        {
+            return rx.clone();
+        }
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let client = self.http_client.clone();
+        let url = self.jwks_url.clone();
+        let cache = Arc::clone(&self.cache);
+        let failed = Arc::clone(&self.last_failed_fetch);
+        let timeout = self.fetch_timeout;
+        tokio::spawn(async move {
+            let outcome =
+                match tokio::time::timeout(timeout, fetch_once(&client, &url, &cache, is_forced))
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err(AxiamError::network("JWKS fetch timed out")),
+                };
+            *failed.lock().unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(Instant::now);
             if outcome.is_err()
-                && let Ok(mut cache) = self.cache.write()
+                && is_forced
+                && let Ok(mut cache) = cache.write()
                 && let Some(entry) = cache.as_mut()
             {
                 entry.last_forced_refetch = Some(Instant::now());
             }
-            outcome
-        } else if let Some(jwks) = self.held_within_stale_bound() {
-            Ok(jwks)
-        } else {
-            self.fetch_and_cache(true).await
+            let _ = tx.send(Some(outcome.map_err(|e| e.to_string())));
+        });
+        *slot = Some(rx.clone());
+        rx
+    }
+}
+
+/// Wait for the shared fetch result. Dropping this future (the caller went
+/// away) abandons only the wait.
+#[cfg(any(feature = "rest", feature = "actix"))]
+async fn await_outcome(
+    mut rx: tokio::sync::watch::Receiver<Option<FetchOutcome>>,
+) -> Result<JwkSet, AxiamError> {
+    loop {
+        if let Some(outcome) = rx.borrow().clone() {
+            return outcome.map_err(AxiamError::network);
+        }
+        if rx.changed().await.is_err() {
+            return Err(AxiamError::network("JWKS fetch task ended unexpectedly"));
         }
     }
+}
 
-    async fn fetch_and_cache(&self, is_forced: bool) -> Result<JwkSet, AxiamError> {
-        let outcome = self.fetch_and_cache_once(is_forced).await;
-        *self
-            .last_failed_fetch
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(Instant::now);
-        outcome
+/// One JWKS fetch: conditional when a set and its ETag are held; a `200` with
+/// at least one key, or a `304` to a conditional request, is a success.
+#[cfg(any(feature = "rest", feature = "actix"))]
+async fn fetch_once(
+    http_client: &reqwest::Client,
+    jwks_url: &url::Url,
+    cache: &RwLock<Option<CachedJwks>>,
+    is_forced: bool,
+) -> Result<JwkSet, AxiamError> {
+    // A conditional request when a set (and its ETag) is held: a `304`
+    // re-confirms it (§12.4 rule 2, "What counts as a successful fetch").
+    let held_etag = cache
+        .read()
+        .ok()
+        .and_then(|c| c.as_ref().and_then(|e| e.etag.clone()));
+    let mut request = http_client.get(jwks_url.clone());
+    if let Some(etag) = &held_etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
+    let response = request
+        .omit_browser_credentials()
+        .send()
+        .await
+        .map_err(|e| AxiamError::Network {
+            message: format!("JWKS fetch failed: {e}"),
+            source: Some(Box::new(e)),
+        })?;
 
-    async fn fetch_and_cache_once(&self, is_forced: bool) -> Result<JwkSet, AxiamError> {
-        // A conditional request when a set (and its ETag) is held: a `304`
-        // re-confirms it (§12.4 rule 2, "What counts as a successful fetch").
-        let held_etag = self
-            .cache
-            .read()
-            .ok()
-            .and_then(|c| c.as_ref().and_then(|e| e.etag.clone()));
-        let mut request = self.http_client.get(self.jwks_url.clone());
-        if let Some(etag) = &held_etag {
-            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-        }
-        let response = request
-            .omit_browser_credentials()
-            .send()
-            .await
-            .map_err(|e| AxiamError::Network {
-                message: format!("JWKS fetch failed: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-
-        let status = response.status();
-        let now = Instant::now();
-        if status == reqwest::StatusCode::NOT_MODIFIED && held_etag.is_some() {
-            let ttl = advertised_ttl(response.headers());
-            if let Ok(mut cache) = self.cache.write()
-                && let Some(entry) = cache.as_mut()
-            {
-                entry.fetched_at = now;
-                entry.ttl = ttl;
-                if is_forced {
-                    entry.last_forced_refetch = Some(now);
-                }
-                return Ok(entry.jwks.clone());
-            }
-            return Err(AxiamError::network(
-                "JWKS cache unavailable after a 304 response",
-            ));
-        }
-        if status != reqwest::StatusCode::OK {
-            return Err(AxiamError::from_http_status(
-                status.as_u16(),
-                "JWKS endpoint returned a non-success status".to_string(),
-            ));
-        }
-
+    let status = response.status();
+    let now = Instant::now();
+    if status == reqwest::StatusCode::NOT_MODIFIED && held_etag.is_some() {
         let ttl = advertised_ttl(response.headers());
-        let etag = response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            // Never stored or echoed: over 256 bytes or with a control character.
-            .filter(|v| v.len() <= 256 && !v.bytes().any(|b| b.is_ascii_control()))
-            .map(str::to_owned);
-        let document: serde_json::Value =
-            response.json().await.map_err(|e| AxiamError::Network {
-                message: format!("JWKS response parse failed: {e}"),
-                source: Some(Box::new(e)),
-            })?;
-        // A JWKS document holds at least one JWK object with a string `kty`;
-        // `{"keys":[]}`, `{"keys":[{}]}`, `[0]` and `[null]` are not one.
-        let has_jwk = document
-            .get("keys")
-            .and_then(|k| k.as_array())
-            .is_some_and(|keys| {
-                keys.iter()
-                    .any(|k| k.get("kty").is_some_and(serde_json::Value::is_string))
-            });
-        if !has_jwk {
-            return Err(AxiamError::network(
-                "JWKS document holds no keys; the held set is kept",
-            ));
+        if let Ok(mut cache) = cache.write()
+            && let Some(entry) = cache.as_mut()
+        {
+            entry.fetched_at = now;
+            entry.ttl = ttl;
+            if is_forced {
+                entry.last_forced_refetch = Some(now);
+            }
+            return Ok(entry.jwks.clone());
         }
-        // Entries are parsed one by one: a well-formed JWK this SDK cannot use
-        // (e.g. RSA without `alg`) still counts as a key held by the document
-        // and is skipped, instead of refusing the whole set.
-        let jwks = JwkSet {
-            keys: document["keys"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|k| serde_json::from_value(k.clone()).ok())
-                .collect(),
-        };
-        if let Ok(mut cache) = self.cache.write() {
-            *cache = Some(CachedJwks {
-                jwks: jwks.clone(),
-                fetched_at: now,
-                ttl,
-                etag,
-                last_forced_refetch: if is_forced { Some(now) } else { None },
-            });
-        }
-
-        Ok(jwks)
+        return Err(AxiamError::network(
+            "JWKS cache unavailable after a 304 response",
+        ));
     }
+    if status != reqwest::StatusCode::OK {
+        return Err(AxiamError::from_http_status(
+            status.as_u16(),
+            "JWKS endpoint returned a non-success status".to_string(),
+        ));
+    }
+
+    let ttl = advertised_ttl(response.headers());
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        // Never stored or echoed: over 256 bytes or with a control character.
+        .filter(|v| v.len() <= 256 && !v.bytes().any(|b| b.is_ascii_control()))
+        .map(str::to_owned);
+    let document: serde_json::Value = response.json().await.map_err(|e| AxiamError::Network {
+        message: format!("JWKS response parse failed: {e}"),
+        source: Some(Box::new(e)),
+    })?;
+    // A JWKS document holds at least one JWK object with a string `kty`;
+    // `{"keys":[]}`, `{"keys":[{}]}`, `[0]` and `[null]` are not one.
+    let has_jwk = document
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .is_some_and(|keys| {
+            keys.iter()
+                .any(|k| k.get("kty").is_some_and(serde_json::Value::is_string))
+        });
+    if !has_jwk {
+        return Err(AxiamError::network(
+            "JWKS document holds no keys; the held set is kept",
+        ));
+    }
+    // Entries are parsed one by one: a well-formed JWK this SDK cannot use
+    // (e.g. RSA without `alg`) still counts as a key held by the document
+    // and is skipped, instead of refusing the whole set.
+    let jwks = JwkSet {
+        keys: document["keys"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| serde_json::from_value(k.clone()).ok())
+            .collect(),
+    };
+    if let Ok(mut cache) = cache.write() {
+        *cache = Some(CachedJwks {
+            jwks: jwks.clone(),
+            fetched_at: now,
+            ttl,
+            etag,
+            last_forced_refetch: if is_forced { Some(now) } else { None },
+        });
+    }
+
+    Ok(jwks)
 }
 
 /// Decode `token` into [`Claims`] under `validation`, translating
@@ -1832,7 +1839,7 @@ mod tests {
 
     fn ssf_verifier(server: &wiremock::MockServer) -> JwksVerifier {
         let url = url::Url::parse(&format!("{}/oauth2/jwks", server.uri())).unwrap();
-        JwksVerifier::for_jwks_url(reqwest::Client::new(), url).limiting_failed_fetches()
+        JwksVerifier::for_jwks_url(reqwest::Client::new(), url)
     }
 
     fn backdate(verifier: &JwksVerifier, field: &str, by: Duration) {
@@ -1860,7 +1867,9 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1, "served from the cache");
 
         backdate(&verifier, "fetched_at", JWKS_CACHE_TTL);
+        // The held set answers at once; the refresh runs detached.
         assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        settle(&verifier).await;
         assert_eq!(
             hits.load(Ordering::SeqCst),
             2,
@@ -1910,13 +1919,14 @@ mod tests {
         backdate(&verifier, "last_failed_fetch", FAILED_FETCH_MIN_INTERVAL);
         backdate(&verifier, "fetched_at", JWKS_CACHE_TTL);
         assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        settle(&verifier).await;
         assert_eq!(hits.load(Ordering::SeqCst), 3);
         assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 3, "no fetch inside the minute");
     }
 
     #[tokio::test]
-    async fn without_the_limit_a_failing_endpoint_is_still_fetched_once_per_short_window() {
+    async fn a_failing_endpoint_is_fetched_once_per_60s_window() {
         use std::sync::atomic::Ordering;
         let (server, hits) = jwks_endpoint(vec![503, 200]).await;
         let url = url::Url::parse(&format!("{}/oauth2/jwks", server.uri())).unwrap();
@@ -1931,8 +1941,13 @@ mod tests {
             "a cold cache and a failing endpoint: one fetch per window"
         );
 
-        // After the window, a healthy endpoint is fetched and succeeds.
-        backdate(&verifier, "last_failed_fetch", FAILED_FETCH_SHORT_INTERVAL);
+        // 11 s on: still inside the 60 s window, no fetch is made.
+        backdate(&verifier, "last_failed_fetch", Duration::from_secs(11));
+        assert!(verifier.key_for_kid("kid-1").await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no fetch at 11 s");
+
+        // 61 s on: a healthy endpoint is fetched and succeeds.
+        backdate(&verifier, "last_failed_fetch", Duration::from_secs(61));
         assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
@@ -2071,56 +2086,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_caller_cancelled_fetch_is_not_a_failed_refresh_and_opens_no_window() {
-        let jwks = Jwks::start().await;
-        let v = jwks.verifier();
-        assert!(accepted(&v, "kid-1").await);
-        jwks.delay_ms.store(3000, AtomicOrdering::SeqCst);
-        // Unknown kid: the forced refetch is in flight when the caller drops.
-        let dropped = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            v.key_for_kid("kid-9"),
-        )
-        .await;
-        assert!(dropped.is_err(), "the caller gave up mid-fetch");
-        assert_eq!(cooldown_state(&v), (false, false));
-        // A cold-cache caller cancelled mid-fetch records nothing either.
-        let cold = jwks.verifier();
-        let dropped = tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            cold.key_for_kid("kid-1"),
-        )
-        .await;
-        assert!(dropped.is_err());
-        assert_eq!(cooldown_state(&cold), (false, false));
-        // The next lookup fetches at once (no cooldown) and succeeds.
-        jwks.delay_ms.store(0, AtomicOrdering::SeqCst);
-        let before = jwks.fetches();
-        assert!(accepted(&cold, "kid-1").await);
-        assert_eq!(jwks.fetches(), before + 1);
-    }
-
-    #[tokio::test]
-    async fn a_usable_held_set_never_waits_for_an_in_flight_fetch() {
+    async fn callers_cancelled_mid_fetch_never_cause_more_than_one_fetch_per_window() {
         let jwks = Jwks::start().await;
         let v = Arc::new(jwks.verifier());
         assert!(accepted(&v, "kid-1").await);
+        assert_eq!(jwks.fetches(), 1);
+        jwks.delay_ms.store(300, AtomicOrdering::SeqCst);
+        // 20 unknown-kid callers, each cancelled after 60 ms, mid-fetch.
+        for i in 0..20 {
+            // The first is cancelled mid-fetch; the rest meet the open window.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(60),
+                v.key_for_kid(&format!("kid-x{i}")),
+            )
+            .await;
+        }
+        settle(&v).await;
+        assert_eq!(jwks.fetches(), 2, "one forced fetch, however many callers");
+        // The fetch ran to completion on its own and recorded its REAL outcome:
+        // a success, so no failure is on record; the forced window is open.
+        assert_eq!(cooldown_state(&v), (false, true));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_cold_caller_leaves_the_fetch_running_and_its_result_cached() {
+        let jwks = Jwks::start().await;
+        jwks.delay_ms.store(300, AtomicOrdering::SeqCst);
+        let v = jwks.verifier();
+        let dropped =
+            tokio::time::timeout(std::time::Duration::from_millis(60), v.key_for_kid("kid-1"))
+                .await;
+        assert!(dropped.is_err());
+        settle(&v).await;
+        assert_eq!(cooldown_state(&v), (false, false));
+        assert_eq!(jwks.fetches(), 1);
+        assert!(v.cache.read().unwrap().is_some(), "the task filled it");
+    }
+
+    #[tokio::test]
+    async fn a_failing_forced_fetch_opens_the_window_and_records_the_failure_once() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        jwks.set(FAIL);
+        jwks.delay_ms.store(200, AtomicOrdering::SeqCst);
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), v.key_for_kid("kid-9"))
+            .await;
+        settle(&v).await;
+        assert_eq!(cooldown_state(&v), (true, true));
+        assert_eq!(jwks.fetches(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_fetch_that_never_answers_is_bounded_by_the_sdk_own_timeout() {
+        // A socket that accepts and never replies; the client has no timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/oauth2/jwks")).unwrap();
+        let mut v =
+            JwksVerifier::for_jwks_url(reqwest::Client::builder().no_proxy().build().unwrap(), url);
+        v.fetch_timeout = std::time::Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let e = v.key_for_kid("kid-1").await.unwrap_err();
+        assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        settle(&v).await;
+        assert_eq!(cooldown_state(&v), (true, false), "a timeout is a failure");
+    }
+
+    #[tokio::test]
+    async fn a_usable_held_set_returns_promptly_while_a_slow_fetch_is_in_flight() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
         advance(&v, TTL + Duration::from_secs(1)); // stale, inside the bound
         jwks.delay_ms.store(3000, AtomicOrdering::SeqCst);
-        let slow = {
-            let v = Arc::clone(&v);
-            tokio::spawn(async move { v.key_for_kid("kid-1").await })
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        // The refresh is in flight; a second verification is served at once.
-        let served = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            v.key_for_kid("kid-1"),
-        )
-        .await
-        .expect("did not wait for the in-flight fetch");
-        assert!(matches!(served, Ok(Some(_))));
-        slow.abort();
+        // The caller that STARTS the refresh is served at once, not after it.
+        let started = std::time::Instant::now();
+        assert!(matches!(v.key_for_kid("kid-1").await, Ok(Some(_))));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        // A second one, with the refresh in flight, is too, and joins it.
+        let started = std::time::Instant::now();
+        assert!(matches!(v.key_for_kid("kid-1").await, Ok(Some(_))));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(jwks.fetches(), 2, "single-flight: one refresh");
     }
 
     #[tokio::test]
@@ -2141,7 +2197,27 @@ mod tests {
 
     /// A token with `kid` would be accepted: its key is found.
     async fn accepted(verifier: &JwksVerifier, kid: &str) -> bool {
-        matches!(verifier.key_for_kid(kid).await, Ok(Some(_)))
+        let found = matches!(verifier.key_for_kid(kid).await, Ok(Some(_)));
+        settle(verifier).await;
+        found
+    }
+
+    /// Wait for the detached refresh a stale-but-usable lookup started, so the
+    /// fetch count and the cache can be asserted on.
+    async fn settle(verifier: &JwksVerifier) {
+        for _ in 0..500 {
+            let busy = verifier
+                .inflight
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|rx| rx.borrow().is_none() && rx.has_changed().is_ok());
+            if !busy {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the JWKS fetch never finished");
     }
 
     const TTL: Duration = JWKS_CACHE_TTL;
