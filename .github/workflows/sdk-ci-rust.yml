@@ -170,6 +170,13 @@ jobs:
         if: matrix.toolchain == 'stable'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # `--no-default-features --features rest` is the REST-only build the README
+      # advertises; code used only by `opaque`/`amqp`/`grpc` must be gated on
+      # them or this leg fails with dead_code (#160).
+      - name: Clippy (lib and tests, rest only)
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --lib --tests --no-default-features --features rest -- -D warnings
+
       - name: Build (all features)
         run: cargo build --all-features
 

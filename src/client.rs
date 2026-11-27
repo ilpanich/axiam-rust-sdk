@@ -1329,6 +1329,9 @@ impl AxiamClient {
 
     /// The tenant the signed-in principal's record lives in — CONTRACT.md
     /// §5.2.2. `None` until a login has reported one.
+    ///
+    /// Only the OPAQUE login path reads it, so it exists only with `opaque`.
+    #[cfg(feature = "opaque")]
     pub(crate) fn resolved_principal_tenant_id(&self) -> Option<Uuid> {
         self.inner
             .resolved_principal_tenant_id

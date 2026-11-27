@@ -144,6 +144,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per 10 s window instead of once per verification; the lookup fails with a
   network error meanwhile (no stale-if-error).
 - The JWKS fetch is bounded by the SDK's 10 s timeout on wasm32 too (#159).
+- `--no-default-features --features rest` (and `grpc`, `observability`, or no
+  feature at all) builds clean under `-D warnings` again: the OPAQUE-only
+  `resolved_principal_tenant_id` getter is gated on `opaque`, and the internal
+  `Telemetry` dispatcher on `rest`/`amqp`, instead of being dead code. The
+  rest-only clippy leg is now part of CI (#160).
   There the request carries the timeout itself (reqwest aborts a browser
   `fetch` through an `AbortController`); before, only native targets were
   bounded, so a stalled endpoint held the single-flight slot until the browser

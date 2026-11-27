@@ -168,13 +168,16 @@ where
     }
 }
 
-/// Internal dispatcher. `None` is the overwhelmingly common case and costs one
+/// Internal dispatcher, compiled only where a transport (`rest` or `amqp`)
+/// emits events. `None` is the overwhelmingly common case and costs one
 /// branch.
+#[cfg(any(feature = "rest", feature = "amqp"))]
 #[derive(Clone, Default)]
 pub(crate) struct Telemetry {
     sink: Option<std::sync::Arc<dyn TelemetrySink>>,
 }
 
+#[cfg(any(feature = "rest", feature = "amqp"))]
 impl std::fmt::Debug for Telemetry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Telemetry")
@@ -183,6 +186,7 @@ impl std::fmt::Debug for Telemetry {
     }
 }
 
+#[cfg(any(feature = "rest", feature = "amqp"))]
 impl Telemetry {
     pub(crate) fn new(sink: Option<std::sync::Arc<dyn TelemetrySink>>) -> Self {
         Self { sink }
