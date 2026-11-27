@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and never a signature, a nonce or a member of the body (CONTRACT 1.69 §8,
   server #883). A broker `Nack` of the request fails `check` at once (`connect`
   enables publisher confirms; `new` needs a confirm-enabled channel for it).
+  The publish is not mandatory, so a request nothing can route to (no
+  `axiam.authz.request` queue) is acked and still times out.
   RUS-R1-8 error kinds: kept as `Network`; CONTRACT §2 allows exactly three
   error types and this SDK has no configuration variant. The requester
   requires an AXIAM server of 1.68 or later.
@@ -70,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A cold or expired JWKS cache with a failing endpoint is fetched at most once
+  per 10 s window instead of once per verification; the lookup fails with a
+  network error meanwhile (no stale-if-error).
 - A failed forced JWKS re-fetch for an unknown `kid` now opens the cooldown
   window too, so a failing JWKS endpoint is fetched at most once per window
   instead of once per unknown-`kid` token (CONTRACT §12.4 rule 2).

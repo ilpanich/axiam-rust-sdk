@@ -48,6 +48,13 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 #[cfg(any(feature = "rest", feature = "actix"))]
 pub(crate) const FAILED_FETCH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
+/// After a failed fetch, how long ANY verifier makes no other: a cold or
+/// expired cache and a failing JWKS endpoint must not turn every verification
+/// into a fetch. Short, so a recovered endpoint is picked up promptly; there
+/// is no stale-if-error.
+#[cfg(any(feature = "rest", feature = "actix"))]
+pub(crate) const FAILED_FETCH_SHORT_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Minimum interval between forced refetches triggered by an unknown `kid`,
 /// to avoid a hostile/rotating token stream hammering the JWKS endpoint.
 #[cfg(any(feature = "rest", feature = "actix"))]
@@ -529,7 +536,7 @@ pub struct JwksVerifier {
     /// Set for the SSF receiver only; the §10 guard and §12 ID-token paths
     /// retry a failed fetch on their next call, as they always have.
     limit_failed_fetches: bool,
-    /// When the last fetch failed, while [`Self::limit_failed_fetches`] holds.
+    /// When the last fetch failed (`None` after a success).
     last_failed_fetch: std::sync::Mutex<Option<Instant>>,
     /// §10.1 rule 4: the tenant every verified token MUST be scoped to.
     /// `None` means "not configured", which makes [`Self::verify`] fail
@@ -750,18 +757,23 @@ impl JwksVerifier {
 
     /// The refusal a lookup gets inside the minute after a failed fetch, when
     /// failed fetches are limited.
+    ///
+    /// Every verifier gets the short [`FAILED_FETCH_SHORT_INTERVAL`] window, so
+    /// a failing endpoint is not fetched once per verification; the §34.2 P6
+    /// verifier keeps its minute.
     fn failed_fetch_cooldown(&self) -> Result<(), AxiamError> {
-        if !self.limit_failed_fetches {
-            return Ok(());
-        }
+        let window = if self.limit_failed_fetches {
+            FAILED_FETCH_MIN_INTERVAL
+        } else {
+            FAILED_FETCH_SHORT_INTERVAL
+        };
         let last = *self
             .last_failed_fetch
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         match last {
-            Some(at) if at.elapsed() < FAILED_FETCH_MIN_INTERVAL => Err(AxiamError::network(
-                "the JWKS fetch failed less than a minute ago; no fetch was made \
-                 (CONTRACT.md §34.2 P6)",
+            Some(at) if at.elapsed() < window => Err(AxiamError::network(
+                "the previous JWKS fetch failed moments ago; no fetch was made",
             )),
             _ => Ok(()),
         }
@@ -1372,12 +1384,10 @@ impl JwksVerifier {
 
     async fn fetch_and_cache(&self, is_forced: bool) -> Result<JwkSet, AxiamError> {
         let outcome = self.fetch_and_cache_once(is_forced).await;
-        if self.limit_failed_fetches {
-            *self
-                .last_failed_fetch
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(Instant::now);
-        }
+        *self
+            .last_failed_fetch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(Instant::now);
         outcome
     }
 
@@ -1752,17 +1762,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_the_limit_a_failed_fetch_is_retried_on_the_next_lookup() {
+    async fn without_the_limit_a_failing_endpoint_is_still_fetched_once_per_short_window() {
         use std::sync::atomic::Ordering;
         let (server, hits) = jwks_endpoint(vec![503, 200]).await;
         let url = url::Url::parse(&format!("{}/oauth2/jwks", server.uri())).unwrap();
         let verifier = JwksVerifier::for_jwks_url(reqwest::Client::new(), url);
-        assert!(verifier.key_for_kid("kid-1").await.is_err());
-        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        for _ in 0..50 {
+            let e = verifier.key_for_kid("kid-1").await.unwrap_err();
+            assert!(matches!(e, AxiamError::Network { .. }), "{e}");
+        }
         assert_eq!(
             hits.load(Ordering::SeqCst),
-            2,
-            "the §10 / §12 paths are unchanged"
+            1,
+            "a cold cache and a failing endpoint: one fetch per window"
         );
+
+        // After the window, a healthy endpoint is fetched and succeeds.
+        backdate(&verifier, "last_failed_fetch", FAILED_FETCH_SHORT_INTERVAL);
+        assert!(verifier.key_for_kid("kid-1").await.unwrap().is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 }

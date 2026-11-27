@@ -170,6 +170,8 @@ impl ReplyPublisher for LapinPublisher {
 
 /// A broker `Nack` means the request was not accepted: fail the check at once
 /// rather than let it wait out the timeout for an answer that cannot come.
+/// The publish is not `mandatory`, so a request nothing can route to (no
+/// `axiam.authz.request` queue) is acked and still times out.
 fn check_confirmation(confirmation: Confirmation) -> Result<(), AxiamError> {
     match confirmation {
         Confirmation::Nack(_) => Err(AxiamError::network(
@@ -290,7 +292,9 @@ impl AuthzRequester {
     /// A broker nack of a request fails [`check`](Self::check) at once only on
     /// a channel with publisher confirms enabled (`confirm_select`), which
     /// [`connect`](Self::connect) does; on any other channel a nacked request
-    /// simply times out.
+    /// simply times out. The publish is not `mandatory`, so a request nothing
+    /// can route to (no `axiam.authz.request` queue) is acked and still times
+    /// out.
     pub async fn new(
         channel: &Channel,
         tenant_id: Uuid,
