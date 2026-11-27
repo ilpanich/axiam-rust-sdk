@@ -616,10 +616,9 @@ impl Inner {
             return Err(Discard::Unsigned);
         }
 
-        // Rule 1 for the member every response carries.
-        if !matches!(members.get("allowed"), Some(Value::Bool(_))) {
-            return Err(Discard::Malformed);
-        }
+        // Rule 3 of the discard order: the members every response carries are
+        // present and well typed, whatever the signature says.
+        response_fields(&members).ok_or(Discard::Malformed)?;
 
         // The canonical bytes: body with the final
         // `,"hmac_signature":"<64 hex>"` taken out of the closing brace. A
@@ -644,29 +643,37 @@ impl Inner {
         {
             return Err(Discard::Malformed);
         }
-        let Some(Value::Bool(allowed)) = verified.get("allowed") else {
-            return Err(Discard::Malformed);
-        };
-        let text = |name: &str| match verified.get(name) {
-            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            _ => None,
-        };
-        let (Some(tenant_id), Some(nonce), Some(correlation_id)) =
-            (text("tenant_id"), text("nonce"), text("correlation_id"))
-        else {
-            return Err(Discard::Malformed);
-        };
+        let (allowed, tenant_id, nonce, correlation_id) =
+            response_fields(&verified).ok_or(Discard::Malformed)?;
 
         // Rule 3, tenant half: the requester's own tenant only.
         if tenant_id != self.tenant {
             return Err(Discard::Tenant);
         }
         Ok(Verified {
-            decision: decision_from(&verified, *allowed),
+            decision: decision_from(&verified, allowed),
             correlation_id,
             nonce,
         })
     }
+}
+
+/// `allowed` and the non-empty `tenant_id`, `nonce` and `correlation_id` of a
+/// response, or `None` when one is missing or not of its type.
+fn response_fields(members: &Map<String, Value>) -> Option<(bool, String, String, String)> {
+    let text = |name: &str| match members.get(name) {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let Some(Value::Bool(allowed)) = members.get("allowed") else {
+        return None;
+    };
+    Some((
+        *allowed,
+        text("tenant_id")?,
+        text("nonce")?,
+        text("correlation_id")?,
+    ))
 }
 
 fn decision_from(members: &Map<String, Value>, allowed: bool) -> AuthzDecision {
@@ -684,7 +691,7 @@ fn decision_from(members: &Map<String, Value>, allowed: bool) -> AuthzDecision {
 /// Remove the final `,"hmac_signature":"<64 hex>"` member from `body`,
 /// returning the canonical bytes (everything before it, closed with `}`) and
 /// the signature hex. `None` when `body` does not end in exactly that member.
-fn cut_trailing_signature(body: &[u8]) -> Option<(Vec<u8>, &str)> {
+pub(crate) fn cut_trailing_signature(body: &[u8]) -> Option<(Vec<u8>, &str)> {
     const TAIL: &[u8] = b"\"}";
     let suffix_len = SIG_MEMBER.len() + SIG_HEX_LEN + TAIL.len();
     if body.len() <= suffix_len || !body.ends_with(TAIL) {
@@ -1357,6 +1364,41 @@ mod tests {
             flip_sig(v1, &"z".repeat(64)),
             "malformed",
             &[VEC_NONCE],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ill_typed_or_missing_members_are_malformed_before_the_hmac_is_tried() {
+        // Reason order (§8 consumer obligation 4): rule 3, members, comes
+        // before rule 4, the signature. A body with both faults is `malformed`.
+        let v1 = &VECTORS[0];
+        let wrong_sig = "0".repeat(64);
+        let signed_wrongly = |canonical: String| {
+            format!(
+                "{},\"hmac_signature\":\"{wrong_sig}\"}}",
+                &canonical[..canonical.len() - 1]
+            )
+            .into_bytes()
+        };
+        let no_nonce = v1
+            .canonical
+            .replacen(&format!(r#","nonce":"{VEC_NONCE}""#), "", 1);
+        let allowed_text = v1
+            .canonical
+            .replacen(r#""allowed":true"#, r#""allowed":"true""#, 1);
+        assert_discard_event(
+            "nonce missing, signature wrong",
+            signed_wrongly(no_nonce),
+            "malformed",
+            &[VEC_CORRELATION],
+        )
+        .await;
+        assert_discard_event(
+            "allowed ill-typed, signature wrong",
+            signed_wrongly(allowed_text),
+            "malformed",
+            &[VEC_CORRELATION],
         )
         .await;
     }

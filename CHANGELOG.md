@@ -78,12 +78,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed forced JWKS re-fetch for an unknown `kid` now opens the cooldown
   window too, so a failing JWKS endpoint is fetched at most once per window
   instead of once per unknown-`kid` token (CONTRACT §12.4 rule 2).
-- The AMQP event consumer (`amqp::consume`) parses the delivery strictly: a
-  duplicate key at any depth, or keys that differ only by case, is nacked
-  instead of resolving to the last value, so what is verified and handed to
-  the handler is the only reading of the bytes received (server #882).
-  Genuine messages containing `<`, `>`, `&`, non-ASCII or control characters
-  already verified; a test pins it.
+- The AMQP event consumer (`amqp::consume`) verifies the bytes that arrived
+  (CONTRACT 1.69 §8 step 2, server #882): it parses the delivery strictly (a
+  duplicate key at any depth, or keys that differ only by case, is refused),
+  cuts the trailing `,"hmac_signature":"<64 hex>"}` from the received bytes
+  (a missing, `null`, non-string, non-last or trailing-whitespace signature is
+  refused, never repaired), checks that the remaining members are those of an
+  `AuthzRequest` or `AuditEventMessage` in declaration order (a signed
+  `AuthzResponse` or any other message is refused), verifies the HMAC over
+  those bytes and hands the handler the value decoded from them. Nothing is
+  re-serialized. Genuine messages containing `<`, `>`, `&`, non-ASCII or
+  control characters verify; a test pins it, and the vendored reference
+  vectors' `wire_json` is fed through the consumer.
+- `AuditEventMessage` writes `metadata` object keys sorted at every depth, as
+  the server's wire form does (CONTRACT 1.69 §8 rule 3); before, they came out
+  in the order the caller built the `Value`.
+- `AuthzRequester` discards a response whose `allowed`, `tenant_id`, `nonce` or
+  `correlation_id` is missing or ill-typed as `malformed` before the HMAC is
+  tried, so a body with both faults is reported as `malformed`, not
+  `signature` (the normative reason order of §8 consumer obligation 4).
 - `verify_logout_token` already selected the key by `kid` and refused a
   kid-less token; tests now pin it with a server-shaped token against a
   two-key JWKS, and pin that §10.1 rules 10 and 11 stay off the logout and

@@ -694,8 +694,10 @@ consume_with_tls("amqps://broker.internal:5671", "axiam.authz.request", signing_
 ```
 
 See [`examples/amqp_consumer.rs`](examples/amqp_consumer.rs). Every delivery's HMAC-SHA256
-signature (CONTRACT.md §8) is verified before the handler runs; failures are nacked without
-requeue.
+signature (CONTRACT.md §8) is verified over the received bytes before the handler runs (nothing is
+re-serialized): the body must end in `,"hmac_signature":"<64 hex>"}` and carry exactly the members
+of an `AuthzRequest` or `AuditEventMessage`, in order. There is no unsigned or lenient mode; every
+failure is nacked without requeue and logged, and the handler never runs.
 
 #### Authorization requests over AMQP (`AuthzRequester`, CONTRACT.md §8)
 

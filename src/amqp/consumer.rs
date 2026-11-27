@@ -3,8 +3,8 @@
 //! The SDK owns the full ack/nack loop. Every delivery is HMAC-verified
 //! (CONTRACT.md §8) BEFORE the user-supplied handler closure is ever
 //! invoked. On any verification failure (signature mismatch, missing
-//! signature in the default strict mode, or a body that fails to parse as
-//! JSON) the delivery is nacked WITHOUT requeue and a security event is
+//! signature, a body that is not exactly a signed event, or a body that fails
+//! to parse as JSON) the delivery is nacked WITHOUT requeue and a security event is
 //! emitted — the event never contains the received or expected HMAC value.
 //! Only a verified delivery reaches the handler, and only then is it acked.
 //!
@@ -16,11 +16,12 @@
 //! ## NEW-4: v2 replay protection (CONTRACT.md §8 "v2 — Replay Protection")
 //!
 //! As of `key_version = 2` the signed body also carries `nonce` and
-//! `issued_at`. Because verification re-serializes the parsed
-//! `serde_json::Value` (minus `hmac_signature`) in the order the keys
-//! arrived on the wire (SDK-Q01/`preserve_order`), these two fields are
-//! automatically covered by the HMAC with no canonicalization change. Once a
-//! signature verifies, `verify_and_dispatch` applies three additional
+//! `issued_at`, covered by the HMAC. Verification never re-serializes the
+//! delivery (CONTRACT.md §8 step 2): it cuts the trailing
+//! `,"hmac_signature":"<64 hex>"` member from the received bytes, checks that
+//! the members left are those of a signed event type in declaration order, and
+//! verifies the HMAC over exactly those bytes. Once a signature verifies,
+//! `verify_and_dispatch` applies three additional
 //! gates — the SAME nack-without-requeue path as an invalid signature —
 //! before the handler is ever invoked:
 //!   - `key_version` must be `>= 2` (the hard cutover; a v1 message is
@@ -41,6 +42,7 @@ use lapin::Channel;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
 
+use crate::amqp::authz_requester::{cut_trailing_signature, parse_strict_object};
 use crate::amqp::hmac::verify_payload;
 use crate::amqp::transport::{AmqpTlsConfig, connect_amqps};
 use crate::error::AxiamError;
@@ -222,6 +224,74 @@ impl AckableDelivery for lapin::message::Delivery {
     }
 }
 
+/// The members each signed event type declares, in order, with whether the
+/// member is required (CONTRACT.md §8 "Exact signed field order"). `hmac_signature`
+/// is not among them: it is cut off before the layout is read.
+const AUTHZ_REQUEST_LAYOUT: [(&str, bool); 9] = [
+    ("correlation_id", true),
+    ("tenant_id", true),
+    ("subject_id", true),
+    ("action", true),
+    ("resource_id", true),
+    ("scope", false),
+    ("key_version", true),
+    ("nonce", true),
+    ("issued_at", true),
+];
+const AUDIT_EVENT_LAYOUT: [(&str, bool); 11] = [
+    ("tenant_id", true),
+    ("actor_id", true),
+    ("actor_type", true),
+    ("action", true),
+    ("resource_id", false),
+    ("outcome", true),
+    ("ip_address", false),
+    ("metadata", false),
+    ("key_version", true),
+    ("nonce", true),
+    ("issued_at", true),
+];
+
+/// Whether `names` are exactly the members of `layout`, in declaration order,
+/// optional members possibly absent and nothing else (step 2c).
+fn matches_layout<'a>(mut names: impl Iterator<Item = &'a str>, layout: &[(&str, bool)]) -> bool {
+    let mut next = names.next();
+    for (name, required) in layout {
+        if next == Some(name) {
+            next = names.next();
+        } else if *required {
+            return false;
+        }
+    }
+    next.is_none()
+}
+
+/// §8 protocol step 2: turn a delivered body into the verified message, or say
+/// why it is refused. The signature is cut from the received bytes (nothing is
+/// re-serialized), the layout of what is left is checked, the HMAC is verified
+/// over exactly those bytes, and the returned value is decoded from them.
+fn verified_body(data: &[u8], signing_key: &[u8]) -> Result<serde_json::Value, &'static str> {
+    // 2a: exactly one object, unambiguous names (trailing whitespace is caught by 2b).
+    parse_strict_object(data).map_err(|_| "body is not one unambiguous JSON object")?;
+    // 2b: the body must end in the signature member; refused, never repaired.
+    let (canonical, signature) =
+        cut_trailing_signature(data).ok_or("body does not end in the hmac_signature member")?;
+    // 2c: the canonical bytes are one of the signed event types, member for member.
+    let members =
+        parse_strict_object(&canonical).map_err(|_| "canonical bytes are not an object")?;
+    let names = || members.keys().map(String::as_str);
+    if !matches_layout(names(), &AUTHZ_REQUEST_LAYOUT)
+        && !matches_layout(names(), &AUDIT_EVENT_LAYOUT)
+    {
+        return Err("members are not those of a signed event type, in order");
+    }
+    // 2d-2e: constant-time HMAC over the canonical bytes; 2f: decode from them.
+    if !verify_payload(signing_key, &canonical, signature) {
+        return Err("HMAC verification failed");
+    }
+    Ok(serde_json::Value::Object(members))
+}
+
 /// Verify a single delivery's HMAC signature (CONTRACT.md §8 steps a-g),
 /// then apply the NEW-4 v2 replay-protection gates (`key_version`,
 /// freshness, nonce dedup via `replay`) and, only if everything passes,
@@ -243,86 +313,21 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
     F: Fn(serde_json::Value) -> Fut + Send + Sync,
     Fut: Future<Output = ()> + Send,
 {
-    // Step: parse the body as JSON. A body that fails to deserialize is
-    // nacked without requeue and never reaches the handler.
-    //
-    // The parse is the requester's strict one: a duplicate key at any depth
-    // (or keys differing only by case) is refused rather than resolved to the
-    // last value, so the value verified below and handed to the handler is the
-    // only reading of the bytes that arrived (#882, C2).
-    let mut body = match crate::amqp::authz_requester::parse_strict_object(delivery.data()) {
-        Ok(members) => serde_json::Value::Object(members),
-        Err(_) => {
+    // §8 step 2: verify over the bytes that arrived, never over a re-serialization.
+    let body = match verified_body(delivery.data(), signing_key) {
+        Ok(body) => body,
+        Err(reason) => {
+            // The event carries a fixed reason only: never the body, the
+            // received signature or the expected one.
             tracing::warn!(
                 target: "axiam_sdk::security",
-                "AMQP message body failed JSON parse; nacking without requeue"
+                reason,
+                "AMQP message refused; nacking without requeue"
             );
             delivery.nack(false).await;
             return;
         }
     };
-
-    // Extract hmac_signature, then remove it from the body object before
-    // re-serializing — matches the server's "field set to None before
-    // signing" contract (CONTRACT.md §8.2b).
-    //
-    // Canonicalization contract (SDK-Q01): the server computes the HMAC over
-    // `serde_json::to_vec` of the concrete message struct with
-    // `hmac_signature` omitted, in FIELD-DECLARATION order (e.g. AuthzRequest:
-    // correlation_id, tenant_id, subject_id, action, resource_id, scope,
-    // key_version). To reproduce those exact bytes here we rely on two things:
-    //   1. `serde_json`'s `preserve_order` feature (enabled in Cargo.toml), so
-    //      this `Value`'s object map keeps the order the keys arrived in on the
-    //      wire — which IS the server's declaration order, since the server
-    //      serialized the struct in that order.
-    //   2. `shift_remove` (not `remove`, which is `swap_remove` under
-    //      `preserve_order` and would move the last field into the removed
-    //      slot). `shift_remove` deletes `hmac_signature` while preserving the
-    //      relative order of every remaining field, regardless of where
-    //      `hmac_signature` sat — so the re-serialized bytes are byte-identical
-    //      to what the server signed.
-    // This is exact only when the incoming JSON is what the server emitted
-    // (compact, declaration order); a re-encoded/pretty-printed body would not
-    // match and would (correctly) be rejected as unverifiable.
-    let sig = body
-        .get("hmac_signature")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
-    if let Some(obj) = body.as_object_mut() {
-        obj.shift_remove("hmac_signature");
-    }
-    let canonical = match serde_json::to_vec(&body) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            tracing::warn!(
-                target: "axiam_sdk::security",
-                "AMQP message body failed to re-serialize for verification; nacking without requeue"
-            );
-            delivery.nack(false).await;
-            return;
-        }
-    };
-
-    // Strict mode (default, CONTRACT.md §8.3): a missing signature is
-    // treated as a verification failure, not a pass-through.
-    let verified = match sig {
-        Some(ref s) => verify_payload(signing_key, &canonical, s),
-        None => false,
-    };
-
-    if !verified {
-        // Security event: timestamp (via tracing's own event timestamp),
-        // exchange/routing-key/tenant context would be added by the
-        // connection-level wrapper that has access to `Delivery::exchange`/
-        // `routing_key`; this function logs the fact of the failure only.
-        // The HMAC values (received or expected) are NEVER included.
-        tracing::warn!(
-            target: "axiam_sdk::security",
-            "AMQP HMAC verification failed; nacking without requeue"
-        );
-        delivery.nack(false).await;
-        return;
-    }
 
     // NEW-4 (CONTRACT.md §8 "v2 — Replay Protection"): a verified signature
     // is necessary but not sufficient. `nonce`/`issued_at` are already
@@ -547,13 +552,7 @@ mod tests {
     /// so a sensible, always-fresh default keeps them independent of wall-
     /// clock timing.
     fn v2_body(key_version: u8, nonce: &str, issued_at: DateTime<Utc>) -> serde_json::Value {
-        serde_json::json!({
-            "correlation_id": "00000000-0000-0000-0000-000000000000",
-            "action": "read",
-            "key_version": key_version,
-            "nonce": nonce,
-            "issued_at": issued_at.to_rfc3339(),
-        })
+        serde_json::from_str(&authz_canonical(key_version, nonce, issued_at)).unwrap()
     }
 
     fn make_signed_body_with(
@@ -562,14 +561,10 @@ mod tests {
         issued_at: DateTime<Utc>,
     ) -> (serde_json::Value, Vec<u8>) {
         let key = b"consumer-test-signing-key";
-        let mut body = v2_body(key_version, nonce, issued_at);
-        let canonical = serde_json::to_vec(&body).unwrap();
-        let sig = sign_payload(key, &canonical);
-        body.as_object_mut()
-            .unwrap()
-            .insert("hmac_signature".into(), serde_json::Value::String(sig));
-        let data = serde_json::to_vec(&body).unwrap();
-        (body, data)
+        let canonical = authz_canonical(key_version, nonce, issued_at);
+        let sig = sign_payload(key, canonical.as_bytes());
+        let data = wire_bytes_with_signature(&canonical, &sig);
+        (serde_json::from_slice(&data).unwrap(), data)
     }
 
     fn make_signed_body() -> (serde_json::Value, Vec<u8>) {
@@ -837,37 +832,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hmac_signature_not_last_field_still_verifies() {
-        // Robustness of `shift_remove`: even if `hmac_signature` is not the
-        // final key, removing it must preserve the order of the remaining
-        // fields so the canonical bytes are reproduced. Here we place
-        // `hmac_signature` FIRST in the delivered object.
+    async fn hmac_signature_not_last_member_is_refused() {
+        // §8 step 2b: a signature that is not the last member is refused, never
+        // repaired by moving it, even though the HMAC over the rest is valid.
         let key = b"declaration-order-signing-key";
         let canonical = authz_canonical(2, "99999999-9999-9999-9999-999999999999", Utc::now());
         let sig = sign_payload(key, canonical.as_bytes());
-        let canonical_inner = &canonical[1..]; // drop leading '{'
-        let data = format!("{{\"hmac_signature\":\"{sig}\",{canonical_inner}").into_bytes();
-        let delivery = RecordingDelivery::new(data);
-        let replay = ReplayGuard::with_default_skew();
-
-        let handler_calls = Arc::new(AtomicUsize::new(0));
-        let handler_calls_clone = Arc::clone(&handler_calls);
-        let handler = move |_value: serde_json::Value| {
-            let calls = Arc::clone(&handler_calls_clone);
-            async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-            }
-        };
-
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
-
-        assert_eq!(
-            handler_calls.load(Ordering::SeqCst),
-            1,
-            "shift_remove must preserve field order regardless of where \
-             hmac_signature sits, so the message still verifies"
-        );
-        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+        let data = format!("{{\"hmac_signature\":\"{sig}\",{}", &canonical[1..]).into_bytes();
+        let (calls, delivery) = dispatch(key, data).await;
+        assert!(calls.is_empty(), "the handler must not run");
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 0);
     }
 
     // --- #882 pins: verify over what arrived, dispatch what was verified -----
@@ -906,20 +881,28 @@ mod tests {
 
     #[tokio::test]
     async fn genuine_message_with_floats_big_integers_and_integer_like_keys_verifies() {
-        // A float `1.0`, an integer above 2^53 and keys that sort differently
-        // as numbers and as strings: a verifier that re-encoded numbers or
-        // re-ordered keys would reject this genuine message.
+        // An audit event whose `metadata` holds a float `1.0`, an integer above
+        // 2^53 and keys that sort differently as numbers and as strings: a
+        // verifier that re-encoded numbers or re-ordered keys would reject it.
         let key = b"declaration-order-signing-key";
-        let canonical = authz_canonical(2, "14141414-1414-1414-1414-141414141414", Utc::now())
-            .replacen(
-                '{',
-                "{\"10\":1,\"9\":2,\"ratio\":1.0,\"big\":9007199254740993,",
-                1,
-            );
+        let canonical = format!(
+            concat!(
+                "{{\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
+                "\"actor_id\":\"33333333-3333-3333-3333-333333333333\",",
+                "\"actor_type\":\"User\",\"action\":\"user.login\",\"outcome\":\"Success\",",
+                "\"metadata\":{{\"10\":1,\"9\":2,\"ratio\":1.0,\"big\":9007199254740993}},",
+                "\"key_version\":2,\"nonce\":\"14141414-1414-1414-1414-141414141414\",",
+                "\"issued_at\":\"{}\"}}"
+            ),
+            Utc::now().to_rfc3339()
+        );
         let sig = sign_payload(key, canonical.as_bytes());
         let (calls, delivery) = dispatch(key, wire_bytes_with_signature(&canonical, &sig)).await;
         assert_eq!(calls.len(), 1, "a genuine message must verify");
-        assert_eq!(calls[0]["big"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(
+            calls[0]["metadata"]["big"].as_u64(),
+            Some(9_007_199_254_740_993)
+        );
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
     }
 
@@ -983,6 +966,168 @@ mod tests {
         // The undamaged message still verifies.
         let (calls, _) = dispatch(key, genuine).await;
         assert_eq!(calls.len(), 1);
+    }
+
+    // --- contract 1.69 §8 steps 2a-2g: received-bytes verification ----------
+
+    /// The server-produced vectors: the subkey and the parsed fixture.
+    fn vectors() -> (Vec<u8>, serde_json::Value) {
+        let fixture: serde_json::Value = serde_json::from_str(REFERENCE_VECTORS_JSON).unwrap();
+        let subkey = hex::decode(fixture["hkdf"]["derived_subkey_hex"].as_str().unwrap()).unwrap();
+        (subkey, fixture)
+    }
+
+    /// `dispatch` with a skew wide enough for the fixture's fixed `issued_at`.
+    async fn dispatch_fixture(
+        key: &[u8],
+        data: Vec<u8>,
+    ) -> (Vec<serde_json::Value>, RecordingDelivery) {
+        let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::new(chrono::Duration::days(3650));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let handler = move |value: serde_json::Value| {
+            let sink = Arc::clone(&sink);
+            async move { sink.lock().unwrap().push(value) }
+        };
+        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        let calls = seen.lock().unwrap().clone();
+        (calls, delivery)
+    }
+
+    #[tokio::test]
+    async fn fixture_wire_json_is_cut_verified_laid_out_and_dispatched() {
+        let (subkey, fixture) = vectors();
+        for message_type in ["authz_request", "audit_event"] {
+            let vector = &fixture[message_type];
+            let wire = vector["wire_json"].as_str().unwrap();
+            let canonical = vector["canonical_signed_json"].as_str().unwrap();
+            let sig = vector["hmac_signature_hex"].as_str().unwrap();
+            let (cut, cut_sig) =
+                crate::amqp::authz_requester::cut_trailing_signature(wire.as_bytes())
+                    .unwrap_or_else(|| panic!("{message_type}: wire_json must cut"));
+            assert_eq!(cut, canonical.as_bytes(), "{message_type}");
+            assert_eq!(cut_sig, sig, "{message_type}");
+
+            let (calls, delivery) = dispatch_fixture(&subkey, wire.as_bytes().to_vec()).await;
+            assert_eq!(calls.len(), 1, "{message_type}: dispatched");
+            // The handler gets the value decoded from the verified canonical bytes.
+            assert_eq!(
+                calls[0],
+                serde_json::from_str::<serde_json::Value>(canonical).unwrap(),
+                "{message_type}"
+            );
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 1, "{message_type}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fixtures_sorted_message_member_is_not_wire_bytes_and_is_refused() {
+        let (subkey, fixture) = vectors();
+        for message_type in ["authz_request", "audit_event"] {
+            let data = serde_json::to_vec(&fixture[message_type]["message"]).unwrap();
+            let (calls, delivery) = dispatch_fixture(&subkey, data).await;
+            assert!(calls.is_empty(), "{message_type}");
+            assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// Every body below is refused: nacked without requeue, handler never runs.
+    async fn assert_all_refused(key: &[u8], cases: Vec<(&str, Vec<u8>)>) {
+        for (name, data) in cases {
+            let (calls, delivery) = dispatch(key, data).await;
+            assert!(calls.is_empty(), "{name}: the handler must not run");
+            assert_eq!(
+                delivery.nacked_requeue_false.load(Ordering::SeqCst),
+                1,
+                "{name}: nacked without requeue"
+            );
+            assert_eq!(
+                delivery.nacked_requeue_true.load(Ordering::SeqCst),
+                0,
+                "{name}"
+            );
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 0, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_or_malformed_envelopes_are_refused() {
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "15151515-1515-1515-1515-151515151515", Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        let genuine = wire_bytes_with_signature(&canonical, &sig);
+        let signed = |c: &str| wire_bytes_with_signature(c, &sign_payload(key, c.as_bytes()));
+
+        let mut trailing_ws = genuine.clone();
+        trailing_ws.push(b'\n');
+        let null_sig = format!(
+            "{{{},\"hmac_signature\":null}}",
+            &canonical[1..canonical.len() - 1]
+        );
+        let nested_dup = canonical.replacen(
+            "\"action\":\"read\"",
+            "\"action\":\"read\",\"x\":{\"y\":1,\"y\":2}",
+            1,
+        );
+        // Two top-level names that fold together.
+        let folded = canonical.replacen("\"action\"", "\"ACTION\":\"w\",\"action\"", 1);
+
+        assert_all_refused(
+            key,
+            vec![
+                ("trailing whitespace", trailing_ws),
+                ("hmac_signature null", null_sig.into_bytes()),
+                ("nested duplicate member", signed(&nested_dup)),
+                ("names that fold together", signed(&folded)),
+                ("a bare, unsigned body", canonical.clone().into_bytes()),
+            ],
+        )
+        .await;
+        assert_eq!(dispatch(key, genuine).await.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn layout_violations_are_refused_even_when_validly_signed() {
+        let key = b"declaration-order-signing-key";
+        let now = Utc::now();
+        let canonical = authz_canonical(2, "16161616-1616-1616-1616-161616161616", now);
+        let signed = |c: &str| wire_bytes_with_signature(c, &sign_payload(key, c.as_bytes()));
+
+        // Declared members, wrong order.
+        let reordered = canonical.replacen(
+            "\"correlation_id\":\"11111111-1111-1111-1111-111111111111\",\"tenant_id\":\"22222222-2222-2222-2222-222222222222\"",
+            "\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",\"correlation_id\":\"11111111-1111-1111-1111-111111111111\"",
+            1,
+        );
+        assert_ne!(reordered, canonical);
+        // A member the type does not declare.
+        let extra = canonical.replacen("\"action\"", "\"extra\":1,\"action\"", 1);
+        // A required member missing.
+        let missing = canonical.replacen(
+            "\"subject_id\":\"33333333-3333-3333-3333-333333333333\",",
+            "",
+            1,
+        );
+        // Another signed message type: an AuthzResponse, and a cache-invalidation shape
+        // that does carry valid v2 replay fields.
+        let response = r#"{"correlation_id":"22222222-2222-2222-2222-222222222222","allowed":true,"reason_code":"allowed","tenant_id":"11111111-1111-1111-1111-111111111111","nonce":"55555555-5555-5555-5555-555555555555"}"#;
+        let invalidation = format!(
+            "{{\"event\":\"cache.invalidate\",\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"key_version\":2,\"nonce\":\"17171717-1717-1717-1717-171717171717\",\"issued_at\":\"{}\"}}",
+            now.to_rfc3339()
+        );
+
+        assert_all_refused(
+            key,
+            vec![
+                ("reordered members", signed(&reordered)),
+                ("undeclared member", signed(&extra)),
+                ("required member missing", signed(&missing)),
+                ("signed AuthzResponse", signed(response)),
+                ("cache-invalidation shape", signed(&invalidation)),
+            ],
+        )
+        .await;
     }
 
     // --- NEW-4: v2 replay-protection gate tests -----------------------------

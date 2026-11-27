@@ -43,6 +43,39 @@ fn is_reserved_audit_action(action: &str) -> bool {
     })
 }
 
+/// Write `metadata` as the server does: object keys sorted at every depth.
+///
+/// The server's `serde_json` keeps no insertion order, so its wire form has
+/// sorted keys (CONTRACT.md §8 rule 3); this crate's `serde_json` keeps the
+/// order a `Value` was built in, so the keys are sorted here.
+fn serialize_sorted_metadata<S: serde::Serializer>(
+    metadata: &Option<serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    fn sorted(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(members) => {
+                let mut entries: Vec<_> = members.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                serde_json::Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), sorted(v)))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sorted).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    match metadata {
+        Some(value) => sorted(value).serialize(serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// Authorization check request received from `axiam.authz.request`.
 ///
 /// Field declaration order matches the server's `AuthzRequest`
@@ -115,7 +148,11 @@ pub struct AuditEventMessage {
     pub ip_address: Option<String>,
     /// Arbitrary structured context attached to the event (e.g. changed
     /// fields, request parameters).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_sorted_metadata"
+    )]
     pub metadata: Option<serde_json::Value>,
     /// HKDF master-key rotation version (NEW-4). The consumer rejects any
     /// message with `key_version < 2` — v1 (pre-replay-protection) messages
@@ -213,6 +250,17 @@ mod tests {
             );
             assert!(m.hmac_signature.is_none(), "{action}: nothing signed");
         }
+    }
+
+    #[test]
+    fn metadata_keys_are_written_sorted_at_every_depth() {
+        let mut m = message("login");
+        m.metadata = Some(serde_json::json!({"b": 1, "a": {"z": [{"y": 1, "x": 2}], "c": null}}));
+        let wire = String::from_utf8(serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(
+            wire.contains(r#""metadata":{"a":{"c":null,"z":[{"x":2,"y":1}]},"b":1},"#),
+            "{wire}"
+        );
     }
 
     #[test]

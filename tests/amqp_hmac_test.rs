@@ -239,3 +239,56 @@ fn grep_gate_no_server_crate_import() {
         }
     }
 }
+
+/// CONTRACT.md §8 rule 3 / "Canonical reference vectors": for the vector inputs
+/// the producer side emits exactly the server's `wire_json`, byte for byte.
+#[test]
+fn producer_emits_the_vectors_wire_json_byte_for_byte() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../testdata/v2_reference_vectors.json")).unwrap();
+    let subkey = hex::decode(fixture["hkdf"]["derived_subkey_hex"].as_str().unwrap()).unwrap();
+
+    // AuthzRequest: sign the unsigned form, then carry the signature last.
+    let vector = &fixture["authz_request"];
+    let mut request: AuthzRequest = serde_json::from_value(vector["message"].clone()).unwrap();
+    request.hmac_signature = None;
+    let canonical = serde_json::to_vec(&request).unwrap();
+    assert_eq!(
+        canonical,
+        vector["canonical_signed_json"].as_str().unwrap().as_bytes()
+    );
+    request.hmac_signature = Some(sign_payload(&subkey, &canonical));
+    assert_eq!(
+        serde_json::to_string(&request).unwrap(),
+        vector["wire_json"].as_str().unwrap()
+    );
+
+    // AuditEventMessage: `sign` does the same.
+    let vector = &fixture["audit_event"];
+    let mut event: AuditEventMessage = serde_json::from_value(vector["message"].clone()).unwrap();
+    event.sign(&subkey).unwrap();
+    assert_eq!(
+        serde_json::to_string(&event).unwrap(),
+        vector["wire_json"].as_str().unwrap()
+    );
+}
+
+/// `metadata` keys come out sorted at every depth, as the server writes them,
+/// however the caller built the object.
+#[test]
+fn audit_event_metadata_keys_are_emitted_sorted() {
+    let mut event: AuditEventMessage = serde_json::from_value(
+        serde_json::from_str::<serde_json::Value>(include_str!(
+            "../testdata/v2_reference_vectors.json"
+        ))
+        .unwrap()["audit_event"]["message"]
+            .clone(),
+    )
+    .unwrap();
+    event.metadata = Some(serde_json::json!({"method": "password", "b": {"z": 1, "a": 2}, "a": 0}));
+    let wire = serde_json::to_string(&event).unwrap();
+    assert!(
+        wire.contains(r#""metadata":{"a":0,"b":{"a":2,"z":1},"method":"password"},"#),
+        "{wire}"
+    );
+}
