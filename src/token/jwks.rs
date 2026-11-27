@@ -1365,7 +1365,7 @@ impl JwksVerifier {
             if age.is_some_and(|a| a >= FAILED_FETCH_MIN_INTERVAL) && cooldown.is_ok() {
                 // A usable held set is returned at once; the refresh runs as
                 // the detached single-flight task and nobody waits for it.
-                let _ = self.start_fetch(false);
+                let _ = self.start_fetch_if(false, true);
             }
             return Ok(held);
         }
@@ -1432,12 +1432,37 @@ impl JwksVerifier {
     /// per verifier, bounded by `fetch_timeout`, its REAL outcome recorded by
     /// the task itself (failure anchor, forced window), never by a caller.
     fn start_fetch(&self, is_forced: bool) -> tokio::sync::watch::Receiver<Option<FetchOutcome>> {
+        self.start_fetch_if(is_forced, false)
+            .expect("an unconditional start always yields a receiver")
+    }
+
+    /// As [`Self::start_fetch`]; with `background`, a refresh nobody awaits, the
+    /// age and the failure window are re-checked under the slot's mutex and
+    /// `None` is returned when no refresh is due any more (another caller's
+    /// fetch finished between the caller's check and here).
+    fn start_fetch_if(
+        &self,
+        is_forced: bool,
+        background: bool,
+    ) -> Option<tokio::sync::watch::Receiver<Option<FetchOutcome>>> {
         let mut slot = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(rx) = slot.as_ref()
             && rx.borrow().is_none()
             && rx.has_changed().is_ok()
         {
-            return rx.clone();
+            return Some(rx.clone());
+        }
+        if background {
+            let age = self
+                .cache
+                .read()
+                .ok()
+                .and_then(|c| c.as_ref().map(|e| e.fetched_at.elapsed()));
+            if age.is_none_or(|a| a < FAILED_FETCH_MIN_INTERVAL)
+                || self.failed_fetch_cooldown().is_err()
+            {
+                return None;
+            }
         }
         let (tx, rx) = tokio::sync::watch::channel(None);
         let client = self.http_client.clone();
@@ -1445,14 +1470,8 @@ impl JwksVerifier {
         let cache = Arc::clone(&self.cache);
         let failed = Arc::clone(&self.last_failed_fetch);
         let timeout = self.fetch_timeout;
-        tokio::spawn(async move {
-            let outcome =
-                match tokio::time::timeout(timeout, fetch_once(&client, &url, &cache, is_forced))
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(_) => Err(AxiamError::network("JWKS fetch timed out")),
-                };
+        let task = async move {
+            let outcome = fetch_bounded(&client, &url, &cache, is_forced, timeout).await;
             *failed.lock().unwrap_or_else(|p| p.into_inner()) = outcome.is_err().then(Instant::now);
             if outcome.is_err()
                 && is_forced
@@ -1461,10 +1480,54 @@ impl JwksVerifier {
             {
                 entry.last_forced_refetch = Some(Instant::now());
             }
-            let _ = tx.send(Some(outcome.map_err(|e| e.to_string())));
-        });
+            let _ = tx.send(Some(outcome.map_err(flatten_error)));
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        tokio::spawn(task);
+        // A browser has no multi-threaded runtime and its futures are not
+        // `Send`: the page's event loop runs the fetch instead.
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(task);
         *slot = Some(rx.clone());
-        rx
+        Some(rx)
+    }
+}
+
+/// One fetch bounded by the SDK's own timeout.
+#[cfg(all(any(feature = "rest", feature = "actix"), not(target_arch = "wasm32")))]
+async fn fetch_bounded(
+    client: &reqwest::Client,
+    url: &url::Url,
+    cache: &RwLock<Option<CachedJwks>>,
+    is_forced: bool,
+    timeout: Duration,
+) -> Result<JwkSet, AxiamError> {
+    match tokio::time::timeout(timeout, fetch_once(client, url, cache, is_forced)).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(AxiamError::network("JWKS fetch timed out")),
+    }
+}
+
+/// On wasm32 there is no tokio timer; the browser's `fetch` applies its own
+/// bound, and the single-flight slot is released when the request settles.
+#[cfg(all(any(feature = "rest", feature = "actix"), target_arch = "wasm32"))]
+async fn fetch_bounded(
+    client: &reqwest::Client,
+    url: &url::Url,
+    cache: &RwLock<Option<CachedJwks>>,
+    is_forced: bool,
+    _timeout: Duration,
+) -> Result<JwkSet, AxiamError> {
+    fetch_once(client, url, cache, is_forced).await
+}
+
+/// The failure message without the error kind's display prefix (the waiter
+/// rebuilds a typed error around it).
+#[cfg(any(feature = "rest", feature = "actix"))]
+fn flatten_error(e: AxiamError) -> String {
+    match e {
+        AxiamError::Network { message, .. } | AxiamError::Auth { message, .. } => message,
+        other => other.to_string(),
     }
 }
 
@@ -1575,12 +1638,18 @@ async fn fetch_once(
             .collect(),
     };
     if let Ok(mut cache) = cache.write() {
+        // A non-forced refresh keeps the unknown-`kid` window it found open.
+        let last_forced_refetch = if is_forced {
+            Some(now)
+        } else {
+            cache.as_ref().and_then(|e| e.last_forced_refetch)
+        };
         *cache = Some(CachedJwks {
             jwks: jwks.clone(),
             fetched_at: now,
             ttl,
             etag,
-            last_forced_refetch: if is_forced { Some(now) } else { None },
+            last_forced_refetch,
         });
     }
 
@@ -2083,6 +2152,21 @@ mod tests {
             assert!(accepted(&v, "kid-1").await, "the held set keeps serving");
         }
         assert_eq!(jwks.fetches(), 3, "one failed attempt, then the window");
+    }
+
+    #[tokio::test]
+    async fn a_non_forced_refresh_keeps_the_open_forced_window() {
+        let jwks = Jwks::start().await;
+        let v = jwks.verifier();
+        assert!(accepted(&v, "kid-1").await);
+        assert!(!accepted(&v, "kid-9").await, "forced refetch, key absent");
+        assert_eq!(cooldown_state(&v), (false, true));
+        backdate(&v, "fetched_at", TTL + Duration::from_secs(1));
+        assert!(accepted(&v, "kid-1").await, "TTL refresh");
+        assert_eq!(jwks.fetches(), 3);
+        assert_eq!(cooldown_state(&v), (false, true), "window not reset");
+        assert!(!accepted(&v, "kid-8").await);
+        assert_eq!(jwks.fetches(), 3, "still inside the forced window");
     }
 
     #[tokio::test]

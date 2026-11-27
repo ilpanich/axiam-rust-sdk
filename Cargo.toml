@@ -411,6 +411,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "for
 # there and chose to abort rather than lie. `web-time` backs them with
 # `performance.now()`/`Date.now()`. See src/time.rs.
 web-time = "1"
+# Runs the detached JWKS fetch (src/token/jwks.rs) on the browser's event loop:
+# `tokio::spawn` needs `Send` futures and a runtime, a `fetch` response has
+# neither. Already in the wasm dependency graph through `reqwest` and
+# `axiam-sdk-wasm`; this only names it.
+wasm-bindgen-futures = "0.4"
 # `getrandom` reaches the platform CSPRNG through `crypto.getRandomValues` only
 # with this feature; without it a wasm build fails to link. Used by PKCE state
 # generation (§12.1) and SRP client ephemerals (§23).
