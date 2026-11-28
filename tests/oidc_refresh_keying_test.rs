@@ -32,7 +32,7 @@ struct Call {
 
 type Calls = Arc<Mutex<Vec<Call>>>;
 
-/// Mount `/oauth2/token`: replies `access-for-<refresh_token>`, delayed by
+/// Mount `/oauth2/token`: replies `access-for-<refresh_token>@<tenant_id>`, delayed by
 /// `delay`, and records the refresh token and `tenant_id` query of each call.
 async fn mount(server: &MockServer, delay: Duration) -> Calls {
     let calls: Calls = Arc::default();
@@ -50,13 +50,14 @@ async fn mount(server: &MockServer, delay: Duration) -> Calls {
                 .find(|(k, _)| k == "tenant_id")
                 .map(|(_, v)| v.into_owned())
                 .unwrap_or_default();
+            let tenant_id_for_token = tenant_id.clone();
             c.lock().unwrap().push(Call {
                 refresh_token: token.clone(),
                 tenant_id,
             });
             ResponseTemplate::new(200)
                 .set_body_json(token_response(json!({
-                    "access_token": format!("access-for-{token}"),
+                    "access_token": format!("access-for-{token}@{tenant_id_for_token}"),
                 })))
                 .set_delay(delay)
         })
@@ -94,6 +95,8 @@ fn access(r: &Result<OidcTokenSet, AxiamError>) -> String {
         .clone()
 }
 
+const DEFAULT_TENANT: &str = "11111111-2222-3333-4444-555555555555";
+
 /// A tenant UUID containing hex letters, so upper- and lower-case differ.
 const HEX_TENANT: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
@@ -125,15 +128,15 @@ async fn a_different_token_during_a_live_flight_gets_its_own_wire_call_and_token
             refresh(&client, &cfg, "token-b", None, None).await
         },
     );
-    assert_eq!(access(&a1), "access-for-token-a");
+    assert_eq!(access(&a1), format!("access-for-token-a@{DEFAULT_TENANT}"));
     assert_eq!(
         access(&a2),
-        "access-for-token-a",
+        format!("access-for-token-a@{DEFAULT_TENANT}"),
         "a second A caller shares A's one call"
     );
     assert_eq!(
         access(&b),
-        "access-for-token-b",
+        format!("access-for-token-b@{DEFAULT_TENANT}"),
         "B must get its own grant's tokens"
     );
     let seen = calls.lock().unwrap().clone();
@@ -174,7 +177,7 @@ async fn twenty_distinct_tokens_run_concurrently_and_all_complete() {
     .await
     .expect("20 distinct-token refreshes complete under the timeout");
     for (t, r) in &all {
-        assert_eq!(access(r), format!("access-for-{t}"));
+        assert_eq!(access(r), format!("access-for-{t}@{DEFAULT_TENANT}"));
     }
     assert_eq!(calls.lock().unwrap().len(), 20);
     assert!(
@@ -208,8 +211,14 @@ async fn a_different_keys_wire_call_starts_while_another_is_held_on_the_transpor
         "B's request reached the wire while A's was still held"
     );
     assert!(!a.is_finished());
-    assert_eq!(access(&a.await.unwrap()), "access-for-token-a");
-    assert_eq!(access(&b.await.unwrap()), "access-for-token-b");
+    assert_eq!(
+        access(&a.await.unwrap()),
+        format!("access-for-token-a@{DEFAULT_TENANT}")
+    );
+    assert_eq!(
+        access(&b.await.unwrap()),
+        format!("access-for-token-b@{DEFAULT_TENANT}")
+    );
 }
 
 #[tokio::test]
@@ -225,8 +234,8 @@ async fn same_token_different_scope_joins_the_one_flight() {
             refresh(&client, &cfg, "token-a", None, Some("openid profile")).await
         },
     );
-    assert_eq!(access(&x), "access-for-token-a");
-    assert_eq!(access(&y), "access-for-token-a");
+    assert_eq!(access(&x), format!("access-for-token-a@{DEFAULT_TENANT}"));
+    assert_eq!(access(&y), format!("access-for-token-a@{DEFAULT_TENANT}"));
     assert_eq!(calls.lock().unwrap().len(), 1);
 }
 
@@ -242,7 +251,8 @@ async fn same_token_different_tenant_are_separate_flights() {
         tokio::time::sleep(Duration::from_millis(60)).await;
         refresh(&client, &cfg, "token-a", Some(t2), None).await
     },);
-    assert!(x.is_ok() && y.is_ok());
+    assert_eq!(access(&x), format!("access-for-token-a@{t1}"));
+    assert_eq!(access(&y), format!("access-for-token-a@{t2}"));
     let seen = calls.lock().unwrap().clone();
     assert_eq!(seen.len(), 2);
     let tenants: Vec<_> = seen.iter().map(|c| c.tenant_id.clone()).collect();
@@ -270,9 +280,9 @@ async fn same_token_explicit_default_tenant_upper_case_or_omitted_is_one_flight(
             refresh(&client, &cfg, "token-a", Some(upper), None).await
         },
     );
-    assert_eq!(access(&x), "access-for-token-a");
-    assert_eq!(access(&y), "access-for-token-a");
-    assert_eq!(access(&z), "access-for-token-a");
+    assert_eq!(access(&x), format!("access-for-token-a@{HEX_TENANT}"));
+    assert_eq!(access(&y), format!("access-for-token-a@{HEX_TENANT}"));
+    assert_eq!(access(&z), format!("access-for-token-a@{HEX_TENANT}"));
     let seen = calls.lock().unwrap().clone();
     assert_eq!(
         seen.len(),
@@ -297,10 +307,26 @@ async fn an_unresolvable_tenant_fails_before_any_slot_or_wire_call() {
         .oidc_client_id("axiam-test-client")
         .build()
         .expect("client builds");
-    let cfg = cfg(&server.uri());
-    let err = refresh(&client, &cfg, "token-a", None, None)
+    // `configuration: None`, so a discovery fetch would be needed if the call
+    // got past tenant resolution.
+    let err = client
+        .oidc_refresh(OidcRefreshParams {
+            refresh_token: Sensitive::new("token-a".to_string()),
+            scope: None,
+            tenant_id: None,
+            configuration: None,
+        })
         .await
         .expect_err("no tenant");
     assert!(matches!(err, AxiamError::Auth { .. }));
-    assert!(calls.lock().unwrap().is_empty());
+    assert!(calls.lock().unwrap().is_empty(), "no token call");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        requests.is_empty(),
+        "no request at all (no /.well-known discovery fetch, no token call): {:?}",
+        requests
+            .iter()
+            .map(|r| r.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
 }

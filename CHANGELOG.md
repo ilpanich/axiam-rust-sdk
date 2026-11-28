@@ -144,6 +144,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per 10 s window instead of once per verification; the lookup fails with a
   network error meanwhile (no stale-if-error).
 - The JWKS fetch is bounded by the SDK's 10 s timeout on wasm32 too (#159).
+  There the request carries the timeout itself (reqwest aborts a browser
+  `fetch` through an `AbortController`); before, only native targets were
+  bounded, so a stalled endpoint held the single-flight slot until the browser
+  gave up. Native is unchanged: the outer tokio bound applies and a shorter
+  timeout set on the client still wins.
 - `--no-default-features --features rest` (and `grpc`, `observability`, or no
   feature at all) builds clean under `-D warnings` again: the OPAQUE-only
   `resolved_principal_tenant_id` getter is gated on `opaque`, and the internal
@@ -155,11 +160,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grant's token set without its own token ever being sent; it now makes its
   own wire call, concurrently. The tenant is resolved once before the guard and
   used for both the key and the request; `scope` is not part of the key (#161).
-  There the request carries the timeout itself (reqwest aborts a browser
-  `fetch` through an `AbortController`); before, only native targets were
-  bounded, so a stalled endpoint held the single-flight slot until the browser
-  gave up. Native is unchanged: the outer tokio bound applies and a shorter
-  timeout set on the client still wins.
 - A failed forced JWKS re-fetch for an unknown `kid` now opens the cooldown
   window too, so a failing JWKS endpoint is fetched at most once per window
   instead of once per unknown-`kid` token (CONTRACT §12.4 rule 2).

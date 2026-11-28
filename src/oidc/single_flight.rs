@@ -14,6 +14,15 @@
 //! fail `invalid_grant`. Sharing the leader's result is what makes the rule
 //! useful, not an optimization on top of it.
 //!
+//! # Per key, not per client
+//!
+//! There is one slot **per key** — a SHA-256 digest of the resolved tenant and
+//! the refresh token ([`oidc_refresh_key`]) — in a map. Everything below
+//! ("the slot", "empty", "occupied") means *that key's* slot: callers presenting
+//! the same token and tenant form one burst, a caller with a different key never
+//! joins it and runs its own wire call, and a key's entry is removed when it is
+//! vacated.
+//!
 //! # The invariant
 //!
 //! **The in-flight slot is a result-sharing channel, not a busy flag.**
@@ -255,10 +264,12 @@ type OidcRefreshSlot = Mutex<HashMap<OidcRefreshKey, Arc<OidcRefreshPublication>
 #[cfg(test)]
 type AfterPublishHook = Arc<dyn Fn(&OidcRefreshInflight) + Send + Sync>;
 
-/// The `oidc_refresh` in-flight slot held by
-/// `AxiamClientInner::oidc_refresh_inflight`. Empty means "no refresh in
-/// flight, and the previous one (if any) has already published its outcome";
-/// occupied means "this is the current burst's shared publication".
+/// The `oidc_refresh` in-flight registry held by
+/// `AxiamClientInner::oidc_refresh_inflight`: one slot **per key** (tenant +
+/// refresh token digest, see [`oidc_refresh_key`]). A key with no entry means
+/// "no refresh in flight for this token, and the previous one (if any) has
+/// already published its outcome"; an entry means "this is that key's current
+/// burst's shared publication". Different keys never share a slot.
 pub(crate) struct OidcRefreshInflight {
     /// Keyed slots; the lock guards only map operations and is never held
     /// across a wire call, so different keys' refreshes run concurrently.
