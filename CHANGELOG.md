@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-28
+
 ### Security
 
 - **N14 (CONTRACT §10.1 rules 10-12).** `JwksVerifier::verify` and
@@ -109,6 +111,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency: `jsonwebtoken` requirement raised from 11 to 12 (adapted to its fallible
   `EncodingKey::from_secret`).
 
+- re-vendor CONTRACT.md 1.69 (§9 rule 7: oidc_refresh single-flight per tenant and token)
+
+- Tighten the refresh-key tests and fix the changelog placement (#161)
+
+- re-vendor CONTRACT.md after the server merged ilpanich/axiam#893
+
+- Name a leaked secret in the failure message instead of printing it
+
+- re-vendor CONTRACT.md 1.69 (typed consume, BOM refusal, bounded JWKS stale-if-error; axiam#883)
+
+- re-vendor CONTRACT.md 1.69 wire-form clarification (axiam#883)
+
+- re-vendor CONTRACT.md, openapi.json and the management registry
+
+- Accept RUSTSEC-2026-0594 (cookie 0.16.2), unreachable
+
+- Read the HKDF salt and domain tag from the contract fixture
+
+- Bump taiki-e/install-action from 2.90.3 to 2.90.6
+
+- Bump github/codeql-action/upload-sarif
+
+- Update jsonwebtoken requirement from 11 to 12
+
+- Bump taiki-e/install-action from 2.90.2 to 2.90.3
+
 ### Changed (behaviour change; migration)
 
 - `AxiamUser` gained a public field `scopes`, and its `roles` is now
@@ -186,6 +214,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kid-less token; tests now pin it with a server-shaped token against a
   two-key JWKS, and pin that §10.1 rules 10 and 11 stay off the logout and
   ID-token paths (CONTRACT 1.69 §12.7.6, server #880).
+
+- Key the oidc_refresh single-flight per refresh token (#161)
+
+- Gate OPAQUE-only and transport-only code so rest-only builds are clippy-clean (#160)
+
+- Keep a shorter configured client timeout on native (#159)
+
+- Bound the JWKS fetch by the SDK timeout on wasm32 (#159)
+
+- OI-39 review round 2 (axiam#883)
+
+- OI-39 review round 1 (axiam#883)
+
+- OI-39 addendum points 8 and 10 (axiam#883)
+
+- Typed consume, discard event fields, BOM refusal, bounded JWKS stale-if-error (OI-39, axiam#883)
+
+- Pin escaped and non-ASCII text through the consumer; correct step references (OI-17 alignment, round 1)
+
+- Align with contract 1.69 §8 (OI-17 alignment, axiam#882, axiam#883)
+
+- Bound JWKS fetches while the endpoint fails; document the non-mandatory publish (OI wave B, round 2)
+
+- Lenient scope claim, JWKS re-fetch cooldown on failure, requester close and confirms, logout guard test (OI wave B, round 1)
+
+- RUS-R1-1..9, no unsigned-authz opt-out, discard event, strict consumer parse (OI-17, #152, axiam#880, axiam#881, axiam#882, axiam#883)
+
+- access-token rules 10-12, roles claim, authz requester (SA-27, N14/N15/N2)
+
+- Adapt to jsonwebtoken 12's fallible EncodingKey::from_secret
 
 ## [1.3.1] - 2026-11-11
 
