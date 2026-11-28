@@ -31,7 +31,9 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::punctuated::Punctuated;
-use syn::{Expr, ExprLit, ExprPath, ItemFn, Lit, Meta, Pat, Token, parse_macro_input};
+use syn::{
+    Expr, ExprLit, ExprPath, FnArg, ItemFn, Lit, Meta, Pat, Token, parse_macro_input, parse_quote,
+};
 
 /// Require an authenticated AXIAM identity on an Actix-Web handler
 /// (CONTRACT.md §11 `require_auth`).
@@ -259,11 +261,11 @@ pub fn require_access(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let extra_inputs = quote! {
-        __axiam_req: ::actix_web::HttpRequest,
-        __axiam_require_access_user: ::axiam_sdk::middleware::AxiamUser,
-        __axiam_client: ::actix_web::web::Data<::axiam_sdk::client::AxiamClient>,
-    };
+    let extra_inputs: Vec<FnArg> = vec![
+        parse_quote!(__axiam_req: ::actix_web::HttpRequest),
+        parse_quote!(__axiam_require_access_user: ::axiam_sdk::middleware::AxiamUser),
+        parse_quote!(__axiam_client: ::actix_web::web::Data<::axiam_sdk::client::AxiamClient>),
+    ];
 
     expand_wrapper(func, extra_inputs, guard)
 }
@@ -324,10 +326,10 @@ pub fn require_role(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let extra_inputs = quote! {
-        __axiam_req: ::actix_web::HttpRequest,
-        __axiam_require_role_user: ::axiam_sdk::middleware::AxiamUser,
-    };
+    let extra_inputs: Vec<FnArg> = vec![
+        parse_quote!(__axiam_req: ::actix_web::HttpRequest),
+        parse_quote!(__axiam_require_role_user: ::axiam_sdk::middleware::AxiamUser),
+    ];
 
     expand_wrapper(func, extra_inputs, guard)
 }
@@ -343,10 +345,13 @@ pub fn require_role(args: TokenStream, item: TokenStream) -> TokenStream {
 /// `403 authorization_denied`. An unauthenticated request is rejected with
 /// `401 authentication_failed` by the injected §10 extractor first.
 ///
+/// To require several scopes, stack the attribute: every one must pass.
+///
 /// ```ignore
 /// use axiam_sdk::require_scope;
 ///
 /// #[require_scope("reports:read")]
+/// #[require_scope("reports:export")]
 /// async fn reports() -> &'static str {
 ///     "report"
 /// }
@@ -388,10 +393,10 @@ pub fn require_scope(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let extra_inputs = quote! {
-        __axiam_req: ::actix_web::HttpRequest,
-        __axiam_require_scope_user: ::axiam_sdk::middleware::AxiamUser,
-    };
+    let extra_inputs: Vec<FnArg> = vec![
+        parse_quote!(__axiam_req: ::actix_web::HttpRequest),
+        parse_quote!(__axiam_require_scope_user: ::axiam_sdk::middleware::AxiamUser),
+    ];
 
     expand_wrapper(func, extra_inputs, guard)
 }
@@ -404,9 +409,14 @@ pub fn require_scope(args: TokenStream, item: TokenStream) -> TokenStream {
 /// and adapts its return value with `Responder::respond_to`. This keeps the
 /// wrapper compatible with any handler whose return type implements
 /// `Responder` (including `Result<T, actix_web::Error>`).
+///
+/// Guards stack (`#[require_scope("a")] #[require_scope("b")]`): the attribute
+/// that runs second sees the first one's wrapper, whose parameters already
+/// include the injected ones. An injected parameter is therefore added only if
+/// no parameter of that name exists, and the guards share it.
 fn expand_wrapper(
     func: ItemFn,
-    extra_inputs: proc_macro2::TokenStream,
+    extra_inputs: Vec<FnArg>,
     guard: proc_macro2::TokenStream,
 ) -> TokenStream {
     let attrs = &func.attrs;
@@ -418,6 +428,7 @@ fn expand_wrapper(
     // Collect the original parameter identifiers to forward to the nested
     // implementation. Only simple `ident: Type` parameters are supported.
     let mut forward = Vec::new();
+    let mut inputs: Vec<&FnArg> = Vec::new();
     for input in orig_inputs.iter() {
         match input {
             syn::FnArg::Receiver(recv) => {
@@ -427,7 +438,10 @@ fn expand_wrapper(
                 );
             }
             syn::FnArg::Typed(pat_type) => match &*pat_type.pat {
-                Pat::Ident(pat_ident) => forward.push(pat_ident.ident.clone()),
+                Pat::Ident(pat_ident) => {
+                    forward.push(pat_ident.ident.clone());
+                    inputs.push(input);
+                }
                 other => {
                     return compile_error_spanned(
                         other,
@@ -446,25 +460,37 @@ fn expand_wrapper(
     };
     let inner_block = &func.block;
 
-    let comma = if orig_inputs.is_empty() {
-        quote! {}
-    } else {
-        quote! {,}
-    };
+    let injected: Vec<&FnArg> = extra_inputs
+        .iter()
+        .filter(|extra| match extra {
+            FnArg::Typed(t) => !matches!(&*t.pat, Pat::Ident(p) if forward.contains(&p.ident)),
+            FnArg::Receiver(_) => true,
+        })
+        .collect();
+    inputs.splice(0..0, injected);
+
+    // A stacked guard forwards the request it still needs for the response.
+    let forward_args: Vec<_> = forward
+        .iter()
+        .map(|id| {
+            if id == "__axiam_req" {
+                quote! { #id.clone() }
+            } else {
+                quote! { #id }
+            }
+        })
+        .collect();
 
     let expanded = quote! {
         #(#attrs)*
-        #vis async fn #name(
-            #extra_inputs
-            #orig_inputs #comma
-        ) -> ::actix_web::HttpResponse {
+        #vis async fn #name(#(#inputs),*) -> ::actix_web::HttpResponse {
             // The original handler, nested so it does not leak into the
             // surrounding namespace.
             #inner_sig #inner_block
 
             #guard
 
-            let __axiam_inner_result = #inner_name(#(#forward),*).await;
+            let __axiam_inner_result = #inner_name(#(#forward_args),*).await;
             ::actix_web::Responder::respond_to(__axiam_inner_result, &__axiam_req)
                 .map_into_boxed_body()
         }

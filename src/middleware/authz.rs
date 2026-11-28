@@ -253,6 +253,7 @@ pub fn require_role_check(user: &AxiamUser, required: &[&str]) -> Result<(), Aut
     let granted = user
         .roles
         .iter()
+        .flatten()
         .any(|held| required.iter().any(|want| held == want));
     if granted {
         Ok(())
@@ -555,7 +556,7 @@ mod tests {
         AxiamUser {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
-            roles: roles.iter().map(|s| s.to_string()).collect(),
+            roles: Some(roles.iter().map(|s| s.to_string()).collect()),
             scopes: Vec::new(),
         }
     }

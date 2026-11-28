@@ -27,6 +27,10 @@ const KID: &str = "n15-kid";
 const TENANT: &str = "3f6b1c8e-0000-4000-8000-0000000000a1";
 
 fn token(scope: &str, roles: Option<Value>) -> String {
+    token_with_scope(json!(scope), roles)
+}
+
+fn token_with_scope(scope: Value, roles: Option<Value>) -> String {
     let mut c = json!({
         "sub": Uuid::new_v4().to_string(),
         "tenant_id": TENANT,
@@ -48,7 +52,7 @@ fn token(scope: &str, roles: Option<Value>) -> String {
     jsonwebtoken::encode(&h, &c, &EncodingKey::from_ed_der(&der)).unwrap()
 }
 
-async fn extract(token: String) -> AxiamUser {
+async fn try_extract(token: String) -> Result<AxiamUser, <AxiamUser as FromRequest>::Error> {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/oauth2/jwks"))
@@ -68,16 +72,18 @@ async fn extract(token: String) -> AxiamUser {
         .insert_header(("Authorization", format!("Bearer {token}")))
         .to_http_request();
     let mut payload = actix_web::dev::Payload::None;
-    AxiamUser::from_request(&req, &mut payload)
-        .await
-        .expect("token verifies")
+    AxiamUser::from_request(&req, &mut payload).await
+}
+
+async fn extract(token: String) -> AxiamUser {
+    try_extract(token).await.expect("token verifies")
 }
 
 #[tokio::test]
 async fn scope_is_never_a_source_of_roles() {
     let user = extract(token("openid admin", None)).await;
-    assert!(
-        user.roles.is_empty(),
+    assert_eq!(
+        user.roles, None,
         "scope `admin` surfaced as the role: {:?}",
         user.roles
     );
@@ -86,5 +92,65 @@ async fn scope_is_never_a_source_of_roles() {
 #[tokio::test]
 async fn roles_come_from_the_roles_claim() {
     let user = extract(token("openid", Some(json!(["admin"])))).await;
-    assert_eq!(user.roles, vec!["admin".to_string()]);
+    assert_eq!(user.roles, Some(vec!["admin".to_string()]));
+}
+
+/// RUS-R1-2 (§11.2 rule 11b): a `roles` claim that is not a JSON array of
+/// strings leaves the token valid -- the caller stays authenticated -- and
+/// every `require_role` answers 403, never a 401 for the whole token.
+#[tokio::test]
+async fn a_malformed_roles_claim_is_a_403_from_require_role_not_a_401() {
+    for malformed in [
+        json!("admin"),
+        json!([1]),
+        json!(["admin", 7]),
+        json!(["admin", null]),
+        json!({"admin": true}),
+        json!(true),
+    ] {
+        let user = try_extract(token("openid", Some(malformed.clone())))
+            .await
+            .unwrap_or_else(|e| panic!("roles {malformed} must not fail verification: {e}"));
+        assert!(
+            axiam_sdk::middleware::require_role_check(&user, &["admin"]).is_err(),
+            "roles {malformed} must fail every require_role"
+        );
+        assert_eq!(user.scopes, ["openid"], "the token stays authenticated");
+    }
+}
+
+/// RUS-R1-1 (§11.2 rule 11b): an absent `roles` claim and `roles: []` stay
+/// distinguishable on the identity, and both fail every `require_role`.
+#[tokio::test]
+async fn absent_roles_claim_is_distinct_from_an_empty_one() {
+    let absent = extract(token("openid", None)).await;
+    let empty = extract(token("openid", Some(json!([])))).await;
+    assert_eq!(absent.roles, None);
+    assert_eq!(empty.roles, Some(vec![]));
+    for user in [&absent, &empty] {
+        assert!(axiam_sdk::middleware::require_role_check(user, &["admin"]).is_err());
+    }
+}
+
+/// RUS-R1-7 (§11.2 rule 11d): scopes are split on single spaces only, so a tab
+/// or newline stays inside its entry and `admin\tx` never reads as `admin`.
+#[tokio::test]
+async fn scopes_are_split_on_single_spaces_only() {
+    let user = extract(token("openid admin\tx  y\nz", None)).await;
+    assert_eq!(user.scopes, ["openid", "admin\tx", "y\nz"]);
+    assert!(axiam_sdk::middleware::require_scope_check(&user, &["admin"]).is_err());
+}
+
+/// RUS-R1-4/L-4 (§11.2 rule 11d): a `scope` claim that is not a string leaves
+/// the token valid and every `require_scope` answers 403, never a 401.
+#[tokio::test]
+async fn a_non_string_scope_claim_is_a_403_from_require_scope_not_a_401() {
+    for malformed in [json!(7), json!(["a", "b"]), json!({"a": 1}), json!(null)] {
+        let user = try_extract(token_with_scope(malformed.clone(), Some(json!(["admin"]))))
+            .await
+            .unwrap_or_else(|e| panic!("scope {malformed} must not fail verification: {e}"));
+        assert!(user.scopes.is_empty(), "scope {malformed}");
+        assert!(axiam_sdk::middleware::require_scope_check(&user, &["a"]).is_err());
+        assert!(axiam_sdk::middleware::require_role_check(&user, &["admin"]).is_ok());
+    }
 }

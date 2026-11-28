@@ -152,12 +152,15 @@ pub struct AxiamUser {
     /// The verified access token's `roles` claim: the names of the subject's
     /// global roles in the tenant (CONTRACT.md §11.2 rule 11, contract 1.68).
     ///
-    /// **Never derived from `scope`.** Empty when the token carries no `roles`
-    /// claim, which makes `require_role` fail closed. The server emits the
-    /// claim only when the client requested, and is allowed, the `roles`
-    /// scope: an application that uses `require_role` must request it.
-    pub roles: Vec<String>,
-    /// The verified access token's `scope` claim, split on whitespace — the
+    /// **Never derived from `scope`.** `None` when the token carries no `roles`
+    /// claim (or one that is not an array of strings), `Some(vec![])` when it
+    /// carries an empty one; the two mean different remedies ("ask for the
+    /// `roles` scope" versus "the user holds no global role"). Both make
+    /// `require_role` fail closed. The server emits the claim only when the
+    /// client requested, and is allowed, the `roles` scope: an application
+    /// that uses `require_role` must request it.
+    pub roles: Option<Vec<String>>,
+    /// The verified access token's `scope` claim, split on single spaces — the
     /// OAuth2 scopes granted to the *client*, which say nothing about the
     /// user's roles. Read by `require_scope`.
     pub scopes: Vec<String>,
@@ -476,14 +479,20 @@ impl actix_web::FromRequest for AxiamUser {
                 AxiamExtractorError::invalid_claim("tenant_id", invalid_token_challenge.clone())
             })?;
             // §11.2 rule 11 (contract 1.68): `roles` is read ONLY from the
-            // token's `roles` claim and is empty (so `require_role` fails
-            // closed) when the claim is absent. It is never derived from
-            // `scope`; scopes go to `scopes` and `require_scope`.
-            let roles = claims.roles.clone().unwrap_or_default();
+            // token's `roles` claim and is `None` (so `require_role` fails
+            // closed) when the claim is absent, kept distinct from an empty
+            // one. It is never derived from `scope`; scopes go to `scopes`
+            // and `require_scope`, split on single spaces (rule 11d).
+            let roles = claims.roles;
             let scopes = claims
                 .scope
                 .as_deref()
-                .map(|s| s.split_whitespace().map(str::to_owned).collect())
+                .map(|s| {
+                    s.split(' ')
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
                 .unwrap_or_default();
 
             Ok(AxiamUser {

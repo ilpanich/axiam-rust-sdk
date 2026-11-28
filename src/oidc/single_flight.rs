@@ -14,6 +14,15 @@
 //! fail `invalid_grant`. Sharing the leader's result is what makes the rule
 //! useful, not an optimization on top of it.
 //!
+//! # Per key, not per client
+//!
+//! There is one slot **per key** — a SHA-256 digest of the resolved tenant and
+//! the refresh token ([`oidc_refresh_key`]) — in a map. Everything below
+//! ("the slot", "empty", "occupied") means *that key's* slot: callers presenting
+//! the same token and tenant form one burst, a caller with a different key never
+//! joins it and runs its own wire call, and a key's entry is removed when it is
+//! vacated.
+//!
 //! # The invariant
 //!
 //! **The in-flight slot is a result-sharing channel, not a busy flag.**
@@ -144,7 +153,11 @@
 //!
 //! [`watch::Receiver::wait_for`]: tokio::sync::watch::Receiver::wait_for
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use tokio::sync::watch;
 
@@ -220,18 +233,46 @@ impl OidcRefreshPublication {
     }
 }
 
-type OidcRefreshSlot = Mutex<Option<Arc<OidcRefreshPublication>>>;
+/// Identity of one refresh burst: a SHA-256 digest of the resolved tenant and
+/// the refresh token (CONTRACT.md §9, per-token single-flight).
+///
+/// The raw token is never a map key, never logged and never in an error; only
+/// this digest is stored.
+pub(crate) type OidcRefreshKey = [u8; 32];
+
+/// Derive the burst key for `refresh_token` redeemed against `tenant_id`.
+///
+/// `tenant_id` is a [`Uuid`], so its spelling (upper- or lower-case, with or
+/// without hyphens) is already gone; the digest input uses the canonical
+/// lower-case hyphenated form, then a `0x00` separator (neither a UUID nor a
+/// base64/opaque token contains it), then the token. `scope` and every other
+/// optional parameter are deliberately not part of the key.
+pub(crate) fn oidc_refresh_key(tenant_id: Uuid, refresh_token: &str) -> OidcRefreshKey {
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.hyphenated().to_string().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(refresh_token.as_bytes());
+    hasher.finalize().into()
+}
+
+/// One slot per key; a key's slot exists only while its burst is live or in
+/// its publish-before-vacate window, so the map cannot grow without bound.
+type OidcRefreshSlot = Mutex<HashMap<OidcRefreshKey, Arc<OidcRefreshPublication>>>;
 
 /// A test-only seam invoked *inside* the publish→retire window — see
 /// [`OidcRefreshInflight::set_after_publish_hook`].
 #[cfg(test)]
 type AfterPublishHook = Arc<dyn Fn(&OidcRefreshInflight) + Send + Sync>;
 
-/// The `oidc_refresh` in-flight slot held by
-/// `AxiamClientInner::oidc_refresh_inflight`. Empty means "no refresh in
-/// flight, and the previous one (if any) has already published its outcome";
-/// occupied means "this is the current burst's shared publication".
+/// The `oidc_refresh` in-flight registry held by
+/// `AxiamClientInner::oidc_refresh_inflight`: one slot **per key** (tenant +
+/// refresh token digest, see [`oidc_refresh_key`]). A key with no entry means
+/// "no refresh in flight for this token, and the previous one (if any) has
+/// already published its outcome"; an entry means "this is that key's current
+/// burst's shared publication". Different keys never share a slot.
 pub(crate) struct OidcRefreshInflight {
+    /// Keyed slots; the lock guards only map operations and is never held
+    /// across a wire call, so different keys' refreshes run concurrently.
     slot: OidcRefreshSlot,
     /// Test-only, and **never set in production**: no production code path
     /// calls [`Self::set_after_publish_hook`], and the field does not even
@@ -308,7 +349,7 @@ impl OidcRefreshInflight {
     /// A slot with no refresh in flight.
     pub(crate) fn new() -> Self {
         Self {
-            slot: Mutex::new(None),
+            slot: Mutex::new(HashMap::new()),
             #[cfg(test)]
             after_publish: Mutex::new(None),
         }
@@ -316,11 +357,11 @@ impl OidcRefreshInflight {
 
     /// Lock the slot, recovering from poisoning rather than panicking.
     ///
-    /// The guarded value is a plain `Option<Arc<_>>` that cannot be left
+    /// The guarded value is a plain map whose entries cannot be left
     /// logically inconsistent by a panic mid-critical-section (both sections
     /// are a single assignment), so `into_inner` is the correct recovery: a
     /// panicking unrelated caller must not permanently disable refreshing.
-    fn lock(&self) -> MutexGuard<'_, Option<Arc<OidcRefreshPublication>>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<OidcRefreshKey, Arc<OidcRefreshPublication>>> {
         self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -331,17 +372,22 @@ impl OidcRefreshInflight {
     /// live/settled/empty table in the module docs. A `Cancelled` publication
     /// is *replaced*, not joined; the cancelled leader's own retire is
     /// identity-checked, so it cannot clear the replacement.
-    pub(crate) fn elect(&self) -> OidcRefreshElection<'_> {
+    ///
+    /// The election is **per key** ([`oidc_refresh_key`]): only a caller
+    /// presenting the same refresh token for the same tenant can join a burst;
+    /// a different key finds its own (empty) slot and leads its own wire call.
+    pub(crate) fn elect(&self, key: OidcRefreshKey) -> OidcRefreshElection<'_> {
         let mut slot = self.lock();
-        if let Some(current) = slot.as_ref()
+        if let Some(current) = slot.get(&key)
             && let Some(rx) = current.subscribe_if_joinable()
         {
             return OidcRefreshElection::Waiter(OidcRefreshWaiter { rx });
         }
         let publication = Arc::new(OidcRefreshPublication::running());
-        *slot = Some(Arc::clone(&publication));
+        slot.insert(key, Arc::clone(&publication));
         OidcRefreshElection::Leader(OidcRefreshLeader {
             inflight: self,
+            key,
             publication: Some(publication),
         })
     }
@@ -352,13 +398,13 @@ impl OidcRefreshInflight {
     /// The identity check is what makes publish-then-retire safe: a leader
     /// whose publication was already replaced in the slot (a cancelled leader
     /// overtaken by the next one) must never clear the current burst's entry.
-    fn retire(&self, mine: &Arc<OidcRefreshPublication>) {
+    fn retire(&self, key: &OidcRefreshKey, mine: &Arc<OidcRefreshPublication>) {
         let mut slot = self.lock();
         if slot
-            .as_ref()
+            .get(key)
             .is_some_and(|current| Arc::ptr_eq(current, mine))
         {
-            *slot = None;
+            slot.remove(key);
         }
     }
 
@@ -401,6 +447,7 @@ impl OidcRefreshInflight {
 /// future was cancelled before it got that far.
 pub(crate) struct OidcRefreshLeader<'a> {
     inflight: &'a OidcRefreshInflight,
+    key: OidcRefreshKey,
     /// `None` once a terminal state has been published, so a terminal state
     /// is published exactly once and `Drop` never contradicts `publish`.
     publication: Option<Arc<OidcRefreshPublication>>,
@@ -433,7 +480,7 @@ impl OidcRefreshLeader<'_> {
         publication.publish(OidcRefreshState::Settled(Box::new(shared)));
         #[cfg(test)]
         self.inflight.run_after_publish_hook();
-        self.inflight.retire(&publication);
+        self.inflight.retire(&self.key, &publication);
     }
 }
 
@@ -448,7 +495,7 @@ impl Drop for OidcRefreshLeader<'_> {
             publication.publish(OidcRefreshState::Cancelled);
             #[cfg(test)]
             self.inflight.run_after_publish_hook();
-            self.inflight.retire(&publication);
+            self.inflight.retire(&self.key, &publication);
         }
     }
 }
@@ -458,6 +505,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    fn key_a() -> OidcRefreshKey {
+        oidc_refresh_key(Uuid::from_u128(1), "token-a")
+    }
 
     fn token_set(access: &str) -> OidcTokenSet {
         OidcTokenSet {
@@ -482,7 +533,7 @@ mod tests {
         wire_calls: &AtomicUsize,
         access: &str,
     ) -> Result<OidcTokenSet, AxiamError> {
-        match inflight.elect() {
+        match inflight.elect(key_a()) {
             OidcRefreshElection::Waiter(waiter) => match waiter.wait().await {
                 Ok(Ok(tokens)) => Ok(tokens),
                 Ok(Err(shared)) => Err(shared.clone_for_waiter()),
@@ -500,28 +551,34 @@ mod tests {
     #[test]
     fn the_first_caller_leads_and_the_next_ones_wait() {
         let inflight = OidcRefreshInflight::new();
-        let leader = match inflight.elect() {
+        let leader = match inflight.elect(key_a()) {
             OidcRefreshElection::Leader(l) => l,
             OidcRefreshElection::Waiter(_) => panic!("first caller must lead"),
         };
         for _ in 0..4 {
-            assert!(matches!(inflight.elect(), OidcRefreshElection::Waiter(_)));
+            assert!(matches!(
+                inflight.elect(key_a()),
+                OidcRefreshElection::Waiter(_)
+            ));
         }
         leader.publish(&Ok(token_set("a")));
         // Slot retired: the next caller leads a fresh burst.
-        assert!(matches!(inflight.elect(), OidcRefreshElection::Leader(_)));
+        assert!(matches!(
+            inflight.elect(key_a()),
+            OidcRefreshElection::Leader(_)
+        ));
     }
 
     #[tokio::test]
     async fn waiters_receive_the_leaders_success() {
         let inflight = OidcRefreshInflight::new();
-        let leader = match inflight.elect() {
+        let leader = match inflight.elect(key_a()) {
             OidcRefreshElection::Leader(l) => l,
             OidcRefreshElection::Waiter(_) => unreachable!(),
         };
         let mut waiters = Vec::new();
         for _ in 0..5 {
-            match inflight.elect() {
+            match inflight.elect(key_a()) {
                 OidcRefreshElection::Waiter(w) => waiters.push(w),
                 OidcRefreshElection::Leader(_) => panic!("only one leader per burst"),
             }
@@ -539,11 +596,11 @@ mod tests {
     #[tokio::test]
     async fn waiters_receive_the_leaders_failure_with_the_oauth_payload_intact() {
         let inflight = OidcRefreshInflight::new();
-        let leader = match inflight.elect() {
+        let leader = match inflight.elect(key_a()) {
             OidcRefreshElection::Leader(l) => l,
             OidcRefreshElection::Waiter(_) => unreachable!(),
         };
-        let waiter = match inflight.elect() {
+        let waiter = match inflight.elect(key_a()) {
             OidcRefreshElection::Waiter(w) => w,
             OidcRefreshElection::Leader(_) => unreachable!(),
         };
@@ -564,11 +621,11 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_leader_frees_the_slot_and_wakes_waiters() {
         let inflight = OidcRefreshInflight::new();
-        let leader = match inflight.elect() {
+        let leader = match inflight.elect(key_a()) {
             OidcRefreshElection::Leader(l) => l,
             OidcRefreshElection::Waiter(_) => unreachable!(),
         };
-        let waiter = match inflight.elect() {
+        let waiter = match inflight.elect(key_a()) {
             OidcRefreshElection::Waiter(w) => w,
             OidcRefreshElection::Leader(_) => unreachable!(),
         };
@@ -578,7 +635,7 @@ mod tests {
             "a waiter must not hang when its leader is cancelled"
         );
         assert!(
-            matches!(inflight.elect(), OidcRefreshElection::Leader(_)),
+            matches!(inflight.elect(key_a()), OidcRefreshElection::Leader(_)),
             "the slot must be free again after a cancelled leader"
         );
     }
@@ -601,7 +658,7 @@ mod tests {
         let stash = Arc::clone(&window_waiter);
         let second_leaders = Arc::clone(&elected_a_second_leader);
         inflight.set_after_publish_hook(Arc::new(move |inflight: &OidcRefreshInflight| {
-            match inflight.elect() {
+            match inflight.elect(key_a()) {
                 OidcRefreshElection::Waiter(w) => {
                     *stash.lock().unwrap() = Some(w);
                 }
@@ -665,7 +722,7 @@ mod tests {
         // a settled publication for later callers to join (that would be a
         // one-entry token cache, which this guard is not).
         assert!(
-            inflight.lock().is_none(),
+            inflight.lock().is_empty(),
             "the leader must vacate the slot before returning"
         );
 
@@ -696,7 +753,7 @@ mod tests {
         let window_election: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&window_election);
         inflight.set_after_publish_hook(Arc::new(move |inflight: &OidcRefreshInflight| {
-            let kind = match inflight.elect() {
+            let kind = match inflight.elect(key_a()) {
                 OidcRefreshElection::Leader(leader) => {
                     // Keep this replacement in the slot: forget the guard's
                     // publication so `Drop` does not immediately retire it,
@@ -709,7 +766,7 @@ mod tests {
             *seen.lock().unwrap() = Some(kind);
         }));
 
-        let leader = match inflight.elect() {
+        let leader = match inflight.elect(key_a()) {
             OidcRefreshElection::Leader(l) => l,
             OidcRefreshElection::Waiter(_) => unreachable!(),
         };
@@ -721,7 +778,7 @@ mod tests {
             "a cancelled publication must never be joined"
         );
         assert!(
-            inflight.lock().is_some(),
+            !inflight.lock().is_empty(),
             "the cancelled leader's retire must not clear the replacement publication"
         );
     }
@@ -747,7 +804,7 @@ mod tests {
             let wire_calls = Arc::clone(&wire_calls);
             let elected = Arc::clone(&elected);
             handles.push(tokio::spawn(async move {
-                let election = inflight.elect();
+                let election = inflight.elect(key_a());
                 elected.fetch_add(1, Ordering::SeqCst);
                 match election {
                     OidcRefreshElection::Waiter(waiter) => waiter
@@ -784,8 +841,83 @@ mod tests {
             "a burst of {BURST} concurrent callers must make exactly one wire call (§9 rules 1+2)"
         );
         assert!(
-            inflight.lock().is_none(),
+            inflight.lock().is_empty(),
             "the slot must be empty once the burst is over"
         );
+    }
+
+    fn key_b() -> OidcRefreshKey {
+        oidc_refresh_key(Uuid::from_u128(1), "token-b")
+    }
+
+    /// A caller with a DIFFERENT key reaching the slot inside A's
+    /// publish->retire window must lead its own burst (its own wire call),
+    /// never join A's just-settled publication (#161). A caller with A's key in
+    /// the same window still joins (see the window test above).
+    #[tokio::test]
+    async fn a_different_key_inside_the_publish_retire_window_leads_its_own_burst() {
+        let inflight = OidcRefreshInflight::new();
+        let kinds: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let seen = Arc::clone(&kinds);
+        inflight.set_after_publish_hook(Arc::new(move |inflight: &OidcRefreshInflight| {
+            let kind = match inflight.elect(key_b()) {
+                OidcRefreshElection::Leader(leader) => {
+                    std::mem::forget(leader);
+                    "leader"
+                }
+                OidcRefreshElection::Waiter(_) => "waiter",
+            };
+            seen.lock().unwrap().push(kind);
+        }));
+        let leader = match inflight.elect(key_a()) {
+            OidcRefreshElection::Leader(l) => l,
+            OidcRefreshElection::Waiter(_) => unreachable!(),
+        };
+        leader.publish(&Ok(token_set("a")));
+        assert_eq!(kinds.lock().unwrap().as_slice(), ["leader"]);
+        // B's slot is still there (forgotten guard); A's was vacated.
+        let slots = inflight.lock();
+        assert!(slots.contains_key(&key_b()));
+        assert!(!slots.contains_key(&key_a()));
+    }
+
+    /// A vacated key leaves no slot behind: the map does not grow with the
+    /// number of distinct tokens ever refreshed.
+    #[test]
+    fn every_vacated_key_removes_its_slot() {
+        let inflight = OidcRefreshInflight::new();
+        for i in 0..50u128 {
+            let key = oidc_refresh_key(Uuid::from_u128(i), "t");
+            match inflight.elect(key) {
+                OidcRefreshElection::Leader(l) => l.publish(&Ok(token_set("x"))),
+                OidcRefreshElection::Waiter(_) => unreachable!(),
+            }
+        }
+        assert!(inflight.lock().is_empty());
+    }
+
+    /// The registry's keys are fixed-size digests: no raw token (or any part
+    /// of it) is stored, and tenant/token boundaries cannot be confused.
+    #[test]
+    fn the_key_is_a_digest_and_holds_no_raw_token() {
+        let token = "super-secret-refresh-token-value";
+        let tenant = Uuid::from_u128(7);
+        let key = oidc_refresh_key(tenant, token);
+        assert_eq!(key.len(), 32);
+        assert!(
+            !key.windows(8)
+                .any(|w| token.as_bytes().windows(8).any(|t| t == w))
+        );
+        assert_ne!(
+            key,
+            oidc_refresh_key(tenant, "super-secret-refresh-token-valuf")
+        );
+        assert_ne!(key, oidc_refresh_key(Uuid::from_u128(8), token));
+
+        let inflight = OidcRefreshInflight::new();
+        let _leader = inflight.elect(key);
+        let slots = inflight.lock();
+        let stored: Vec<_> = slots.keys().collect();
+        assert_eq!(stored, [&key]);
     }
 }

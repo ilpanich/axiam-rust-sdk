@@ -139,6 +139,20 @@ async fn scope_admin_only() -> HttpResponse {
     HttpResponse::Ok().body("scope admin ok")
 }
 
+/// RUS-R1-3: stacked guards require all of them (§11.2 rule 11d).
+#[require_scope("a")]
+#[require_scope("b")]
+async fn scope_a_and_b() -> HttpResponse {
+    HttpResponse::Ok().body("a and b")
+}
+
+#[require_scope("a")]
+#[require_role("admin")]
+#[require_scope("b")]
+async fn scope_a_and_b_and_admin() -> HttpResponse {
+    HttpResponse::Ok().body("a, b and admin")
+}
+
 #[require_role("admin")]
 async fn admin_only() -> HttpResponse {
     HttpResponse::Ok().body("admin ok")
@@ -379,7 +393,7 @@ async fn require_access_check_maps_a_403_authz_response_to_denied() {
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
 
@@ -410,7 +424,7 @@ async fn require_access_check_maps_a_401_authz_response_to_unauthenticated() {
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
 
@@ -599,4 +613,41 @@ async fn missing_client_data_returns_server_error() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert!(resp.status().is_server_error());
+}
+
+/// RUS-R1-3: `#[require_scope]` stacks, and every stacked guard must pass.
+#[tokio::test]
+async fn stacked_require_scope_requires_every_scope() {
+    let server = MockServer::start().await;
+    mount_jwks(&server).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(verifier_for(&server)))
+            .route("/ab", web::get().to(scope_a_and_b))
+            .route("/abr", web::get().to(scope_a_and_b_and_admin)),
+    )
+    .await;
+    let call = |uri: &'static str, scope: &str, roles: Option<&[&str]>| {
+        let token = issue_token_with_roles(Uuid::new_v4(), Some(scope), roles);
+        test::TestRequest::get()
+            .uri(uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+    for (uri, scope, roles, want) in [
+        ("/ab", "a b", None, 200),
+        ("/ab", "a", None, 403),
+        ("/ab", "b", None, 403),
+        ("/abr", "a b", Some(&["admin"][..]), 200),
+        ("/abr", "a b", None, 403),
+        ("/abr", "a", Some(&["admin"][..]), 403),
+    ] {
+        let resp = test::call_service(&app, call(uri, scope, roles)).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            want,
+            "{uri} scope={scope:?} roles={roles:?}"
+        );
+    }
 }

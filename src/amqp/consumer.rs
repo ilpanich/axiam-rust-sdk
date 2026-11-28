@@ -3,8 +3,8 @@
 //! The SDK owns the full ack/nack loop. Every delivery is HMAC-verified
 //! (CONTRACT.md §8) BEFORE the user-supplied handler closure is ever
 //! invoked. On any verification failure (signature mismatch, missing
-//! signature in the default strict mode, or a body that fails to parse as
-//! JSON) the delivery is nacked WITHOUT requeue and a security event is
+//! signature, a body that is not exactly a signed event, or a body that fails
+//! to parse as JSON) the delivery is nacked WITHOUT requeue and a security event is
 //! emitted — the event never contains the received or expected HMAC value.
 //! Only a verified delivery reaches the handler, and only then is it acked.
 //!
@@ -16,11 +16,12 @@
 //! ## NEW-4: v2 replay protection (CONTRACT.md §8 "v2 — Replay Protection")
 //!
 //! As of `key_version = 2` the signed body also carries `nonce` and
-//! `issued_at`. Because verification re-serializes the parsed
-//! `serde_json::Value` (minus `hmac_signature`) in the order the keys
-//! arrived on the wire (SDK-Q01/`preserve_order`), these two fields are
-//! automatically covered by the HMAC with no canonicalization change. Once a
-//! signature verifies, `verify_and_dispatch` applies three additional
+//! `issued_at`, covered by the HMAC. Verification never re-serializes the
+//! delivery (CONTRACT.md §8 step 2): it cuts the trailing
+//! `,"hmac_signature":"<64 hex>"` member from the received bytes, checks that
+//! the members left are those of a signed event type in declaration order, and
+//! verifies the HMAC over exactly those bytes. Once a signature verifies,
+//! `verify_and_dispatch` applies three additional
 //! gates — the SAME nack-without-requeue path as an invalid signature —
 //! before the handler is ever invoked:
 //!   - `key_version` must be `>= 2` (the hard cutover; a v1 message is
@@ -35,13 +36,15 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::StreamExt;
 use lapin::Channel;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
 
+use crate::amqp::authz_requester::{cut_trailing_signature, parse_strict_object};
 use crate::amqp::hmac::verify_payload;
+use crate::amqp::messages::{AuditEventMessage, AuthzRequest};
 use crate::amqp::transport::{AmqpTlsConfig, connect_amqps};
 use crate::error::AxiamError;
 use crate::sensitive::Sensitive;
@@ -62,30 +65,102 @@ pub(crate) const MIN_ACCEPTED_KEY_VERSION: u8 = 2;
 /// parameter.
 pub(crate) const DEFAULT_FRESHNESS_SKEW_SECS: i64 = 300;
 
-/// The v2 replay-protection fields extracted from a body whose HMAC has
-/// already verified. Extraction failing (missing/malformed field) is
-/// itself a rejection cause under the NEW-4 hard cutover — there is no
-/// fallback for a message that omits a mandatory v2 field.
+/// The one signed event type a consumer is configured for (CONTRACT.md §8
+/// protocol step 2c, contract 1.69, D-9).
+///
+/// The two types are signed with one scheme under one tenant subkey, so a
+/// genuine signed audit event replayed onto a queue of authorization requests
+/// passes the signature check; only its layout tells it apart. A consumer is
+/// therefore given the type it consumes and refuses every other layout —
+/// before the HMAC, before decoding — as `malformed`. An application that
+/// consumes both types runs two consumers, each typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    /// [`AuthzRequest`], from `axiam.authz.request`.
+    AuthzRequest,
+    /// [`AuditEventMessage`], from `axiam.audit.events`.
+    AuditEvent,
+}
+
+impl EventType {
+    /// The members this type declares, in order, and whether each is required
+    /// (CONTRACT.md §8 "Exact signed field order").
+    fn layout(self) -> &'static [(&'static str, bool)] {
+        match self {
+            Self::AuthzRequest => &AUTHZ_REQUEST_LAYOUT,
+            Self::AuditEvent => &AUDIT_EVENT_LAYOUT,
+        }
+    }
+
+    /// Decode the verified canonical bytes into this type and return the v2
+    /// replay-protection fields (step 2f). A member of the wrong JSON type, an
+    /// `issued_at` that is not an RFC 3339 timestamp or a `nonce` that is not
+    /// a UUID fails here.
+    fn decode(self, canonical: &[u8]) -> Option<ReplayFields> {
+        match self {
+            Self::AuthzRequest => {
+                let m: AuthzRequest = serde_json::from_slice(canonical).ok()?;
+                Some(ReplayFields {
+                    key_version: m.key_version,
+                    nonce: m.nonce.to_string(),
+                    issued_at: m.issued_at,
+                })
+            }
+            Self::AuditEvent => {
+                let m: AuditEventMessage = serde_json::from_slice(canonical).ok()?;
+                Some(ReplayFields {
+                    key_version: m.key_version,
+                    nonce: m.nonce.to_string(),
+                    issued_at: m.issued_at,
+                })
+            }
+        }
+    }
+}
+
+/// What a consumer is configured with besides its signing key: the tenant whose
+/// subkey it verifies with (named in every discard event, never read from a
+/// body) and the one type it consumes.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsumerTarget<'a> {
+    /// The consumer's own tenant, whose subkey `signing_key` is.
+    pub tenant_id: &'a str,
+    /// The one signed type this consumer consumes.
+    pub event_type: EventType,
+}
+
+/// Why a delivery was discarded: the closed vocabulary of CONTRACT.md §8
+/// protocol rule 4 for an event consumer. Nothing read from the body is ever
+/// attached to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscardReason {
+    Malformed,
+    Unsigned,
+    Signature,
+    KeyVersion,
+    Stale,
+    Replay,
+}
+
+impl DiscardReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Unsigned => "unsigned",
+            Self::Signature => "signature",
+            Self::KeyVersion => "key_version",
+            Self::Stale => "stale",
+            Self::Replay => "replay",
+        }
+    }
+}
+
+/// The v2 replay-protection fields of a body whose HMAC has verified and that
+/// decoded into the configured type.
 struct ReplayFields {
     key_version: u8,
     nonce: String,
     issued_at: DateTime<Utc>,
-}
-
-/// Parse the mandatory NEW-4 fields out of a verified delivery body.
-/// Returns `None` if any of `key_version`/`nonce`/`issued_at` is absent or
-/// not the expected type/format.
-fn extract_replay_fields(body: &serde_json::Value) -> Option<ReplayFields> {
-    let key_version = u8::try_from(body.get("key_version")?.as_u64()?).ok()?;
-    let nonce = body.get("nonce")?.as_str()?.to_owned();
-    let issued_at = DateTime::parse_from_rfc3339(body.get("issued_at")?.as_str()?)
-        .ok()?
-        .with_timezone(&Utc);
-    Some(ReplayFields {
-        key_version,
-        nonce,
-        issued_at,
-    })
 }
 
 /// In-memory nonce-replay guard + `issued_at` freshness gate (NEW-4).
@@ -163,24 +238,21 @@ impl Default for ReplayGuard {
     }
 }
 
-/// Check the NEW-4 replay-protection gates against an already-HMAC-verified
-/// body. `Ok(())` means the message passes all three gates; `Err` carries a
-/// short, HMAC-free reason string suitable for the security-event log.
+/// Apply the NEW-4 gates, in the contract's order (6) `key_version`, (7)
+/// freshness, (8) nonce. The nonce is recorded only when every other gate has
+/// passed, so a message refused at (1)–(7) leaves no nonce behind.
 fn validate_v2_replay_protection(
-    body: &serde_json::Value,
+    fields: &ReplayFields,
     replay: &ReplayGuard,
-) -> Result<(), &'static str> {
-    let fields = extract_replay_fields(body).ok_or(
-        "missing or malformed key_version/nonce/issued_at (NEW-4 v2 fields are mandatory)",
-    )?;
+) -> Result<(), DiscardReason> {
     if fields.key_version < MIN_ACCEPTED_KEY_VERSION {
-        return Err("key_version below the minimum accepted version (NEW-4 hard cutover)");
+        return Err(DiscardReason::KeyVersion);
     }
     if !replay.is_fresh(fields.issued_at, Utc::now()) {
-        return Err("issued_at outside the freshness skew window");
+        return Err(DiscardReason::Stale);
     }
     if !replay.check_and_record_nonce(&fields.nonce) {
-        return Err("nonce already seen (replay)");
+        return Err(DiscardReason::Replay);
     }
     Ok(())
 }
@@ -194,6 +266,11 @@ fn validate_v2_replay_protection(
 pub(crate) trait AckableDelivery {
     /// The raw message payload bytes.
     fn data(&self) -> &[u8];
+    /// The exchange the broker delivered this message from (`""` for the
+    /// default exchange).
+    fn exchange(&self) -> &str;
+    /// The routing key the broker reported for this delivery.
+    fn routing_key(&self) -> &str;
     /// Acknowledge the delivery (message processed successfully).
     fn ack(&self) -> impl Future<Output = ()> + Send;
     /// Negatively acknowledge the delivery. `requeue` MUST be `false` on
@@ -205,6 +282,14 @@ pub(crate) trait AckableDelivery {
 impl AckableDelivery for lapin::message::Delivery {
     fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    fn exchange(&self) -> &str {
+        self.exchange.as_str()
+    }
+
+    fn routing_key(&self) -> &str {
+        self.routing_key.as_str()
     }
 
     async fn ack(&self) {
@@ -222,12 +307,105 @@ impl AckableDelivery for lapin::message::Delivery {
     }
 }
 
-/// Verify a single delivery's HMAC signature (CONTRACT.md §8 steps a-g),
+/// The members each signed event type declares, in order, with whether the
+/// member is required (CONTRACT.md §8 "Exact signed field order"). `hmac_signature`
+/// is not among them: it is cut off before the layout is read.
+const AUTHZ_REQUEST_LAYOUT: [(&str, bool); 9] = [
+    ("correlation_id", true),
+    ("tenant_id", true),
+    ("subject_id", true),
+    ("action", true),
+    ("resource_id", true),
+    ("scope", false),
+    ("key_version", true),
+    ("nonce", true),
+    ("issued_at", true),
+];
+const AUDIT_EVENT_LAYOUT: [(&str, bool); 11] = [
+    ("tenant_id", true),
+    ("actor_id", true),
+    ("actor_type", true),
+    ("action", true),
+    ("resource_id", false),
+    ("outcome", true),
+    ("ip_address", false),
+    ("metadata", false),
+    ("key_version", true),
+    ("nonce", true),
+    ("issued_at", true),
+];
+
+/// Whether `names` are exactly the members of `layout`, in declaration order,
+/// optional members possibly absent and nothing else (step 2c).
+fn matches_layout<'a>(mut names: impl Iterator<Item = &'a str>, layout: &[(&str, bool)]) -> bool {
+    let mut next = names.next();
+    for (name, required) in layout {
+        if next == Some(name) {
+            next = names.next();
+        } else if *required {
+            return false;
+        }
+    }
+    next.is_none()
+}
+
+/// §8 protocol step 2: turn a delivered body into the verified message, or say
+/// why it is refused, with the first reason that applies in rule 4's order:
+/// (1) not one JSON object → `malformed`; (2) no `hmac_signature` member →
+/// `unsigned`; (3) steps 2a–2c, the typed layout check included → `malformed`;
+/// (4) the HMAC → `signature`; (5) the verified bytes do not decode into the
+/// configured type → `malformed`; (6) `key_version`; (7) freshness; (8) replay.
+/// The signature is cut from the received bytes (nothing is re-serialized),
+/// the layout of what is left is checked against the configured type only,
+/// the HMAC is verified over exactly those bytes, and the returned value is
+/// decoded from them.
+fn verified_body(
+    data: &[u8],
+    signing_key: &[u8],
+    event_type: EventType,
+    replay: &ReplayGuard,
+) -> Result<serde_json::Value, DiscardReason> {
+    use DiscardReason::{Malformed, Signature, Unsigned};
+    // (1) 2a: the first byte is `{` (a byte-order mark, whitespace or any other
+    // prefix is refused, never skipped) and the body parses as JSON, trailing
+    // content included. A plain parse: duplicates are position (3).
+    if data.first() != Some(&b'{') {
+        return Err(Malformed);
+    }
+    let Ok(serde_json::Value::Object(plain)) = serde_json::from_slice(data) else {
+        return Err(Malformed);
+    };
+    // (2) no signature member at all, whatever else the body lacks.
+    if !plain.contains_key("hmac_signature") {
+        return Err(Unsigned);
+    }
+    // (3) 2a: unambiguous names; 2b: the body ends in the signature member,
+    // refused, never repaired.
+    parse_strict_object(data).map_err(|_| Malformed)?;
+    let (canonical, signature) = cut_trailing_signature(data).ok_or(Malformed)?;
+    // 2c: the canonical bytes are exactly the configured type, member for
+    // member — before the HMAC, before decoding.
+    let members = parse_strict_object(&canonical).map_err(|_| Malformed)?;
+    if !matches_layout(members.keys().map(String::as_str), event_type.layout()) {
+        return Err(Malformed);
+    }
+    // (4) 2d-2e: constant-time HMAC over the canonical bytes.
+    if !verify_payload(signing_key, &canonical, signature) {
+        return Err(Signature);
+    }
+    // (5) 2f: decode from the verified bytes, then (6)-(8) the v2 gates.
+    let fields = event_type.decode(&canonical).ok_or(Malformed)?;
+    validate_v2_replay_protection(&fields, replay)?;
+    Ok(serde_json::Value::Object(members))
+}
+
+/// Verify a single delivery's HMAC signature (CONTRACT.md §8 step 2a–2g),
 /// then apply the NEW-4 v2 replay-protection gates (`key_version`,
 /// freshness, nonce dedup via `replay`) and, only if everything passes,
 /// invoke `handler` with the parsed body before acking. On any failure the
-/// delivery is nacked without requeue and a security event is emitted
-/// (never containing the HMAC value).
+/// delivery is nacked without requeue and one security event is emitted: the
+/// delivery's exchange and routing key, the consumer's own tenant and a
+/// closed reason (never the HMAC value, a nonce or anything from the body).
 ///
 /// This is the load-bearing, separately-testable unit backing
 /// [`consume`]'s per-message loop — kept generic over [`AckableDelivery`]
@@ -236,6 +414,7 @@ impl AckableDelivery for lapin::message::Delivery {
 pub(crate) async fn verify_and_dispatch<D, F, Fut>(
     delivery: &D,
     signing_key: &[u8],
+    target: &ConsumerTarget<'_>,
     handler: &F,
     replay: &ReplayGuard,
 ) where
@@ -243,97 +422,23 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
     F: Fn(serde_json::Value) -> Fut + Send + Sync,
     Fut: Future<Output = ()> + Send,
 {
-    // Step: parse the body as JSON. A body that fails to deserialize is
-    // nacked without requeue and never reaches the handler.
-    let mut body: serde_json::Value = match serde_json::from_slice(delivery.data()) {
-        Ok(v) => v,
-        Err(_) => {
+    // §8 step 2: verify over the bytes that arrived, never over a re-serialization.
+    let body = match verified_body(delivery.data(), signing_key, target.event_type, replay) {
+        Ok(body) => body,
+        Err(reason) => {
             tracing::warn!(
                 target: "axiam_sdk::security",
-                "AMQP message body failed JSON parse; nacking without requeue"
+                timestamp = %Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+                exchange = %delivery.exchange(),
+                routing_key = %delivery.routing_key(),
+                tenant_id = %target.tenant_id,
+                reason = reason.as_str(),
+                "AMQP message discarded; nacking without requeue"
             );
             delivery.nack(false).await;
             return;
         }
     };
-
-    // Extract hmac_signature, then remove it from the body object before
-    // re-serializing — matches the server's "field set to None before
-    // signing" contract (CONTRACT.md §8.2b).
-    //
-    // Canonicalization contract (SDK-Q01): the server computes the HMAC over
-    // `serde_json::to_vec` of the concrete message struct with
-    // `hmac_signature` omitted, in FIELD-DECLARATION order (e.g. AuthzRequest:
-    // correlation_id, tenant_id, subject_id, action, resource_id, scope,
-    // key_version). To reproduce those exact bytes here we rely on two things:
-    //   1. `serde_json`'s `preserve_order` feature (enabled in Cargo.toml), so
-    //      this `Value`'s object map keeps the order the keys arrived in on the
-    //      wire — which IS the server's declaration order, since the server
-    //      serialized the struct in that order.
-    //   2. `shift_remove` (not `remove`, which is `swap_remove` under
-    //      `preserve_order` and would move the last field into the removed
-    //      slot). `shift_remove` deletes `hmac_signature` while preserving the
-    //      relative order of every remaining field, regardless of where
-    //      `hmac_signature` sat — so the re-serialized bytes are byte-identical
-    //      to what the server signed.
-    // This is exact only when the incoming JSON is what the server emitted
-    // (compact, declaration order); a re-encoded/pretty-printed body would not
-    // match and would (correctly) be rejected as unverifiable.
-    let sig = body
-        .get("hmac_signature")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
-    if let Some(obj) = body.as_object_mut() {
-        obj.shift_remove("hmac_signature");
-    }
-    let canonical = match serde_json::to_vec(&body) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            tracing::warn!(
-                target: "axiam_sdk::security",
-                "AMQP message body failed to re-serialize for verification; nacking without requeue"
-            );
-            delivery.nack(false).await;
-            return;
-        }
-    };
-
-    // Strict mode (default, CONTRACT.md §8.3): a missing signature is
-    // treated as a verification failure, not a pass-through.
-    let verified = match sig {
-        Some(ref s) => verify_payload(signing_key, &canonical, s),
-        None => false,
-    };
-
-    if !verified {
-        // Security event: timestamp (via tracing's own event timestamp),
-        // exchange/routing-key/tenant context would be added by the
-        // connection-level wrapper that has access to `Delivery::exchange`/
-        // `routing_key`; this function logs the fact of the failure only.
-        // The HMAC values (received or expected) are NEVER included.
-        tracing::warn!(
-            target: "axiam_sdk::security",
-            "AMQP HMAC verification failed; nacking without requeue"
-        );
-        delivery.nack(false).await;
-        return;
-    }
-
-    // NEW-4 (CONTRACT.md §8 "v2 — Replay Protection"): a verified signature
-    // is necessary but not sufficient. `nonce`/`issued_at` are already
-    // covered by the HMAC above (no canonicalization change needed — see
-    // the module doc comment), so this is purely acceptance-policy: reject
-    // key_version < 2, a stale/future issued_at, or an already-seen nonce
-    // via the SAME nack-without-requeue path as an invalid signature.
-    if let Err(reason) = validate_v2_replay_protection(&body, replay) {
-        tracing::warn!(
-            target: "axiam_sdk::security",
-            reason,
-            "AMQP v2 replay-protection check failed; nacking without requeue"
-        );
-        delivery.nack(false).await;
-        return;
-    }
 
     handler(body).await;
     delivery.ack().await;
@@ -349,6 +454,20 @@ pub(crate) async fn verify_and_dispatch<D, F, Fut>(
 /// tenant whose queue is being consumed (CONTRACT.md §8.1) — hardcoding a
 /// signing key is prohibited. It is wrapped in [`Sensitive<Vec<u8>>`] so it
 /// can never be logged accidentally.
+///
+/// `target.tenant_id` is the tenant whose subkey `signing_key` is: the consumer's
+/// **own** tenant, named in every discard event and never read from a body.
+/// `target.event_type` is the **one** type this consumer consumes
+/// ([`EventType::AuthzRequest`] or [`EventType::AuditEvent`]); a body with the
+/// other type's layout is refused as `malformed` before the HMAC is computed.
+/// An application that consumes both queues runs two consumers.
+///
+/// Every discard — whatever the reason — is nacked without requeue and logged
+/// as exactly one `warn` event on target `axiam_sdk::security` with the fields
+/// `timestamp`, `exchange`, `routing_key`, `tenant_id` and `reason`
+/// (`malformed`, `unsigned`, `signature`, `key_version`, `stale` or `replay`;
+/// CONTRACT.md §8 protocol rule 4), and never a signature, a nonce, a key or
+/// the body.
 ///
 /// `freshness_skew` overrides the NEW-4 `issued_at` acceptance window
 /// (default `±5 minutes`, i.e. `DEFAULT_FRESHNESS_SKEW_SECS`) — pass
@@ -369,6 +488,7 @@ pub async fn consume<F, Fut>(
     amqp_url: &str,
     queue: &str,
     signing_key: Sensitive<Vec<u8>>,
+    target: ConsumerTarget<'_>,
     freshness_skew: Option<StdDuration>,
     handler: F,
 ) -> Result<(), AxiamError>
@@ -380,6 +500,7 @@ where
         amqp_url,
         queue,
         signing_key,
+        target,
         freshness_skew,
         &AmqpTlsConfig::default(),
         handler,
@@ -400,6 +521,7 @@ pub async fn consume_with_tls<F, Fut>(
     amqp_url: &str,
     queue: &str,
     signing_key: Sensitive<Vec<u8>>,
+    target: ConsumerTarget<'_>,
     freshness_skew: Option<StdDuration>,
     tls: &AmqpTlsConfig,
     handler: F,
@@ -451,6 +573,8 @@ where
         })?;
 
     let key = Arc::new(signing_key);
+    let tenant_id: Arc<str> = Arc::from(target.tenant_id);
+    let event_type = target.event_type;
     let handler = Arc::new(handler);
     // One ReplayGuard shared across every delivery on this consumer, so a
     // nonce observed on one message is remembered for the lifetime of the
@@ -465,11 +589,18 @@ where
     while let Some(delivery_result) = consumer.next().await {
         match delivery_result {
             Ok(delivery) => {
-                let key = Arc::clone(&key);
-                let handler = Arc::clone(&handler);
-                let replay = Arc::clone(&replay);
-                verify_and_dispatch(&delivery, key.expose(), handler.as_ref(), replay.as_ref())
-                    .await;
+                let target = ConsumerTarget {
+                    tenant_id: &tenant_id,
+                    event_type,
+                };
+                verify_and_dispatch(
+                    &delivery,
+                    key.expose(),
+                    &target,
+                    handler.as_ref(),
+                    replay.as_ref(),
+                )
+                .await;
             }
             Err(e) => {
                 tracing::warn!(target: "axiam_sdk::security", error = %e, "AMQP consumer stream error");
@@ -487,6 +618,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::amqp::hmac::sign_payload;
+
+    const CONSUMER_TENANT: &str = "99999999-9999-9999-9999-999999999999";
+    const AUTHZ_TARGET: ConsumerTarget<'static> = ConsumerTarget {
+        tenant_id: CONSUMER_TENANT,
+        event_type: EventType::AuthzRequest,
+    };
+    const AUDIT_TARGET: ConsumerTarget<'static> = ConsumerTarget {
+        tenant_id: CONSUMER_TENANT,
+        event_type: EventType::AuditEvent,
+    };
 
     /// A recording fake delivery: never touches a live broker. Records
     /// whether `ack` or `nack` (and with which `requeue` value) was called,
@@ -516,6 +657,14 @@ mod tests {
             &self.data
         }
 
+        fn exchange(&self) -> &str {
+            "axiam.test.exchange"
+        }
+
+        fn routing_key(&self) -> &str {
+            "axiam.test.routing"
+        }
+
         async fn ack(&self) {
             self.acked.fetch_add(1, Ordering::SeqCst);
         }
@@ -542,13 +691,7 @@ mod tests {
     /// so a sensible, always-fresh default keeps them independent of wall-
     /// clock timing.
     fn v2_body(key_version: u8, nonce: &str, issued_at: DateTime<Utc>) -> serde_json::Value {
-        serde_json::json!({
-            "correlation_id": "00000000-0000-0000-0000-000000000000",
-            "action": "read",
-            "key_version": key_version,
-            "nonce": nonce,
-            "issued_at": issued_at.to_rfc3339(),
-        })
+        serde_json::from_str(&authz_canonical(key_version, nonce, issued_at)).unwrap()
     }
 
     fn make_signed_body_with(
@@ -557,14 +700,10 @@ mod tests {
         issued_at: DateTime<Utc>,
     ) -> (serde_json::Value, Vec<u8>) {
         let key = b"consumer-test-signing-key";
-        let mut body = v2_body(key_version, nonce, issued_at);
-        let canonical = serde_json::to_vec(&body).unwrap();
-        let sig = sign_payload(key, &canonical);
-        body.as_object_mut()
-            .unwrap()
-            .insert("hmac_signature".into(), serde_json::Value::String(sig));
-        let data = serde_json::to_vec(&body).unwrap();
-        (body, data)
+        let canonical = authz_canonical(key_version, nonce, issued_at);
+        let sig = sign_payload(key, canonical.as_bytes());
+        let data = wire_bytes_with_signature(&canonical, &sig);
+        (serde_json::from_slice(&data).unwrap(), data)
     }
 
     fn make_signed_body() -> (serde_json::Value, Vec<u8>) {
@@ -586,7 +725,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
@@ -617,7 +756,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -646,7 +785,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -672,7 +811,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
         assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
@@ -703,7 +842,7 @@ mod tests {
         let replay = ReplayGuard::with_default_skew();
         let handler = |_value: serde_json::Value| async {};
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         let captured = THREAD_EVENTS.with(|events| events.borrow().clone());
         assert!(
@@ -786,7 +925,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -820,7 +959,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -832,37 +971,358 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hmac_signature_not_last_field_still_verifies() {
-        // Robustness of `shift_remove`: even if `hmac_signature` is not the
-        // final key, removing it must preserve the order of the remaining
-        // fields so the canonical bytes are reproduced. Here we place
-        // `hmac_signature` FIRST in the delivered object.
+    async fn hmac_signature_not_last_member_is_refused() {
+        // §8 step 2b: a signature that is not the last member is refused, never
+        // repaired by moving it, even though the HMAC over the rest is valid.
         let key = b"declaration-order-signing-key";
         let canonical = authz_canonical(2, "99999999-9999-9999-9999-999999999999", Utc::now());
         let sig = sign_payload(key, canonical.as_bytes());
-        let canonical_inner = &canonical[1..]; // drop leading '{'
-        let data = format!("{{\"hmac_signature\":\"{sig}\",{canonical_inner}").into_bytes();
+        let data = format!("{{\"hmac_signature\":\"{sig}\",{}", &canonical[1..]).into_bytes();
+        let (calls, delivery) = dispatch(key, data).await;
+        assert!(calls.is_empty(), "the handler must not run");
+        assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 0);
+    }
+
+    // --- #882 pins: verify over what arrived, dispatch what was verified -----
+
+    /// Run `data` through the consumer; return the handler's calls and the
+    /// delivery.
+    async fn dispatch(key: &[u8], data: Vec<u8>) -> (Vec<serde_json::Value>, RecordingDelivery) {
+        dispatch_as(key, data, &AUTHZ_TARGET).await
+    }
+
+    async fn dispatch_as(
+        key: &[u8],
+        data: Vec<u8>,
+        target: &ConsumerTarget<'_>,
+    ) -> (Vec<serde_json::Value>, RecordingDelivery) {
         let delivery = RecordingDelivery::new(data);
         let replay = ReplayGuard::with_default_skew();
-
-        let handler_calls = Arc::new(AtomicUsize::new(0));
-        let handler_calls_clone = Arc::clone(&handler_calls);
-        let handler = move |_value: serde_json::Value| {
-            let calls = Arc::clone(&handler_calls_clone);
-            async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-            }
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let handler = move |value: serde_json::Value| {
+            let sink = Arc::clone(&sink);
+            async move { sink.lock().unwrap().push(value) }
         };
+        verify_and_dispatch(&delivery, key, target, &handler, &replay).await;
+        let calls = seen.lock().unwrap().clone();
+        (calls, delivery)
+    }
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+    #[tokio::test]
+    async fn genuine_message_with_characters_encoders_disagree_on_verifies() {
+        // `<`, `>`, `&`, a non-ASCII character raw (as serde_json writes them)
+        // and a control character as its `\u` escape, which serde_json also
+        // writes: a verifier that re-encoded differently would reject this.
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "12121212-1212-1212-1212-121212121212", Utc::now())
+            .replace("\"read\"", "\"a&b</c>/\u{e9}\u{20ac}\\u0001\"");
+        assert!(canonical.contains("a&b</c>/\u{e9}\u{20ac}\\u0001"));
+        let sig = sign_payload(key, canonical.as_bytes());
+        let (calls, delivery) = dispatch(key, wire_bytes_with_signature(&canonical, &sig)).await;
+        assert_eq!(calls.len(), 1, "a genuine message must verify");
+        assert_eq!(calls[0]["action"], "a&b</c>/\u{e9}\u{20ac}\u{1}");
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
 
+    #[tokio::test]
+    async fn genuine_audit_event_with_escaped_and_non_ascii_text_verifies() {
+        // `action` and a `metadata` value hold `&`, `<`, `>`, a `\u0041` escape of
+        // a printable character and a non-ASCII one; both reach the handler as
+        // exactly `a&b<c>Aé`.
+        let key = b"declaration-order-signing-key";
+        let canonical = format!(
+            concat!(
+                "{{\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
+                "\"actor_id\":\"33333333-3333-3333-3333-333333333333\",",
+                "\"actor_type\":\"User\",\"action\":\"a&b<c>\\u0041\u{e9}\",",
+                "\"outcome\":\"Success\",\"metadata\":{{\"note\":\"a&b<c>\\u0041\u{e9}\"}},",
+                "\"key_version\":2,\"nonce\":\"18181818-1818-1818-1818-181818181818\",",
+                "\"issued_at\":\"{}\"}}"
+            ),
+            Utc::now().to_rfc3339()
+        );
+        let sig = sign_payload(key, canonical.as_bytes());
+        let (calls, delivery) = dispatch_as(
+            key,
+            wire_bytes_with_signature(&canonical, &sig),
+            &AUDIT_TARGET,
+        )
+        .await;
+        assert_eq!(calls.len(), 1, "a genuine message must verify");
+        assert_eq!(calls[0]["action"], "a&b<c>A\u{e9}");
+        assert_eq!(calls[0]["metadata"]["note"], "a&b<c>A\u{e9}");
+        assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn genuine_message_with_floats_big_integers_and_integer_like_keys_verifies() {
+        // An audit event whose `metadata` holds a float `1.0`, an integer above
+        // 2^53 and keys that sort differently as numbers and as strings: a
+        // verifier that re-encoded numbers or re-ordered keys would reject it.
+        let key = b"declaration-order-signing-key";
+        let canonical = format!(
+            concat!(
+                "{{\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",",
+                "\"actor_id\":\"33333333-3333-3333-3333-333333333333\",",
+                "\"actor_type\":\"User\",\"action\":\"user.login\",\"outcome\":\"Success\",",
+                "\"metadata\":{{\"10\":1,\"9\":2,\"ratio\":1.0,\"big\":9007199254740993}},",
+                "\"key_version\":2,\"nonce\":\"14141414-1414-1414-1414-141414141414\",",
+                "\"issued_at\":\"{}\"}}"
+            ),
+            Utc::now().to_rfc3339()
+        );
+        let sig = sign_payload(key, canonical.as_bytes());
+        let (calls, delivery) = dispatch_as(
+            key,
+            wire_bytes_with_signature(&canonical, &sig),
+            &AUDIT_TARGET,
+        )
+        .await;
+        assert_eq!(calls.len(), 1, "a genuine message must verify");
         assert_eq!(
-            handler_calls.load(Ordering::SeqCst),
-            1,
-            "shift_remove must preserve field order regardless of where \
-             hmac_signature sits, so the message still verifies"
+            calls[0]["metadata"]["big"].as_u64(),
+            Some(9_007_199_254_740_993)
         );
         assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_key_or_trailing_content_is_nacked_and_the_handler_never_runs() {
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "13131313-1313-1313-1313-131313131313", Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        let genuine = wire_bytes_with_signature(&canonical, &sig);
+
+        // A duplicate key, signed over what a re-serializing verifier would
+        // have produced (the last value, in the first one's position).
+        let dup_canonical = canonical.replace("\"read\"", "\"write\"");
+        let dup_sig = sign_payload(key, dup_canonical.as_bytes());
+        let dup = wire_bytes_with_signature(
+            &dup_canonical.replace(
+                "\"action\":\"write\"",
+                "\"action\":\"read\",\"action\":\"write\"",
+            ),
+            &dup_sig,
+        );
+        // The same duplicate, signed over the received bytes.
+        let dup_received = wire_bytes_with_signature(
+            &canonical.replace(
+                "\"action\":\"read\"",
+                "\"action\":\"read\",\"action\":\"write\"",
+            ),
+            &sign_payload(
+                key,
+                canonical
+                    .replace(
+                        "\"action\":\"read\"",
+                        "\"action\":\"read\",\"action\":\"write\"",
+                    )
+                    .as_bytes(),
+            ),
+        );
+        let mut trailing_garbage = genuine.clone();
+        trailing_garbage.extend_from_slice(b"x");
+        let mut trailing_object = genuine.clone();
+        trailing_object.extend_from_slice(b"{}");
+
+        for (name, data) in [
+            ("duplicate key, signed over the deduplicated form", dup),
+            (
+                "duplicate key, signed over the received bytes",
+                dup_received,
+            ),
+            ("trailing garbage", trailing_garbage),
+            ("trailing object", trailing_object),
+        ] {
+            let (calls, delivery) = dispatch(key, data).await;
+            assert!(calls.is_empty(), "{name}: the handler must not run");
+            assert_eq!(
+                delivery.nacked_requeue_false.load(Ordering::SeqCst),
+                1,
+                "{name}: nacked without requeue"
+            );
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 0, "{name}");
+        }
+        // The undamaged message still verifies.
+        let (calls, _) = dispatch(key, genuine).await;
+        assert_eq!(calls.len(), 1);
+    }
+
+    // --- contract 1.69 §8 steps 2a-2g: received-bytes verification ----------
+
+    /// The server-produced vectors: the subkey and the parsed fixture.
+    fn vectors() -> (Vec<u8>, serde_json::Value) {
+        let fixture: serde_json::Value = serde_json::from_str(REFERENCE_VECTORS_JSON).unwrap();
+        let subkey = hex::decode(fixture["hkdf"]["derived_subkey_hex"].as_str().unwrap()).unwrap();
+        (subkey, fixture)
+    }
+
+    /// The consumer configured for a fixture vector's own type.
+    fn fixture_target(message_type: &str) -> &'static ConsumerTarget<'static> {
+        if message_type == "authz_request" {
+            &AUTHZ_TARGET
+        } else {
+            &AUDIT_TARGET
+        }
+    }
+
+    /// `dispatch` with a skew wide enough for the fixture's fixed `issued_at`.
+    async fn dispatch_fixture(
+        key: &[u8],
+        data: Vec<u8>,
+        target: &ConsumerTarget<'_>,
+    ) -> (Vec<serde_json::Value>, RecordingDelivery) {
+        let delivery = RecordingDelivery::new(data);
+        let replay = ReplayGuard::new(chrono::Duration::days(3650));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let handler = move |value: serde_json::Value| {
+            let sink = Arc::clone(&sink);
+            async move { sink.lock().unwrap().push(value) }
+        };
+        verify_and_dispatch(&delivery, key, target, &handler, &replay).await;
+        let calls = seen.lock().unwrap().clone();
+        (calls, delivery)
+    }
+
+    #[tokio::test]
+    async fn fixture_wire_json_is_cut_verified_laid_out_and_dispatched() {
+        let (subkey, fixture) = vectors();
+        for message_type in ["authz_request", "audit_event"] {
+            let vector = &fixture[message_type];
+            let wire = vector["wire_json"].as_str().unwrap();
+            let canonical = vector["canonical_signed_json"].as_str().unwrap();
+            let sig = vector["hmac_signature_hex"].as_str().unwrap();
+            let (cut, cut_sig) =
+                crate::amqp::authz_requester::cut_trailing_signature(wire.as_bytes())
+                    .unwrap_or_else(|| panic!("{message_type}: wire_json must cut"));
+            assert_eq!(cut, canonical.as_bytes(), "{message_type}");
+            assert_eq!(cut_sig, sig, "{message_type}");
+
+            let target = fixture_target(message_type);
+            let (calls, delivery) =
+                dispatch_fixture(&subkey, wire.as_bytes().to_vec(), target).await;
+            assert_eq!(calls.len(), 1, "{message_type}: dispatched");
+            // The handler gets the value decoded from the verified canonical bytes.
+            assert_eq!(
+                calls[0],
+                serde_json::from_str::<serde_json::Value>(canonical).unwrap(),
+                "{message_type}"
+            );
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 1, "{message_type}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fixtures_sorted_message_member_is_not_wire_bytes_and_is_refused() {
+        let (subkey, fixture) = vectors();
+        for message_type in ["authz_request", "audit_event"] {
+            let data = serde_json::to_vec(&fixture[message_type]["message"]).unwrap();
+            let target = fixture_target(message_type);
+            let (calls, delivery) = dispatch_fixture(&subkey, data, target).await;
+            assert!(calls.is_empty(), "{message_type}");
+            assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// Every body below is refused: nacked without requeue, handler never runs.
+    async fn assert_all_refused(key: &[u8], cases: Vec<(&str, Vec<u8>)>) {
+        for (name, data) in cases {
+            let (calls, delivery) = dispatch(key, data).await;
+            assert!(calls.is_empty(), "{name}: the handler must not run");
+            assert_eq!(
+                delivery.nacked_requeue_false.load(Ordering::SeqCst),
+                1,
+                "{name}: nacked without requeue"
+            );
+            assert_eq!(
+                delivery.nacked_requeue_true.load(Ordering::SeqCst),
+                0,
+                "{name}"
+            );
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 0, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_or_malformed_envelopes_are_refused() {
+        let key = b"declaration-order-signing-key";
+        let canonical = authz_canonical(2, "15151515-1515-1515-1515-151515151515", Utc::now());
+        let sig = sign_payload(key, canonical.as_bytes());
+        let genuine = wire_bytes_with_signature(&canonical, &sig);
+        let signed = |c: &str| wire_bytes_with_signature(c, &sign_payload(key, c.as_bytes()));
+
+        let mut trailing_ws = genuine.clone();
+        trailing_ws.push(b'\n');
+        let null_sig = format!(
+            "{{{},\"hmac_signature\":null}}",
+            &canonical[1..canonical.len() - 1]
+        );
+        let nested_dup = canonical.replacen(
+            "\"action\":\"read\"",
+            "\"action\":\"read\",\"x\":{\"y\":1,\"y\":2}",
+            1,
+        );
+        // Two top-level names that fold together.
+        let folded = canonical.replacen("\"action\"", "\"ACTION\":\"w\",\"action\"", 1);
+
+        assert_all_refused(
+            key,
+            vec![
+                ("trailing whitespace", trailing_ws),
+                ("hmac_signature null", null_sig.into_bytes()),
+                ("nested duplicate member", signed(&nested_dup)),
+                ("names that fold together", signed(&folded)),
+                ("a bare, unsigned body", canonical.clone().into_bytes()),
+            ],
+        )
+        .await;
+        assert_eq!(dispatch(key, genuine).await.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn layout_violations_are_refused_even_when_validly_signed() {
+        let key = b"declaration-order-signing-key";
+        let now = Utc::now();
+        let canonical = authz_canonical(2, "16161616-1616-1616-1616-161616161616", now);
+        let signed = |c: &str| wire_bytes_with_signature(c, &sign_payload(key, c.as_bytes()));
+
+        // Declared members, wrong order.
+        let reordered = canonical.replacen(
+            "\"correlation_id\":\"11111111-1111-1111-1111-111111111111\",\"tenant_id\":\"22222222-2222-2222-2222-222222222222\"",
+            "\"tenant_id\":\"22222222-2222-2222-2222-222222222222\",\"correlation_id\":\"11111111-1111-1111-1111-111111111111\"",
+            1,
+        );
+        assert_ne!(reordered, canonical);
+        // A member the type does not declare.
+        let extra = canonical.replacen("\"action\"", "\"extra\":1,\"action\"", 1);
+        // A required member missing.
+        let missing = canonical.replacen(
+            "\"subject_id\":\"33333333-3333-3333-3333-333333333333\",",
+            "",
+            1,
+        );
+        // Another signed message type: an AuthzResponse, and a cache-invalidation shape
+        // that does carry valid v2 replay fields.
+        let response = r#"{"correlation_id":"22222222-2222-2222-2222-222222222222","allowed":true,"reason_code":"allowed","tenant_id":"11111111-1111-1111-1111-111111111111","nonce":"55555555-5555-5555-5555-555555555555"}"#;
+        let invalidation = format!(
+            "{{\"event\":\"cache.invalidate\",\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",\"key_version\":2,\"nonce\":\"17171717-1717-1717-1717-171717171717\",\"issued_at\":\"{}\"}}",
+            now.to_rfc3339()
+        );
+
+        assert_all_refused(
+            key,
+            vec![
+                ("reordered members", signed(&reordered)),
+                ("undeclared member", signed(&extra)),
+                ("required member missing", signed(&missing)),
+                ("signed AuthzResponse", signed(response)),
+                ("cache-invalidation shape", signed(&invalidation)),
+            ],
+        )
+        .await;
     }
 
     // --- NEW-4: v2 replay-protection gate tests -----------------------------
@@ -887,7 +1347,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -919,7 +1379,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -950,7 +1410,7 @@ mod tests {
         };
 
         let first_delivery = RecordingDelivery::new(wire_bytes_with_signature(&canonical, &sig));
-        verify_and_dispatch(&first_delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&first_delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
             1,
@@ -960,7 +1420,7 @@ mod tests {
 
         // Replay: identical body + signature, same nonce, delivered again.
         let second_delivery = RecordingDelivery::new(wire_bytes_with_signature(&canonical, &sig));
-        verify_and_dispatch(&second_delivery, key, &handler, &replay).await;
+        verify_and_dispatch(&second_delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -1059,7 +1519,7 @@ mod tests {
             }
         };
 
-        verify_and_dispatch(&delivery, &subkey, &handler, &replay).await;
+        verify_and_dispatch(&delivery, &subkey, &AUTHZ_TARGET, &handler, &replay).await;
 
         assert_eq!(
             handler_calls.load(Ordering::SeqCst),
@@ -1084,6 +1544,10 @@ mod tests {
             "amqp://rabbitmq.example.com:5672",
             "test-queue",
             Sensitive::new(b"irrelevant-signing-key".to_vec()),
+            ConsumerTarget {
+                tenant_id: CONSUMER_TENANT,
+                event_type: EventType::AuthzRequest,
+            },
             None,
             |_value: serde_json::Value| async {},
         )
@@ -1123,6 +1587,10 @@ mod tests {
                 url,
                 "test-queue",
                 Sensitive::new(b"irrelevant-signing-key".to_vec()),
+                ConsumerTarget {
+                    tenant_id: CONSUMER_TENANT,
+                    event_type: EventType::AuthzRequest,
+                },
                 None,
                 |_value: serde_json::Value| async {},
             )
@@ -1149,6 +1617,10 @@ mod tests {
                 url,
                 "test-queue",
                 Sensitive::new(b"irrelevant-signing-key".to_vec()),
+                ConsumerTarget {
+                    tenant_id: CONSUMER_TENANT,
+                    event_type: EventType::AuthzRequest,
+                },
                 None,
                 |_value: serde_json::Value| async {},
             )
@@ -1164,35 +1636,70 @@ mod tests {
     // --- v2 replay-protection field extraction/validation ------------------
 
     #[test]
-    fn extract_replay_fields_none_when_key_version_missing() {
-        let body = serde_json::json!({
-            "nonce": "some-nonce",
-            "issued_at": Utc::now().to_rfc3339(),
-        });
-        assert!(extract_replay_fields(&body).is_none());
+    fn decode_refuses_a_missing_or_ill_typed_v2_member() {
+        let ok = |nonce: &str, issued_at: &str, key_version: &str| {
+            format!(
+                concat!(
+                    "{{\"correlation_id\":\"22222222-2222-2222-2222-222222222222\",",
+                    "\"tenant_id\":\"11111111-1111-1111-1111-111111111111\",",
+                    "\"subject_id\":\"33333333-3333-3333-3333-333333333333\",\"action\":\"read\",",
+                    "\"resource_id\":\"44444444-4444-4444-4444-444444444444\",",
+                    "\"key_version\":{},\"nonce\":\"{}\",\"issued_at\":\"{}\"}}"
+                ),
+                key_version, nonce, issued_at
+            )
+        };
+        let good_nonce = "55555555-5555-5555-5555-555555555555";
+        let good_at = "2026-07-10T12:00:00Z";
+        assert!(
+            EventType::AuthzRequest
+                .decode(ok(good_nonce, good_at, "2").as_bytes())
+                .is_some()
+        );
+        for (what, body) in [
+            ("nonce not a UUID", ok("some-nonce", good_at, "2")),
+            (
+                "issued_at not RFC 3339",
+                ok(good_nonce, "not-a-timestamp", "2"),
+            ),
+            (
+                "key_version wrong JSON type",
+                ok(good_nonce, good_at, "\"2\""),
+            ),
+        ] {
+            assert!(
+                EventType::AuthzRequest.decode(body.as_bytes()).is_none(),
+                "{what}"
+            );
+        }
     }
 
     #[test]
-    fn extract_replay_fields_none_when_issued_at_is_not_rfc3339() {
-        let body = serde_json::json!({
-            "key_version": 2,
-            "nonce": "some-nonce",
-            "issued_at": "not-a-timestamp",
-        });
-        assert!(extract_replay_fields(&body).is_none());
-    }
-
-    #[test]
-    fn validate_v2_replay_protection_rejects_missing_replay_fields() {
-        // A body with a valid signature (irrelevant here — this validates
-        // the acceptance-policy layer directly) but missing the mandatory
-        // NEW-4 fields must be rejected with the "missing or malformed"
-        // reason, not panic or silently pass.
-        let body = serde_json::json!({ "action": "read" });
+    fn gates_apply_in_order_and_record_the_nonce_last() {
         let replay = ReplayGuard::with_default_skew();
-        let result = validate_v2_replay_protection(&body, &replay);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing or malformed"));
+        let fields = |key_version, age_secs: i64| ReplayFields {
+            key_version,
+            nonce: "n-1".into(),
+            issued_at: Utc::now() - chrono::Duration::seconds(age_secs),
+        };
+        // (6) before (7): a v1 message that is also stale is `key_version`.
+        assert_eq!(
+            validate_v2_replay_protection(&fields(1, 100_000), &replay),
+            Err(DiscardReason::KeyVersion)
+        );
+        // (7) before (8), and a stale message leaves no nonce behind.
+        assert_eq!(
+            validate_v2_replay_protection(&fields(2, 100_000), &replay),
+            Err(DiscardReason::Stale)
+        );
+        assert_eq!(
+            validate_v2_replay_protection(&fields(2, 0), &replay),
+            Ok(())
+        );
+        assert_eq!(
+            validate_v2_replay_protection(&fields(2, 0), &replay),
+            Err(DiscardReason::Replay)
+        );
     }
 
     #[test]
@@ -1203,5 +1710,219 @@ mod tests {
         let guard = ReplayGuard::new(chrono::Duration::MAX);
         let ttl = guard.ttl();
         assert!(ttl.as_secs() > 0);
+    }
+
+    // --- contract 1.69 (D-8, D-9, D-10): typed consume, discard event, BOM ---
+
+    /// The `reason`, exchange, routing key and tenant of the single event this
+    /// thread logged, and the whole captured text for exclusion checks.
+    fn one_discard_event() -> (String, String) {
+        let events = THREAD_EVENTS.with(|e| e.borrow().clone());
+        assert_eq!(events.len(), 1, "exactly one event per discard: {events:?}");
+        let text = events[0].clone();
+        (text.clone(), text)
+    }
+
+    fn event_field<'a>(event: &'a str, name: &str) -> &'a str {
+        let marker = format!("{name}=");
+        let start = event
+            .find(&marker)
+            .unwrap_or_else(|| panic!("event has no {name}: {event}"))
+            + marker.len();
+        let rest = &event[start..];
+        rest[..rest.find(' ').unwrap_or(rest.len())].trim_matches('"')
+    }
+
+    /// Flip the last hex digit of the trailing signature.
+    fn with_signature_digit_changed(wire: &str) -> Vec<u8> {
+        let mut bytes = wire.as_bytes().to_vec();
+        let at = bytes.len() - 3; // `...<hex>"}`: the last hex digit
+        bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
+        bytes
+    }
+
+    #[tokio::test]
+    async fn each_vectors_wire_json_is_malformed_for_the_other_types_consumer() {
+        let (subkey, fixture) = vectors();
+        for (message_type, other) in [
+            ("audit_event", &AUTHZ_TARGET),
+            ("authz_request", &AUDIT_TARGET),
+        ] {
+            let wire = fixture[message_type]["wire_json"].as_str().unwrap();
+            for (what, data) in [
+                ("genuine", wire.as_bytes().to_vec()),
+                // The typed check precedes the HMAC: still `malformed`, not `signature`.
+                (
+                    "signature digit changed",
+                    with_signature_digit_changed(wire),
+                ),
+            ] {
+                init_recording_subscriber();
+                let (calls, delivery) = dispatch_fixture(&subkey, data, other).await;
+                assert!(calls.is_empty(), "{message_type} {what}: never handed on");
+                assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+                assert_eq!(delivery.acked.load(Ordering::SeqCst), 0);
+                let (event, _) = one_discard_event();
+                assert_eq!(
+                    event_field(&event, "reason"),
+                    "malformed",
+                    "{message_type} {what}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_discard_event_carries_exchange_routing_key_and_the_configured_tenant_only() {
+        let (subkey, fixture) = vectors();
+        let wire = fixture["audit_event"]["wire_json"].as_str().unwrap();
+        let sig = fixture["audit_event"]["hmac_signature_hex"]
+            .as_str()
+            .unwrap();
+        let nonce = fixture["audit_event"]["message"]["nonce"].as_str().unwrap();
+        let body_tenant = fixture["audit_event"]["message"]["tenant_id"]
+            .as_str()
+            .unwrap();
+        assert_ne!(
+            body_tenant, CONSUMER_TENANT,
+            "the body's tenant is a different one"
+        );
+
+        let unsigned = wire.replace(&format!(",\"hmac_signature\":\"{sig}\""), "");
+        let wrong_sig = with_signature_digit_changed(wire);
+        for (reason, data, target) in [
+            ("malformed", wire.as_bytes().to_vec(), &AUTHZ_TARGET), // typed
+            ("unsigned", unsigned.into_bytes(), &AUDIT_TARGET),
+            ("signature", wrong_sig, &AUDIT_TARGET),
+        ] {
+            init_recording_subscriber();
+            let (calls, _) = dispatch_fixture(&subkey, data, target).await;
+            assert!(calls.is_empty(), "{reason}");
+            let (event, _) = one_discard_event();
+            assert_eq!(event_field(&event, "reason"), reason);
+            assert_eq!(event_field(&event, "exchange"), "axiam.test.exchange");
+            assert_eq!(event_field(&event, "routing_key"), "axiam.test.routing");
+            assert_eq!(event_field(&event, "tenant_id"), CONSUMER_TENANT);
+            assert!(event.contains("timestamp="), "{event}");
+            for (what, secret) in [
+                ("the signature", sig),
+                ("the nonce", nonce),
+                ("the body's tenant", body_tenant),
+            ] {
+                // Name what leaked, never print it: a failure message is a log too.
+                assert!(!event.contains(secret), "{reason}: the event leaks {what}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_byte_order_mark_or_any_prefix_is_malformed_and_the_next_delivery_is_processed() {
+        let (subkey, fixture) = vectors();
+        let key = &subkey[..];
+        for message_type in ["authz_request", "audit_event"] {
+            let wire = fixture[message_type]["wire_json"].as_str().unwrap();
+            let target = fixture_target(message_type);
+            for (what, prefix) in [
+                ("byte-order mark", &b"\xEF\xBB\xBF"[..]),
+                ("space", b" "),
+                ("newline", b"\n"),
+                ("NUL", b"\0"),
+            ] {
+                init_recording_subscriber();
+                let mut data = prefix.to_vec();
+                data.extend_from_slice(wire.as_bytes());
+                let (calls, delivery) = dispatch_fixture(key, data, target).await;
+                assert!(calls.is_empty(), "{message_type} {what}");
+                assert_eq!(delivery.nacked_requeue_false.load(Ordering::SeqCst), 1);
+                let (event, _) = one_discard_event();
+                assert_eq!(event_field(&event, "reason"), "malformed", "{what}");
+            }
+            // The very next delivery is processed.
+            let (calls, delivery) = dispatch_fixture(key, wire.as_bytes().to_vec(), target).await;
+            assert_eq!(calls.len(), 1, "{message_type}: next delivery processed");
+            assert_eq!(delivery.acked.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn arbitrary_bodies_never_panic_and_are_each_one_malformed_or_unsigned_event() {
+        let key = b"consumer-test-signing-key";
+        let deep = format!("{{\"a\":{}1{}}}", "[".repeat(100_000), "]".repeat(100_000));
+        let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+            ("empty", vec![], "malformed"),
+            ("not UTF-8", vec![b'{', 0xFF, 0xFE, b'}'], "malformed"),
+            ("lone brace", b"{".to_vec(), "malformed"),
+            ("array", b"[1]".to_vec(), "malformed"),
+            ("deep nesting", deep.into_bytes(), "malformed"),
+            (
+                "object without signature",
+                br#"{"a":1}"#.to_vec(),
+                "unsigned",
+            ),
+            // `unsigned` is position (2): it wins over a missing layout.
+            ("empty object", b"{}".to_vec(), "unsigned"),
+            (
+                "null signature",
+                br#"{"hmac_signature":null}"#.to_vec(),
+                "malformed",
+            ),
+        ];
+        for (what, data, reason) in cases {
+            init_recording_subscriber();
+            let (calls, delivery) = dispatch(key, data).await;
+            assert!(calls.is_empty(), "{what}");
+            assert_eq!(
+                delivery.nacked_requeue_false.load(Ordering::SeqCst),
+                1,
+                "{what}"
+            );
+            let (event, _) = one_discard_event();
+            assert_eq!(event_field(&event, "reason"), reason, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_event_reasons_follow_the_normative_order() {
+        let key = b"consumer-test-signing-key";
+        let fresh = Utc::now();
+        let stale = fresh - chrono::Duration::hours(2);
+        let nonce = "66666666-6666-6666-6666-666666666666";
+        let sign = |canonical: String| {
+            let sig = sign_payload(key, canonical.as_bytes());
+            wire_bytes_with_signature(&canonical, &sig)
+        };
+        // (5) decode failure after a good HMAC: the nonce is not a UUID.
+        let undecodable = sign(authz_canonical(2, "not-a-uuid", fresh));
+        // (6) wins over (7): v1 and stale.
+        let v1_and_stale = sign(authz_canonical(1, nonce, stale));
+        // (7)
+        let stale_only = sign(authz_canonical(2, nonce, stale));
+        // (8): same body twice on one guard.
+        let replayed = sign(authz_canonical(2, nonce, fresh));
+        let replay = ReplayGuard::with_default_skew();
+        let handler = |_v: serde_json::Value| async {};
+        for (reason, data) in [
+            ("malformed", undecodable),
+            ("key_version", v1_and_stale),
+            ("stale", stale_only.clone()),
+            ("stale", stale_only), // a stale message left no nonce behind
+            ("replay", replayed.clone()),
+        ] {
+            if reason == "replay" {
+                let accepted = RecordingDelivery::new(data.clone());
+                verify_and_dispatch(&accepted, key, &AUTHZ_TARGET, &handler, &replay).await;
+                assert_eq!(accepted.acked.load(Ordering::SeqCst), 1);
+            }
+            init_recording_subscriber();
+            let delivery = RecordingDelivery::new(data);
+            verify_and_dispatch(&delivery, key, &AUTHZ_TARGET, &handler, &replay).await;
+            assert_eq!(
+                delivery.nacked_requeue_false.load(Ordering::SeqCst),
+                1,
+                "{reason}"
+            );
+            let (event, _) = one_discard_event();
+            assert_eq!(event_field(&event, "reason"), reason);
+        }
     }
 }

@@ -355,7 +355,7 @@ async fn a_no_grant_denial_on_a_scoped_route_answers_vector_3_body_unchanged() {
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
 
@@ -396,7 +396,7 @@ async fn names_the_scope_the_route_asked_for_verbatim() {
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
 
@@ -419,7 +419,7 @@ async fn carries_no_challenge_on_denied_by_rule_an_absent_reason_code_or_no_scop
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
     let verifier = mcp_only_verifier();
@@ -495,7 +495,7 @@ async fn touches_no_other_response_an_allow_gains_nothing() {
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
 
@@ -636,7 +636,7 @@ async fn emits_no_www_authenticate_on_any_response_when_resource_metadata_url_is
     let user = AxiamUser {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
-        roles: vec![],
+        roles: None,
         scopes: vec![],
     };
     // No `.with_resource_metadata_url(...)` call at all: §28 stays off.

@@ -22,10 +22,13 @@ use axiam_sdk::client::AxiamClient;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use serde_json::{Value, json};
+#[cfg(feature = "opaque")]
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+#[cfg(feature = "opaque")]
+use wiremock::{Request, Respond};
 
 // Same fixed Ed25519 keypair the other REST tests use, so a login's access
 // token verifies against a JWKS this file serves.
@@ -269,10 +272,12 @@ async fn reachable_tenant_ids_narrows_an_organization_level_principal() {
 /// Captures the `register/start` body, then refuses, because the tenant the
 /// body names is the whole assertion — the OPAQUE exchange beyond it is
 /// covered by `opaque_login_test.rs`.
+#[cfg(feature = "opaque")]
 struct CaptureRegisterStart {
     seen: Arc<Mutex<Option<Value>>>,
 }
 
+#[cfg(feature = "opaque")]
 impl Respond for CaptureRegisterStart {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&request.body).expect("json body");
@@ -283,6 +288,7 @@ impl Respond for CaptureRegisterStart {
     }
 }
 
+#[cfg(feature = "opaque")]
 async fn capture_enrollment_body(
     for_self: bool,
     user_extra: Value,
@@ -319,6 +325,7 @@ async fn capture_enrollment_body(
 
 /// Creating **another** account seals against the tenant being acted on — the
 /// tenant that account is created in.
+#[cfg(feature = "opaque")]
 #[tokio::test]
 async fn opaque_enrollment_seals_against_the_acting_tenant() {
     let (body, _server, _client) = capture_enrollment_body(
@@ -341,6 +348,7 @@ async fn opaque_enrollment_seals_against_the_acting_tenant() {
 /// The caller's **own** password change seals against the tenant the account
 /// lives in. A record sealed against the acting tenant is refused with "the
 /// OPAQUE session was issued for a different tenant".
+#[cfg(feature = "opaque")]
 #[tokio::test]
 async fn opaque_enrollment_for_self_seals_against_the_principal_tenant() {
     let principal = Uuid::new_v4();
@@ -369,6 +377,7 @@ async fn opaque_enrollment_for_self_seals_against_the_principal_tenant() {
 /// Before a login there is no principal tenant to seal against, and guessing
 /// the acting one is exactly the bug this method exists to prevent — so it
 /// refuses rather than falling back.
+#[cfg(feature = "opaque")]
 #[tokio::test]
 async fn opaque_enrollment_for_self_refuses_before_a_login() {
     let mock_server = MockServer::start().await;

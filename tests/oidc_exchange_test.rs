@@ -296,6 +296,43 @@ async fn preserves_unknown_id_token_claims() {
     assert_eq!(claims.extra.get("custom_org_tier").unwrap(), "gold");
 }
 
+/// Contract 1.69 (§12.7.6): §10.1 rules 10 (`typ`) and 11 (`purpose`) stay off
+/// the ID-token path. An ID token has `typ: JWT`, which the access-token
+/// guard refuses, and a `purpose` claim, which it refuses too; the §12.4
+/// verifier accepts both.
+#[tokio::test]
+async fn access_token_rules_10_and_11_do_not_apply_to_an_id_token() {
+    let mock_server = MockServer::start().await;
+    let key = oidc_support::generate_signing_key("rp-kid-rules");
+    let id_token = oidc_support::sign_id_token(
+        &key,
+        IdTokenOptions {
+            nonce: Some(Some(NONCE)),
+            extra_claims: vec![("purpose".to_string(), json!("mfa_challenge"))],
+            ..Default::default()
+        },
+    );
+    mount_discovery(&mock_server).await;
+    mount_jwks(&mock_server, vec![&key]).await;
+    mount_token(
+        &mock_server,
+        oidc_support::token_response(json!({ "id_token": id_token })),
+    )
+    .await;
+
+    oidc_support::build_client(&mock_server.uri(), true)
+        .oidc_exchange(OidcExchangeParams {
+            code: CODE.into(),
+            code_verifier: Sensitive::new("v".into()),
+            redirect_uri: oidc_support::REDIRECT_URI.into(),
+            nonce: NONCE.into(),
+            tenant_id: None,
+            configuration: None,
+        })
+        .await
+        .expect("an ID token with typ JWT and a purpose claim verifies as an ID token");
+}
+
 // ---------------------------------------------------------------------------
 // §12.4 ID-token validation failures
 // ---------------------------------------------------------------------------

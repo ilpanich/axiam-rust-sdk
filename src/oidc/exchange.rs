@@ -763,9 +763,13 @@ impl AxiamClient {
     ///
     /// # Concurrency (CONTRACT.md §9)
     ///
-    /// A burst of N concurrent calls produces **exactly one**
-    /// `POST /oauth2/token` and every one of the N callers receives that one
-    /// call's outcome — the same [`OidcTokenSet`] on success, an equivalent
+    /// The single-flight is keyed **per refresh token** (and resolved tenant):
+    /// calls presenting a different token never join this burst and run their
+    /// own wire call concurrently.
+    ///
+    /// A burst of N concurrent calls with the same token produces **exactly
+    /// one** `POST /oauth2/token` and every one of the N callers receives that
+    /// one call's outcome — the same [`OidcTokenSet`] on success, an equivalent
     /// error (same variant, same `oauth` payload, same `reason`) on failure.
     /// This is §9 rule 2's observable requirement, and it is not optional:
     /// AXIAM refresh tokens are single-use with rotation, so N independent
@@ -779,9 +783,22 @@ impl AxiamClient {
     ) -> Result<OidcTokenSet, AxiamError> {
         use super::single_flight::{OidcRefreshCancelled, OidcRefreshElection};
 
-        // §9 rules 1 + 2: elect one leader per burst; everyone else waits for
-        // the leader's outcome and issues no wire call of its own.
-        let leader = match self.oidc_refresh_election() {
+        // Resolve the tenant ONCE, before the guard (§12.3 rule 4): the same
+        // value keys the burst and goes on the wire, so a login or tenant
+        // switch in between cannot give the key one tenant and the request
+        // another. An unresolvable tenant fails here: no slot, no discovery
+        // fetch, no token call.
+        let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
+        let key = super::single_flight::oidc_refresh_key(
+            tenant_id,
+            params.refresh_token.expose().as_str(),
+        );
+
+        // §9 rules 1 + 2, per refresh token: elect one leader per key (token +
+        // tenant); a caller with the same key waits for the leader's outcome
+        // and issues no wire call of its own, a caller with a different key
+        // leads its own call and never receives another grant's token set.
+        let leader = match self.oidc_refresh_election(key) {
             OidcRefreshElection::Waiter(waiter) => {
                 return match waiter.wait().await {
                     Ok(Ok(tokens)) => Ok(tokens),
@@ -798,7 +815,7 @@ impl AxiamClient {
             OidcRefreshElection::Leader(leader) => leader,
         };
 
-        let result = self.oidc_refresh_wire_call(params).await;
+        let result = self.oidc_refresh_wire_call(params, tenant_id).await;
         leader.publish(&result);
         result
     }
@@ -808,12 +825,12 @@ impl AxiamClient {
     async fn oidc_refresh_wire_call(
         &self,
         params: OidcRefreshParams,
+        tenant_id: Uuid,
     ) -> Result<OidcTokenSet, AxiamError> {
         let configuration = match params.configuration {
             Some(c) => c,
             None => self.oidc_discover().await?,
         };
-        let tenant_id = self.resolve_oidc_tenant_id(params.tenant_id).await?;
         let client_id = self.oidc_client_id_or_err()?.to_string();
         let client_secret = self.oidc_client_secret().map(|s| s.expose().clone());
 

@@ -1282,8 +1282,9 @@ impl AxiamClient {
     /// instance rather than the §1 cookie-session refresh guard.
     pub(crate) fn oidc_refresh_election(
         &self,
+        key: crate::oidc::single_flight::OidcRefreshKey,
     ) -> crate::oidc::single_flight::OidcRefreshElection<'_> {
-        self.inner.oidc_refresh_inflight.elect()
+        self.inner.oidc_refresh_inflight.elect(key)
     }
 
     /// Read the latest captured CSRF token, if any (§3).
@@ -1329,6 +1330,9 @@ impl AxiamClient {
 
     /// The tenant the signed-in principal's record lives in — CONTRACT.md
     /// §5.2.2. `None` until a login has reported one.
+    ///
+    /// Only the OPAQUE login path reads it, so it exists only with `opaque`.
+    #[cfg(feature = "opaque")]
     pub(crate) fn resolved_principal_tenant_id(&self) -> Option<Uuid> {
         self.inner
             .resolved_principal_tenant_id
